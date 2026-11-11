@@ -166,6 +166,54 @@ class ParagraphCoverageTests(unittest.TestCase):
 
 
 class RelatedPageTests(unittest.TestCase):
+    def test_repeated_navigation_cannot_evict_a_later_search_evidence_page(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        text = "Исследователь внимательно изучил старинные чертежи большой обсерватории перед поездкой."
+        urls = [f"https://source.test/page{i}" for i in range(12)]
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": url} for url in urls]
+        class Pages:
+            def __init__(self): self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                return {"url": url, "text": text if url == urls[9] else
+                        "Здесь находятся сведения о площади здания и контактах администрации.",
+                        "links": [{"url": url.replace("page", "extra"), "text": "Обсерватории"}]
+                        if url in urls[:4] else []}
+        pages = Pages()
+        report = run(text, searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertIn(urls[9], pages.calls)
+        self.assertEqual(len(pages.calls), 12)
+        self.assertEqual(report["stats"]["matched_words"], len(_tokens(text)))
+        self.assertEqual(report["web"]["priority_link_replacements"], 1)
+        self.assertEqual(len(report["web"]["link_discoveries"]), 1)
+
+    def test_two_linked_sources_remain_available_when_queue_has_free_capacity(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        first = "Исследователь внимательно изучил старинные чертежи большой обсерватории перед поездкой"
+        second = "Редактор подготовил подробное описание необычного опыта для будущей публикации"
+        text = first + ". " + second + "."
+        parents = ["https://one.test/start", "https://two.test/start"]
+        children = [url.replace("start", "article") for url in parents]
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": url} for url in parents]
+        class Pages:
+            def __init__(self): self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                if url in children:
+                    return {"url": url, "text": (first, second)[children.index(url)]}
+                index = parents.index(url)
+                return {"url": url, "text": "В справочнике указаны адрес здания и контакты администрации.",
+                        "links": [{"url": children[index], "text": ("Обсерватории", "Публикации")[index]}]}
+        pages = Pages()
+        report = run(text, searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertEqual(pages.calls, parents + children)
+        self.assertEqual(report["stats"]["matched_words"], len(_tokens(text)))
+        self.assertEqual(report["web"]["priority_link_replacements"], 0)
+
     def test_follows_one_relevant_link_and_counts_it_inside_page_budget(self):
         from plagiarism.web_search import CITATION_STRATEGY
         text = "Исследователь внимательно изучил старинные чертежи большой обсерватории."
@@ -191,6 +239,39 @@ class RelatedPageTests(unittest.TestCase):
         self.assertEqual(report["web"]["search_urls_discovered"], 1)
         self.assertEqual(report["web"]["linked_urls_discovered"], 1)
         self.assertEqual(report["web"]["urls_found"], 2)
+
+    def test_productive_link_renews_a_slot_for_another_source_in_a_full_queue(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        first = "Исследователь внимательно изучил старинные чертежи большой обсерватории перед поездкой"
+        second = "Редактор подготовил подробное описание необычного опыта для будущей публикации"
+        text = first + ". " + second + ". " + "Архив содержит отдельные сведения о часах работы здания. " * 20
+        parents = ["https://one.test/start", "https://two.test/start"]
+        children = [url.replace("start", "article") for url in parents]
+        urls = parents + [f"https://noise{i}.test/page" for i in range(10)]
+        class Search:
+            def __init__(self): self.calls = 0
+            def search(self, query, request_id):
+                start = self.calls * 5
+                self.calls += 1
+                return [{"url": url} for url in urls[start:start + 5]]
+        class Pages:
+            def __init__(self): self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                if url in children:
+                    return {"url": url, "text": (first, second)[children.index(url)]}
+                links = []
+                if url in parents:
+                    index = parents.index(url)
+                    links = [{"url": children[index], "text": ("Обсерватории", "Публикации")[index]}]
+                return {"url": url, "text": "В справочнике указаны адрес здания и контакты администрации.", "links": links}
+        pages = Pages()
+        report = run(text, searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertTrue(set(children).issubset(pages.calls))
+        self.assertEqual(len(pages.calls), 12)
+        self.assertEqual(report["stats"]["matched_words"], len(_tokens(first + " " + second)))
+        self.assertEqual(report["web"]["priority_link_replacements"], 2)
+        self.assertEqual(report["web"]["priority_link_budget_remaining"], 1)
 
     def test_link_discovery_cannot_exceed_twelve_loads(self):
         from plagiarism.web_search import CITATION_STRATEGY

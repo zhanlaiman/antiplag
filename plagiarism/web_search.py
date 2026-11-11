@@ -28,6 +28,7 @@ from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY, analyze_with_
 ROOT = Path(__file__).resolve().parent.parent
 MAX_QUERIES = 6
 MAX_URLS = 12
+SOURCE_FOLLOWUP_POLICY = "productive-priority-v1"
 QUERY_STRATEGY = "uniform-quoted-v1"
 DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
 HYBRID_STRATEGY = "hybrid-paragraph-v1"
@@ -541,6 +542,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     urls_attempted = 0
     attempted_urls = []
     link_discoveries, linked_urls = [], set()
+    priority_link_replacements = 0
+    priority_link_credit, priority_link_urls = 1, set()
     confirmed_matches, fully_covered = [], False
     for index, url in enumerate(ordered):
         if progress:
@@ -572,6 +575,14 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
             if fetched.get("content_type") == "application/pdf" and isinstance(fetched.get("optional_status"), dict):
                 optional_pdf_status.append({**{key: fetched["optional_status"][key]
                     for key in ("engine", "status", "code", "reason") if key in fetched["optional_status"]}, "url": final})
+            if url in linked_urls:
+                previous_link_words = _word_coverage(text, confirmed_matches)["matched_words"]
+                linked_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
+                confirmed_matches.extend(linked_matches)
+                linked_coverage = _word_coverage(text, confirmed_matches)
+                if url in priority_link_urls and linked_coverage["matched_words"] > previous_link_words:
+                    priority_link_credit = 1
+                fully_covered = linked_coverage["matched_words"] == linked_coverage["total_words"]
             if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and not fully_covered:
                 page_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
                 confirmed_matches.extend(page_matches)
@@ -580,6 +591,11 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 related = _related_link(fetched, text, seen | final_urls)
                 if related and not fully_covered and not _word_coverage(text, page_matches)["matched_words"]:
                     if len(ordered) >= MAX_URLS:
+                        # A priority slot is renewed only after the previous
+                        # linked page adds novel exact evidence. Failed or
+                        # unproductive navigation cannot consume the tail.
+                        if priority_link_credit < 1:
+                            continue
                         # A full initial queue must not disable a relevant
                         # source link. Replace an unread search result while
                         # retaining the same twelve-load ceiling.
@@ -587,6 +603,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                         if not replaceable:
                             continue
                         displaced = ordered.pop(replaceable[-1])
+                        priority_link_replacements += 1
+                        priority_link_credit -= 1
+                        priority_link_urls.add(related)
                         skipped_urls.append(displaced)
                         outside_limit += 1
                         limit_error = next((e for e in errors if e["code"] == "url_limit_reached"), None)
@@ -630,6 +649,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "urls_discovered": discovered + len(link_discoveries),
         "search_urls_discovered": discovered, "linked_urls_discovered": len(link_discoveries),
         "link_discoveries": link_discoveries,
+        "priority_link_replacements": priority_link_replacements,
+        "source_followup_policy": SOURCE_FOLLOWUP_POLICY,
+        "priority_link_budget_remaining": priority_link_credit,
         "discovered_urls": list(dict.fromkeys(urls[:30] + [link["url"] for link in link_discoveries])),
         "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
