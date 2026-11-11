@@ -155,6 +155,10 @@ class RelatedPageTests(unittest.TestCase):
         self.assertEqual(report["web"]["urls_attempted"], 2)
         self.assertEqual(report["stats"]["matched_words"], len(_tokens(text)))
         self.assertEqual(report["web"]["link_discoveries"][0]["parent_url"], first)
+        self.assertEqual(report["web"]["urls_discovered"], 2)
+        self.assertEqual(report["web"]["search_urls_discovered"], 1)
+        self.assertEqual(report["web"]["linked_urls_discovered"], 1)
+        self.assertEqual(report["web"]["urls_found"], 2)
 
     def test_link_discovery_cannot_exceed_twelve_loads(self):
         from plagiarism.web_search import CITATION_STRATEGY
@@ -173,6 +177,25 @@ class RelatedPageTests(unittest.TestCase):
                      fetcher=pages, query_strategy=CITATION_STRATEGY)
         self.assertEqual(len(pages.calls), 12)
         self.assertEqual(report["web"]["link_discoveries"], [])
+
+    def test_full_document_match_prevents_unnecessary_related_page_loads(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        text = "Исследователь внимательно изучил старинные чертежи большой обсерватории."
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": "https://source.test/original"}, {"url": "https://source.test/other"}]
+        class Pages:
+            def __init__(self):
+                self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                return {"url": url, "text": text if url.endswith("original") else "На странице приведены сведения о часах работы.",
+                        "links": [{"url": "https://source.test/shop", "text": "Чертежи обсерватории"}]}
+        pages = Pages()
+        report = run(text, searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertEqual(len(pages.calls), 2)
+        self.assertEqual(report["web"]["link_discoveries"], [])
+        self.assertEqual(report["stats"]["matched_words"], len(_tokens(text)))
 
     def test_hidden_and_navigation_links_are_excluded_from_source_candidates(self):
         from plagiarism.web_fetch import _TextExtractor

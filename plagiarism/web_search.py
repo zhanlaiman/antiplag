@@ -422,6 +422,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     urls_attempted = 0
     attempted_urls = []
     link_discoveries, linked_urls = [], set()
+    confirmed_matches, fully_covered = [], False
     for index, url in enumerate(ordered):
         if progress:
             progress("Сверяем доступные страницы", index, len(ordered), phase="web_fetch")
@@ -447,9 +448,13 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                                 "origin": "web_fetch", "fetched_at": fetched.get("fetched_at"),
                                 "text_sha256": sha256(fetched["text"].encode()).hexdigest(),
                                 "license_status": "not_verified", "training_consent": False}})
-            if query_strategy == CITATION_STRATEGY and url not in linked_urls and len(ordered) < MAX_URLS:
+            if query_strategy == CITATION_STRATEGY and url not in linked_urls and len(ordered) < MAX_URLS and not fully_covered:
+                page_matches = analyze(text, [sources[-1]])["matches"]
+                confirmed_matches.extend(page_matches)
+                coverage = _word_coverage(text, confirmed_matches)
+                fully_covered = coverage["matched_words"] == coverage["total_words"]
                 related = _related_link(fetched, text, seen | final_urls)
-                if related and not _word_coverage(text, analyze(text, [sources[-1]])["matches"])["matched_words"]:
+                if related and not fully_covered and not _word_coverage(text, page_matches)["matched_words"]:
                     seen.add(related)
                     urls.append(related)
                     ordered.append(related)
@@ -478,7 +483,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "queries_planned": len(queries), "queries_attempted": queries_attempted, "queries_completed": queries_completed,
         "queries_unattempted": queries_unattempted, "query_stop_code": stopped_code,
         "query_spans": [{"start": item["start"], "end": item["end"]} for item in queries],
-        "urls_found": len(urls) + len(rejected_urls), "urls_supported": len(urls), "urls_discovered": discovered,
+        "urls_found": len(urls) + len(rejected_urls), "urls_supported": len(urls),
+        "urls_discovered": discovered + len(link_discoveries),
+        "search_urls_discovered": discovered, "linked_urls_discovered": len(link_discoveries),
         "link_discoveries": link_discoveries, "discovered_urls": urls[:30], "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
         "urls_outside_limit": outside_limit, "urls_rejected": rejected_urls, "errors": errors,
