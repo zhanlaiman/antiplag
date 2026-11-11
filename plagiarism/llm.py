@@ -14,7 +14,7 @@ from plagiarism.matching import normalize
 
 
 DEFAULT_MODEL = "qwen3:4b"
-JUDGE_VERSION = "sentence-selection-v4-exact-validation"
+JUDGE_VERSION = "sentence-selection-v5-literal-availability"
 MAX_PASSAGE_LENGTH = 12000
 MAX_RESPONSE_BYTES = 2_000_000
 RELATIONS = ("exact", "paraphrase", "same_topic", "unrelated")
@@ -214,11 +214,11 @@ def _segments(text, prefix):
     return segments
 
 
-def _validate_judgment(result, text, source_text, text_spans, source_spans):
+def _validate_judgment(result, text, source_text, text_spans, source_spans, allowed_relations=RELATIONS):
     for field in JUDGMENT_SCHEMA["required"]:
         if not isinstance(result.get(field), str):
             raise OllamaError("Модель пропустила обязательные поля результата.")
-    if result["relation"] not in RELATIONS or not result["explanation"].strip():
+    if result["relation"] not in allowed_relations or not result["explanation"].strip():
         raise OllamaError("Модель вернула неизвестный тип совпадения.")
     evidence = {}
     for field, spans, original in (("evidence_text", text_spans, text),
@@ -258,7 +258,14 @@ def judge(text, source_text, model=None):
     source_spans = _segments(source_text, "S")
     text_segments = {key: span["text"] for key, span in text_spans.items()}
     source_segments = {key: span["text"] for key, span in source_spans.items()}
+    literal_available = any(
+        _exact_evidence_overlap(target, source)["verified"]
+        for target in text_segments.values()
+        for source in source_segments.values()
+    )
+    allowed_relations = [relation for relation in RELATIONS if literal_available or relation != "exact"]
     schema = JUDGMENT_SCHEMA | {"properties": JUDGMENT_SCHEMA["properties"] | {
+        "relation": {"type": "string", "enum": allowed_relations},
         "evidence_text_id": {"type": "string", "enum": ["", *text_segments]},
         "evidence_source_id": {"type": "string", "enum": ["", *source_segments]},
     }}
@@ -294,7 +301,7 @@ def judge(text, source_text, model=None):
     )
     inputs = {"text_segments": text_segments, "source_segments": source_segments}
     result, name = _chat(prompt, inputs, schema, model)
-    validated = _validate_judgment(result, text, source_text, text_spans, source_spans)
+    validated = _validate_judgment(result, text, source_text, text_spans, source_spans, allowed_relations)
     attempts = 1
     retry = None
     overlap = None
@@ -316,7 +323,7 @@ def judge(text, source_text, model=None):
             )
             try:
                 result, name = _chat(prompt + feedback, inputs, schema, model)
-                validated = _validate_judgment(result, text, source_text, text_spans, source_spans)
+                validated = _validate_judgment(result, text, source_text, text_spans, source_spans, allowed_relations)
             except OllamaError as error:
                 raise OllamaError(str(error), {"attempts": attempts, "consistency_retry": retry}) from error
             overlap = None
@@ -333,6 +340,7 @@ def judge(text, source_text, model=None):
     return validated | {
         "model": name, "requires_review": True, "evidence_method": "sentence_selection",
         "judge_version": JUDGE_VERSION, "attempts": attempts,
+        "literal_available": literal_available,
         "exact_evidence_verified": overlap["verified"] if overlap else None,
         "exact_evidence_overlap": overlap, "consistency_retry": retry,
     }
