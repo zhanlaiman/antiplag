@@ -91,6 +91,7 @@ def main():
     from plagiarism.search_tavily import TavilySearch
     from plagiarism.storage import Store
     from plagiarism.saas import report_identifier
+    from plagiarism.web_fetch import Fetcher
 
     dev = ROOT / "data/private/web-evaluation/materials/dev-30"
     key = dev / "key.json"
@@ -139,8 +140,27 @@ def main():
                 record.update(state="failed_or_unknown", code=getattr(error, "code", type(error).__name__))
                 dump(path, record)
                 raise
+    real_pages = Fetcher()
+    class RecordingPages:
+        def __init__(self):
+            self.count = 0
+        def fetch(self, url):
+            self.count += 1
+            path = out / (f"page-{self.count:04d}-" + sha256(url.encode()).hexdigest()[:16] + "-fetch.json")
+            record = {"requested_url": url, "state": "submitted"}
+            dump(path, record)
+            try:
+                fetched = real_pages.fetch(url)
+                record.update(state="complete", fetched=fetched)
+                dump(path, record)
+                return fetched
+            except Exception as error:
+                record.update(state="failed_or_unknown", code=getattr(error, "code", type(error).__name__))
+                dump(path, record)
+                raise
     original_run = web_search.run
-    web_search.run = partial(original_run, searcher=RecordingSearch(), query_strategy=args.strategy, url_strategy=args.url_strategy)
+    web_search.run = partial(original_run, searcher=RecordingSearch(), fetcher=RecordingPages(),
+                             query_strategy=args.strategy, url_strategy=args.url_strategy)
     service = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     service.saas, service.store, service.jobs = None, Store(), Jobs()
     Thread(target=service.serve_forever, daemon=True).start()
