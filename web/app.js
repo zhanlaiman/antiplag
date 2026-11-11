@@ -1382,7 +1382,7 @@ function renderSourcePacks() {
       ${pack.source_count > 0 && pack.installed_count >= pack.source_count
         ? '<span class="source-pack-installed">Уже в библиотеке <span aria-hidden="true">✓</span></span>'
         : `<button class="button secondary small" data-install-pack="${escapeHTML(pack.id)}" type="button">Добавить подборку <span aria-hidden="true">+</span></button>`}
-    </article>`).join('') : '<p class="field-help">Открытая подборка по экономике готовится. Пока можно добавлять свои материалы.</p>';
+    </article>`).join('') : '<p class="field-help">Открытых подборок пока нет. Можно добавлять свои материалы.</p>';
   area.querySelectorAll('[data-install-pack]').forEach(button => {
     button.addEventListener('click', () => busy(button, 'Добавляем источники', async () => {
       const result = await api('/api/source-packs/install', { pack_id: button.dataset.installPack });

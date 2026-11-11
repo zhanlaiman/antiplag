@@ -2,9 +2,12 @@
 """Instrument the existing local eight-case smoke evaluation without changing it."""
 
 import argparse
+import csv
+import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from threading import Event, Thread
@@ -49,8 +52,51 @@ def sample_resources(request, samples, stop):
                                 for model in response.get("models", [])]
         except Exception as error:
             sample["error"] = str(error)
+        if sys.platform == "linux":
+            sample["host_resources"] = memory_snapshot()
         samples.append(sample)
         stop.wait(1)
+
+
+def linux_memory_snapshot():
+    result = {"source": "/proc/meminfo", "scope": "system"}
+    values = {field: None for field in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree")}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            field, _, value = line.partition(":")
+            parts = value.split()
+            if field in values and len(parts) == 2 and parts[0].isdigit():
+                values[field] = {"value": int(parts[0]), "unit": parts[1]}
+        result.update(status="ok" if all(value is not None for value in values.values()) else "partial", values=values)
+    except (OSError, UnicodeError):
+        result.update(status="error", error="Не удалось прочитать общесистемную память.")
+    return result
+
+
+def gpu_snapshot():
+    result = {"source": "nvidia-smi", "scope": "device"}
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return {**result, "status": "not_installed", "devices": []}
+    command = [executable, "--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader,nounits"]
+    try:
+        output = subprocess.run(command, check=True, capture_output=True, text=True, timeout=2).stdout
+        devices = []
+        for row in csv.reader(io.StringIO(output), skipinitialspace=True):
+            if not row:
+                continue
+            if len(row) != 4:
+                raise ValueError("Unexpected GPU response format")
+            name, total, used, driver = (value.strip() for value in row)
+            devices.append({"name": name, "driver_version": driver,
+                            "memory_total": {"value": int(total) if total.isdigit() else None, "unit": "MiB"},
+                            "memory_used": {"value": int(used) if used.isdigit() else None, "unit": "MiB"}})
+        result.update(status="ok", devices=devices)
+    except subprocess.CalledProcessError as error:
+        result.update(status="error", error="nvidia-smi завершилась с ошибкой.", returncode=error.returncode)
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError, csv.Error):
+        result.update(status="error", error="Не удалось получить показатели GPU.")
+    return result
 
 
 def memory_snapshot():
@@ -62,6 +108,8 @@ def memory_snapshot():
                                                text=True, timeout=5).stdout.strip()
             except (OSError, subprocess.SubprocessError) as error:
                 result[field] = {"error": str(error)}
+    elif sys.platform == "linux":
+        result.update(system_memory=linux_memory_snapshot(), gpu_devices=gpu_snapshot())
     return result
 
 
@@ -94,7 +142,9 @@ def main():
     finally:
         llm._request = original_request
         stop.set()
-        sampler.join(timeout=3)
+        sampler.join(timeout=5)
+        result["resources"]["sampling_stopped"] = not sampler.is_alive()
+        result["resources"]["samples"] = list(result["resources"]["samples"])
         result["resources"]["after"] = memory_snapshot()
         peaks = {}
         for sample in result["resources"]["samples"]:
@@ -103,7 +153,7 @@ def main():
                 for field in peak:
                     peak[field] = max(peak[field], model.get(field) or 0)
         result["resources"]["peaks_by_model"] = peaks
-        result["resources"]["interpretation"] = "Показатели size и size_vram сообщает Ollama. Это резервирование модели, а не суммарное потребление физической памяти Mac. Снимки делаются примерно раз в секунду."
+        result["resources"]["interpretation"] = "Показатели size и size_vram сообщает Ollama и относятся к резервированию модели. Linux system_memory отражает видимую ядру общесистемную память. gpu_devices отражает память устройства по данным драйвера, включая использование другими процессами. /proc/meminfo не задаёт лимит контейнера. Снимки делаются примерно раз в секунду."
         args.output.parent.mkdir(parents=True, exist_ok=True)
         temporary = args.output.with_suffix(args.output.suffix + ".tmp")
         temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
