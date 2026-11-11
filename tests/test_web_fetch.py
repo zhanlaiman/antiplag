@@ -162,16 +162,60 @@ class WebFetchTests(unittest.TestCase):
 
     def test_robot_parser_disallow_and_status_denials_prevent_page_request(self):
         for response in (Response(b"User-agent: *\nDisallow: /private\n", headers={"Content-Type": "text/plain"}),
-                         Response(status=403), Response(status=503)):
+                         Response(status=403)):
             fixture = Fixture()
             fixture.add("example.org", "/robots.txt", response)
             self.assert_code("robots_denied", lambda: fixture.fetcher().fetch("https://example.org/private"))
             self.assertEqual(len(fixture.requests), 1)
 
-    def test_robots_cannot_redirect_to_another_origin(self):
+    def test_server_error_in_robots_is_unavailable_and_prevents_page_loading(self):
+        self.fixture.add("example.org", "/robots.txt", Response(status=503))
+        self.assert_code("robots_unavailable", lambda: self.fixture.fetcher().fetch("https://example.org/article"))
+        self.assertEqual(len(self.fixture.requests), 1)
+
+    def test_redirected_robots_rules_apply_to_the_original_origin_and_stay_cached(self):
         self.fixture.add("example.org", "/robots.txt", Response(status=302, headers={"Location": "https://other.org/robots.txt"}))
-        self.assert_code("robots_redirect_forbidden", lambda: self.fixture.fetcher().fetch("https://example.org/a"))
+        self.fixture.add("other.org", "/robots.txt", Response(b"User-agent: *\nDisallow: /private\n", headers={"Content-Type": "text/plain"}))
+        self.fixture.add("example.org", "/public", Response(b"<p>A public article.</p>"))
+        fetcher = self.fixture.fetcher()
+        result = fetcher.fetch("https://example.org/public")
+        self.assertEqual(result["text"], "A public article.")
+        self.assert_code("robots_denied", lambda: fetcher.fetch("https://example.org/private"))
+        self.assertEqual([(host, path) for host, path, _, _ in self.fixture.requests],
+                         [("example.org", "/robots.txt"), ("other.org", "/robots.txt"), ("example.org", "/public")])
+        self.assertEqual([host for host, port in self.fixture.lookups[:2]], ["example.org", "other.org"])
+
+    def test_redirected_robots_reject_private_targets_before_request(self):
+        self.fixture.add("example.org", "/robots.txt", Response(status=302, headers={"Location": "http://127.0.0.1/robots.txt"}))
+        self.assert_code("address_not_public", lambda: self.fixture.fetcher().fetch("https://example.org/article"))
         self.assertEqual(len(self.fixture.connections), 1)
+
+    def test_robots_follows_five_redirects_and_stops_before_a_sixth(self):
+        for redirects in (5, 6):
+            fixture = Fixture()
+            for index in range(redirects):
+                path = "/robots.txt" if index == 0 else "/policy%d" % index
+                fixture.add("example.org", path, Response(status=302, headers={"Location": "/policy%d" % (index + 1)}))
+            fixture.add("example.org", "/policy%d" % redirects,
+                        Response(b"User-agent: *\nDisallow:\n", headers={"Content-Type": "text/plain"}))
+            fixture.add("example.org", "/article", Response(b"<p>Public article</p>"))
+            if redirects == 5:
+                self.assertEqual(fixture.fetcher().fetch("https://example.org/article")["text"], "Public article")
+            else:
+                self.assert_code("robots_unavailable", lambda: fixture.fetcher().fetch("https://example.org/article"))
+                self.assertFalse(any(path == "/policy6" for _, path, _, _ in fixture.requests))
+
+    def test_nonstandard_none_content_encoding_is_raw_and_still_bounded(self):
+        html = "<p>Текст открытой статьи с неподвижным изображением.</p>".encode()
+        self.fixture.add("example.org", "/raw", Response(html, headers={"Content-Encoding": "none"}))
+        result = self.fixture.fetcher().fetch("https://example.org/raw")
+        self.assertEqual(result["text"], "Текст открытой статьи с неподвижным изображением.")
+        fixture = Fixture()
+        fixture.add("example.org", "/raw", Response(gzip.compress(html), headers={"Content-Encoding": "none"}))
+        self.assert_code("invalid_text_encoding", lambda: fixture.fetcher().fetch("https://example.org/raw"))
+        fixture = Fixture()
+        fixture.add("example.org", "/big", Response(b"x" * (web_fetch.MAX_RESPONSE_BYTES + 1), headers={"Content-Encoding": "none"}))
+        self.assert_code("response_too_large", lambda: fixture.fetcher().fetch("https://example.org/big"))
 
     def test_robots_cache_is_bounded_and_still_rechecks_page_dns(self):
         fetcher = self.fixture.fetcher()

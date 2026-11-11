@@ -21,6 +21,7 @@ USER_AGENT = "IstokSourceChecker/0.1"
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_TEXT_CHARACTERS = 200_000
 MAX_REDIRECTS = 3
+MAX_ROBOTS_REDIRECTS = 5
 REQUEST_TIMEOUT = 8
 TOTAL_TIMEOUT = 20
 _DNS_SLOTS = BoundedSemaphore(4)
@@ -243,7 +244,8 @@ class Fetcher:
         if length and (not length.isdigit() or int(length) > MAX_RESPONSE_BYTES):
             raise FetchError("Страница превышает допустимый размер.", "response_too_large")
         encoding = (response.getheader("Content-Encoding") or "identity").strip().lower()
-        if encoding not in {"identity", "gzip"}:
+        # Some servers call an uncompressed response "none"; byte limits still apply.
+        if encoding not in {"identity", "none", "gzip"}:
             raise FetchError("Этот способ сжатия страницы не поддерживается.", "unsupported_encoding")
         inflater = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
         output = bytearray()
@@ -356,19 +358,20 @@ class Fetcher:
         robots_url = origin + "/robots.txt"
         current = _validate_url(robots_url)
         policy = None
-        for step in range(MAX_REDIRECTS + 1):
+        for step in range(MAX_ROBOTS_REDIRECTS + 1):
             status, headers, body, _ = self._request(current, deadline)
             if status in _REDIRECTS:
-                if step == MAX_REDIRECTS or not headers["Location"]:
+                if step == MAX_ROBOTS_REDIRECTS or not headers["Location"]:
                     raise FetchError("Не удалось проверить robots.txt.", "robots_unavailable")
+                # RFC 9309 section 2.3.1.2 binds redirected rules to the original origin.
                 following = _validate_url(urljoin(current["url"], headers["Location"]))
-                if following["origin"] != origin:
-                    raise FetchError("robots.txt перенаправляет на другой сайт.", "robots_redirect_forbidden")
                 current = following
                 continue
             if status == 404:
                 policy = True
-            elif status in {401, 403} or status >= 500:
+            elif status >= 500:
+                raise FetchError("Сайт временно не отдаёт правила автоматического чтения.", "robots_unavailable")
+            elif status in {401, 403}:
                 policy = False
             elif 200 <= status < 300:
                 text, _ = self._decode(body, headers["Content-Type"])

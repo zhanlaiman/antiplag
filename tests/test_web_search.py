@@ -48,6 +48,18 @@ class WebSearchTests(unittest.TestCase):
         self.addCleanup(self.provider.stop)
         self.addCleanup(self.keys.stop)
 
+    def test_timeout_and_site_denial_have_distinct_public_messages(self):
+        from plagiarism.web_fetch import FetchError
+        for code, message in (("fetch_timeout", "Сайт не ответил"), ("robots_denied", "Сайт запрещает")):
+            pages = Mock()
+            pages.fetch.side_effect = FetchError("internal detail", code)
+            report = web_search.run(TEXT, searcher=Search(), fetcher=pages)
+            error = next(e for e in report["web"]["errors"] if e["stage"] == "fetch")
+            self.assertEqual(error["code"], code)
+            self.assertIn(message, error["message"])
+            self.assertNotIn("internal detail", error["message"])
+            self.assertIsNone(report["stats"]["uniqueness_percent"])
+
     def test_full_copy_has_zero_word_uniqueness_including_with_quote_formatting(self):
         for text in (TEXT, '«' + TEXT + '»'):
             report = web_search.run(text, searcher=Search(), fetcher=Pages())

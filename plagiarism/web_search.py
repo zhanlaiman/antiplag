@@ -33,6 +33,12 @@ HYBRID_STRATEGY = "hybrid-paragraph-v1"
 CITATION_STRATEGY = "hybrid-citation-v2"
 DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+FETCH_FAILURE_MESSAGES = {
+    "fetch_timeout": "Сайт не ответил за отведённое время.",
+    "robots_denied": "Сайт запрещает автоматическое чтение этой страницы.",
+    "robots_unavailable": "Не удалось получить правила автоматического чтения сайта.",
+    "unsupported_encoding": "Сайт использует неподдерживаемый способ сжатия страницы.",
+}
 
 
 class WebSearchError(RuntimeError):
@@ -461,8 +467,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                     linked_urls.add(related)
                     link_discoveries.append({"parent_url": final, "url": related, "basis": "input_anchor_overlap"})
         except (RuntimeError, OSError, ValueError, KeyError) as error:
-            errors.append({"stage": "fetch", "url": url, "code": getattr(error, "code", "fetch_error"),
-                           "message": "Страница недоступна или не разрешает автоматическую загрузку."})
+            code = getattr(error, "code", "fetch_error")
+            errors.append({"stage": "fetch", "url": url, "code": code,
+                           "message": FETCH_FAILURE_MESSAGES.get(code, "Страница недоступна или не разрешает автоматическую загрузку.")})
     if not sources:
         errors.append({"stage": "coverage", "code": "no_sources_checked",
                        "message": "Не проверено ни одного источника. Уникальность не установлена."})
@@ -492,6 +499,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "elapsed_seconds": round(time.monotonic() - started, 3), "score_basis": "exact_word_coverage",
         "default_fetch_limits": {"max_response_bytes": web_fetch.MAX_RESPONSE_BYTES,
             "max_text_characters": web_fetch.MAX_TEXT_CHARACTERS, "max_redirects": web_fetch.MAX_REDIRECTS,
+            "max_robots_redirects": web_fetch.MAX_ROBOTS_REDIRECTS,
             "total_timeout_seconds": web_fetch.TOTAL_TIMEOUT, "pdf_max_pages": pdf_source.MAX_PAGES,
             "pdf_timeout_seconds": pdf_source.MAX_SECONDS},
         "limitations": ["Оценка относится к найденным доступным страницам, а не ко всему интернету.",
