@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "amended_before_source_reveal_at": "2026-11-11T20:10:33.879750+00:00",
+  "original_plan_sha256": "b6e6a86cbb4c9e166b624115070aaa080f87b527acb9e9e93ed889bd17141bd4",
+  "old_maximum_total_fresh_queries": 36,
+  "maximum_total_fresh_queries": 48,
+  "maximum_queries_per_document": 6,
+  "documents": 8,
+  "reason": "Parent corrected the arithmetic bound to eight fixed documents times at most six normal queries; no source-content inspection, input changes, trimming, or reselection.",
+  "authored_inputs_unchanged": true,
+  "assignments_unchanged": true,
+  "prose_inspected": false,
+  "excerpts_selected": false,
+  "query_plans_built": false,
+  "quota_policy": "Fresh Researcher1000, paygo0; max(provider usage, local ledger)+planned <=900."
+}

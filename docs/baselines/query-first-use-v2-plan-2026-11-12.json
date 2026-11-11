@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "prepared_before_source_reveal_at": "2026-11-11T20:08:55.662533+00:00",
+  "phase": "preregistered_unrevealed",
+  "choice_frozen": false,
+  "sources": [
+    {
+      "id": "RFC9309",
+      "attempt_artifact": "data/private/web-evaluation/query-unfamiliar-reserved-v2/RFC9309-attempt.json",
+      "requested_url": "https://www.rfc-editor.org/rfc/rfc9309.txt",
+      "final_url": "https://www.rfc-editor.org/rfc/rfc9309.txt",
+      "text_sha256": "635ac86e00c0174351e1e0a36ee8cbe28245bd33412338c99da92f0eb677cd4f",
+      "text_characters": 21025,
+      "prose_inspected": false
+    },
+    {
+      "id": "RFC1149",
+      "attempt_artifact": "data/private/web-evaluation/query-unfamiliar-reserved-v2-extra/RFC1149-attempt.json",
+      "requested_url": "https://www.rfc-editor.org/rfc/rfc1149.txt",
+      "final_url": "https://www.rfc-editor.org/rfc/rfc1149.txt",
+      "text_sha256": "9b2e1b83aabc67438016a9daa930342d5491792333c58e664d61cf00041d8960",
+      "text_characters": 2757,
+      "prose_inspected": false
+    }
+  ],
+  "authored_bases": {
+    "A": "Before the afternoon session, the team sorted a box of supplies and prepared the room. Someone checked the schedule while another person wrote simple instructions. The group planned to review everything after the short break.",
+    "B": "At the community center, volunteers moved several chairs and opened a cupboard of materials. One helper made notes while the others compared their ideas. They agreed to return tomorrow and finish the remaining preparations together."
+  },
+  "authored_controls": {
+    "Q2-07": "Our small website needs clear rules for automated visitors before the next public demonstration. We will ask a volunteer to review each page, note confusing navigation, and suggest changes that make browsing easier for everyone.",
+    "Q2-08": "The neighborhood group wants to exchange short messages during a shared exercise. Each participant will choose a partner, record when a note arrives, and discuss which changes could make the next round calmer and clearer."
+  },
+  "authored_word_count": 35,
+  "assignments": [
+    {
+      "id": "Q2-01",
+      "source_id": "RFC9309",
+      "base_id": "A",
+      "insertion_words": 10,
+      "source_start_fraction": [
+        1,
+        4
+      ],
+      "target_base_word_index": 0
+    },
+    {
+      "id": "Q2-02",
+      "source_id": "RFC9309",
+      "base_id": "A",
+      "insertion_words": 20,
+      "source_start_fraction": [
+        1,
+        2
+      ],
+      "target_base_word_index": 17
+    },
+    {
+      "id": "Q2-03",
+      "source_id": "RFC9309",
+      "base_id": "A",
+      "insertion_words": 40,
+      "source_start_fraction": [
+        3,
+        4
+      ],
+      "target_base_word_index": 35
+    },
+    {
+      "id": "Q2-04",
+      "source_id": "RFC1149",
+      "base_id": "B",
+      "insertion_words": 10,
+      "source_start_fraction": [
+        1,
+        4
+      ],
+      "target_base_word_index": 35
+    },
+    {
+      "id": "Q2-05",
+      "source_id": "RFC1149",
+      "base_id": "B",
+      "insertion_words": 20,
+      "source_start_fraction": [
+        1,
+        2
+      ],
+      "target_base_word_index": 0
+    },
+    {
+      "id": "Q2-06",
+      "source_id": "RFC1149",
+      "base_id": "B",
+      "insertion_words": 40,
+      "source_start_fraction": [
+        3,
+        4
+      ],
+      "target_base_word_index": 17
+    }
+  ],
+  "documents": 8,
+  "positive_artificial_documents": 6,
+  "independent_control_documents": 2,
+  "maximum_total_fresh_queries": 36,
+  "maximum_queries_per_document": 6,
+  "construction_rules": {
+    "tokenizer": "Use the tokenizer from the final frozen code. No source tokenization before explicit reveal authorization.",
+    "source_start": "floor(source_token_count * numerator / denominator); take exactly insertion_words tokens. If not enough tokens remain, preserve a construction failure; do not choose another span or URL.",
+    "target_quote": "Collapse whitespace in the selected original span to single ASCII spaces; preserve its words/punctuation. No quote wrappers, citation labels, URLs, titles, or authority hints are added.",
+    "target_insert": "Split the fixed 35-word base before target_base_word_index (0/17/35); join prefix, target_quote, suffix with one ASCII space, omitting empty outer parts.",
+    "gold_policy": "Source URLs, source text, and expected spans enter scoring only, never the backend request or planner.",
+    "budget_policy": "Compute blind plans once after final choice/reveal. If the total exceeds 36, stop before any live POST; do not trim/reselect cases or queries.",
+    "first_use_policy": "No code change or retuning after first reveal. Persist hashes, frozen commit, identities, and results; resumed submitted work uses saved GET identity."
+  },
+  "prose_inspected": false,
+  "excerpts_selected": false,
+  "query_plans_built": false,
+  "search_queries": 0,
+  "models": 0,
+  "final_materials_read": false
+}
