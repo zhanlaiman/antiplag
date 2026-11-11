@@ -255,6 +255,92 @@ def request_id(run, case):
     return sha256((run["id"] + case["id"] + case["text_sha256"]).encode()).hexdigest()[:32]
 
 
+def frozen_calls(run, cases, plans):
+    """The same saved identity map is used for live calls and offline accounting."""
+    if (not isinstance(run.get("id"), str) or not re.fullmatch(r"[a-f0-9]{32}", run["id"])
+            or tuple(c["id"] for c in cases) != IDS or set(plans) != set(IDS)
+            or any(not isinstance(p, list) or len(p) > MAX_PER_DOCUMENT for p in plans.values())):
+        raise ValueError("Frozen provider-call scope changed")
+    allowed = {}
+    for case in cases:
+        if not isinstance(case.get("text_sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", case["text_sha256"]):
+            raise ValueError("Frozen provider input identity changed")
+        rid = request_id(run, case)
+        for index, item in enumerate(plans[case["id"]]):
+            if not isinstance(item.get("query"), str) or not 1 <= len(item["query"]) <= 400:
+                raise ValueError("Frozen provider query changed")
+            allowed[sha256((rid + "\0" + str(index)).encode()).hexdigest()] = {
+                "case_id": case["id"], "query_index": index, "query": item["query"]}
+    if len(allowed) > MAX_QUERIES:
+        raise ValueError("Frozen plans exceed the eight-document bounds")
+    return allowed
+
+
+def account_calls(out, run, cases, plans, report_rows):
+    """Keep raw marker counts; reports can establish missing/unknown accounting."""
+    allowed = frozen_calls(run, cases, plans)
+    paths = sorted(out.glob("*-search.json"))
+    if len(paths) > MAX_QUERIES:
+        raise ValueError("Saved provider-call markers exceed the frozen cap")
+    records, actual, known = [], {cid: set() for cid in IDS}, []
+    for path in paths:
+        filename = re.fullmatch(r"([a-f0-9]{64})-search\.json", path.name)
+        if not filename or filename[1] not in allowed or path.is_symlink():
+            raise ValueError("Unbound saved provider-call marker")
+        identifier, identity = filename[1], allowed[filename[1]]
+        record = json.loads(path.read_text())
+        if (not isinstance(record, dict) or record.get("request_id") != identifier
+                or any(record.get(k) != v for k, v in identity.items())
+                or type(record.get("query_index")) is not int
+                or record.get("search_depth") != "basic"
+                or record.get("state") not in {"submitted", "complete", "failed_or_unknown"}):
+            raise ValueError("Saved provider-call identity differs from the frozen plan")
+        usage = record.get("usage")
+        if usage is not None:
+            if not isinstance(usage, dict) or type(usage.get("credits")) is not int or not 0 <= usage["credits"] <= 1:
+                raise ValueError("Invalid explicit Basic-search credit usage")
+            known.append(usage["credits"])
+        records.append(record)
+        actual[identity["case_id"]].add(identifier)
+    reported = {r["id"]: r["queries_attempted"] for r in report_rows if r["status"] == "report"}
+    by_case, issues, missing_total, minimum_attempts = [], [], 0, 0
+    for cid in IDS:
+        claimed = reported.get(cid)
+        if claimed is not None and (type(claimed) is not int or not 0 <= claimed <= len(plans[cid])):
+            raise ValueError("Report query count exceeds its frozen document plan")
+        observed_indexes = [allowed[identifier]["query_index"] for identifier in actual[cid]]
+        minimum = max(claimed or 0, max(observed_indexes, default=-1) + 1)
+        prefix = {identifier for identifier, identity in allowed.items()
+                  if identity["case_id"] == cid and identity["query_index"] < minimum}
+        missing = prefix - actual[cid]
+        extra = {identifier for identifier in actual[cid]
+                 if claimed is not None and allowed[identifier]["query_index"] >= claimed}
+        consistent = not missing and not extra
+        item = {"id": cid, "report_queries_attempted": claimed, "actual_provider_markers": len(actual[cid]),
+                "minimum_attempts_consistent_with_reports_and_ids": minimum,
+                "missing_marker_call_ids": sorted(missing), "markers_beyond_reported_attempts": sorted(extra),
+                "accounting_complete": consistent}
+        by_case.append(item)
+        if not consistent:
+            issues.append({"case_id": cid, "code": "provider_call_accounting_incomplete"})
+        missing_total += len(missing)
+        minimum_attempts += minimum
+    unknown_record_usage = len(records) - len(known)
+    complete = not issues
+    usage_complete = complete and unknown_record_usage == 0
+    summary = {"provider_attempts": len(records), "provider_complete": sum(q["state"] == "complete" for q in records),
+        "queries_in_completed_reports": sum(reported.values()),
+        "minimum_provider_attempts_consistent_with_reports_and_ids": minimum_attempts,
+        "provider_marker_records_missing": missing_total, "provider_accounting_complete": complete,
+        "known_basic_credits": sum(known), "provider_records_with_credit_usage": len(known),
+        "provider_records_without_credit_usage": unknown_record_usage,
+        "provider_usage_unknown_calls": unknown_record_usage + missing_total,
+        "provider_credit_usage_complete": usage_complete,
+        "total_basic_credits": sum(known) if usage_complete else None,
+        "credit_accounting_note": "known_basic_credits is an explicit-usage subtotal. Missing markers or usage are unknown, not evidence of zero total spend."}
+    return {"summary": summary, "cases": by_case, "issues": issues}
+
+
 class RecordedSearch:
     provider = "tavily"
 
@@ -320,14 +406,7 @@ def live(expected_head):
     from plagiarism.search_tavily import TavilySearch
     from plagiarism.saas import report_identifier
     from plagiarism.web_fetch import Fetcher
-    allowed = {}
-    for case in manifest["cases"]:
-        rid = request_id(run, case)
-        for index, item in enumerate(plans[case["id"]]):
-            allowed[sha256((rid + "\0" + str(index)).encode()).hexdigest()] = {
-                "case_id": case["id"], "query_index": index, "query": item["query"]}
-    if len(allowed) > MAX_QUERIES or any(len(p) > MAX_PER_DOCUMENT for p in plans.values()):
-        raise ValueError("Frozen plans exceed the eight-document bounds")
+    allowed = frozen_calls(run, manifest["cases"], plans)
     class Pages:
         def __init__(self):
             self.real, self.case_id = Fetcher(), None
@@ -427,6 +506,8 @@ def score_only():
     """Own frozen snapshots only: no reservation, new plan, Store, or network."""
     run = load_run()
     manifest = checked_json(OUT / "manifest.json", run["manifest_sha256"])
+    local = checked_json(OUT / "local-first-use.json", run["local_sha256"])
+    plans = {r["id"]: r["plans"]["selected"] for r in local["cases"]}
     choice, rows, pairs = run["configuration"]["choice"], [], []
     for case in manifest["cases"]:
         cid, path = case["id"], OUT / (case["id"] + ".json")
@@ -469,7 +550,7 @@ def score_only():
             "exact_pairs": len(checked["matches"]), "similar_pairs": sum(m["kind"] == "similar" for m in report["matches"]),
             "invalid_highlights": checked["invalid_highlights"], "evidence": evidence})
     evidence = [e for r in rows for e in r.get("evidence", [])]
-    logs = [json.loads(p.read_text()) for p in OUT.glob("*-search.json")]
+    accounting = account_calls(OUT, run, manifest["cases"], plans, rows)
     summary = {"documents": 8, "reports": sum(r["status"] == "report" for r in rows), "expected_fragments": 6,
         "expected_copied_words": 140, "expected_url_discovered": sum(e["expected_url_discovered"] for e in evidence),
         "expected_url_read": sum(e["expected_url_read"] for e in evidence),
@@ -480,12 +561,10 @@ def score_only():
         "independent_controls": 2, "control_exact_pairs": sum(r.get("exact_pairs", 0) for r in rows if r.get("control")),
         "control_similar_pairs": sum(r.get("similar_pairs", 0) for r in rows if r.get("control")),
         "unreviewed_pairs": len(pairs), "confirmed_false_pairs": 0 if not pairs else None,
-        "documents_without_read_pages": sum(r.get("pages_read") == 0 for r in rows),
-        "provider_attempts": len(logs), "provider_complete": sum(q["state"] == "complete" for q in logs),
-        "known_basic_credits": sum((q.get("usage") or {}).get("credits", 0) for q in logs),
-        "provider_usage_unknown_calls": sum(q.get("usage") is None for q in logs)}
-    result = {"schema_version": 1, "first_use": True, "used_for_tuning": False, "fresh_baseline_not_run": True,
-              "summary": summary, "cases": rows, "unexpected_pairs_for_review": pairs}
+        "documents_without_read_pages": sum(r.get("pages_read") == 0 for r in rows), **accounting["summary"]}
+    result = {"schema_version": 2, "first_use": True, "used_for_tuning": False, "fresh_baseline_not_run": True,
+              "summary": summary, "cases": rows, "unexpected_pairs_for_review": pairs,
+              "provider_accounting": {"cases": accounting["cases"], "issues": accounting["issues"]}}
     previous = OUT / "fresh-first-use.json"
     if previous.exists():
         old = {r["id"]: r.get("report_sha256") for r in json.loads(previous.read_text())["cases"]}

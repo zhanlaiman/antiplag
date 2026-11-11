@@ -175,6 +175,88 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
             recorded.search("authored query", "new")
         real.search.assert_not_called()
 
+    def accounting_fixture(self, attempts=6):
+        run = {"id": "a" * 32}
+        cases = [{"id": cid, "text_sha256": sha256(("authored input " + cid).encode()).hexdigest()} for cid in probe.IDS]
+        plans = {cid: [{"query": f'"Authored query {index} for {cid}"'} for index in range(6)] for cid in probe.IDS}
+        reports = [{"id": cid, "status": "report", "queries_attempted": attempts} for cid in probe.IDS]
+        return run, cases, plans, reports
+
+    def save_call(self, identifier, identity, credits=1, state="complete"):
+        record = {"request_id": identifier, **identity, "search_depth": "basic", "state": state}
+        if credits is not None:
+            record["usage"] = {"credits": credits}
+        path = self.root / (identifier + "-search.json")
+        probe.dump(path, record)
+        return path, record
+
+    def test_reported_calls_with_zero_markers_are_unknown_not_zero_total_spend(self):
+        run, cases, plans, reports = self.accounting_fixture()
+        result = probe.account_calls(self.root, run, cases, plans, reports)
+        summary = result["summary"]
+        self.assertEqual(summary["provider_attempts"], 0)
+        self.assertEqual(summary["queries_in_completed_reports"], 48)
+        self.assertEqual(summary["minimum_provider_attempts_consistent_with_reports_and_ids"], 48)
+        self.assertEqual(summary["provider_marker_records_missing"], 48)
+        self.assertEqual(summary["provider_usage_unknown_calls"], 48)
+        self.assertEqual(summary["known_basic_credits"], 0)
+        self.assertFalse(summary["provider_accounting_complete"])
+        self.assertFalse(summary["provider_credit_usage_complete"])
+        self.assertIsNone(summary["total_basic_credits"])
+        self.assertTrue(all(len(c["missing_marker_call_ids"]) == 6 for c in result["cases"]))
+
+    def test_explicit_zero_credit_and_missing_usage_are_distinct(self):
+        run, cases, plans, reports = self.accounting_fixture()
+        calls = list(probe.frozen_calls(run, cases, plans).items())
+        for index, (identifier, identity) in enumerate(calls):
+            self.save_call(identifier, identity, credits=0 if index == 0 else None if index == 1 else 1)
+        summary = probe.account_calls(self.root, run, cases, plans, reports)["summary"]
+        self.assertEqual(summary["provider_attempts"], 48)
+        self.assertTrue(summary["provider_accounting_complete"])
+        self.assertEqual(summary["known_basic_credits"], 46)
+        self.assertEqual(summary["provider_records_with_credit_usage"], 47)
+        self.assertEqual(summary["provider_usage_unknown_calls"], 1)
+        self.assertIsNone(summary["total_basic_credits"])
+        self.save_call(*calls[1], credits=1)
+        complete = probe.account_calls(self.root, run, cases, plans, reports)["summary"]
+        self.assertTrue(complete["provider_credit_usage_complete"])
+        self.assertEqual(complete["total_basic_credits"], 47)
+
+    def test_equal_global_totals_do_not_hide_wrong_case_or_wrong_prefix(self):
+        run, cases, plans, reports = self.accounting_fixture(attempts=0)
+        reports[0]["queries_attempted"] = 1
+        calls = probe.frozen_calls(run, cases, plans)
+        identifier, identity = next((i, c) for i, c in calls.items() if c["case_id"] == probe.IDS[1] and c["query_index"] == 0)
+        self.save_call(identifier, identity)
+        result = probe.account_calls(self.root, run, cases, plans, reports)
+        self.assertEqual(result["summary"]["provider_attempts"], result["summary"]["queries_in_completed_reports"])
+        self.assertFalse(result["summary"]["provider_accounting_complete"])
+        self.assertEqual(len(result["issues"]), 2)
+        (self.root / (identifier + "-search.json")).unlink()
+        identifier, identity = next((i, c) for i, c in calls.items() if c["case_id"] == probe.IDS[0] and c["query_index"] == 1)
+        self.save_call(identifier, identity)
+        result = probe.account_calls(self.root, run, cases, plans, reports)
+        self.assertEqual(result["summary"]["provider_attempts"], 1)
+        self.assertEqual(result["summary"]["minimum_provider_attempts_consistent_with_reports_and_ids"], 2)
+        self.assertEqual(result["summary"]["provider_marker_records_missing"], 1)
+        self.assertFalse(result["summary"]["provider_accounting_complete"])
+
+    def test_marker_identity_and_invalid_usage_are_rejected(self):
+        run, cases, plans, reports = self.accounting_fixture(attempts=0)
+        identifier, identity = next(iter(probe.frozen_calls(run, cases, plans).items()))
+        path, record = self.save_call(identifier, identity)
+        for change in ({"query": "changed"}, {"case_id": probe.IDS[1]}, {"query_index": 1},
+                       {"request_id": "f" * 64}, {"search_depth": "advanced"}, {"query_index": False}):
+            with self.subTest(change=change):
+                probe.dump(path, {**record, **change})
+                with self.assertRaises(ValueError):
+                    probe.account_calls(self.root, run, cases, plans, reports)
+        for credits in (True, -1, 2, 0.5, "1"):
+            with self.subTest(credits=credits):
+                probe.dump(path, {**record, "usage": {"credits": credits}})
+                with self.assertRaises(ValueError):
+                    probe.account_calls(self.root, run, cases, plans, reports)
+
     def test_score_only_uses_own_reports_without_reservations_plans_or_network(self):
         choice = {"query_strategy": "authored", "url_strategy": "authored", "matcher_version": "authored", "named_references": False}
         text, cases = "One authored sentence with seven separate words.", []
@@ -184,7 +266,7 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
             cases.append(case)
             report = {"id": str(index) * 32, "text": text, "scope": "web_search", "sources": [], "matches": [],
                 "web": {"query_strategy": "authored", "url_strategy": "authored", "matcher_version": "authored",
-                    "named_references_enabled": False, "queries_attempted": 0, "sources_checked": 0,
+                    "named_references_enabled": False, "queries_attempted": 6, "sources_checked": 0,
                     "discovered_urls": [], "errors": [], "status": "partial"}, "stats": {"uniqueness_percent": None}}
             if index in {0, 7}:
                 url = "https://example.test/mirror" if index == 0 else "https://example.test/authored"
@@ -194,9 +276,11 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
                     "excerpt": text, "source_excerpt": text}]
                 report["web"]["sources_checked"] = 1
             probe.dump(self.root / (cid + ".json"), report)
-        run = {"manifest_sha256": "fake", "configuration": {"choice": choice}}
+        local = {"cases": [{"id": cid, "plans": {"selected": [{"query": f'"Authored query {index} for {cid}"'}
+                  for index in range(6)]}} for cid in probe.IDS]}
+        run = {"id": "a" * 32, "manifest_sha256": "fake", "local_sha256": "fake-local", "configuration": {"choice": choice}}
         with patch.object(probe, "OUT", self.root), patch.object(probe, "load_run", return_value=run), \
-                patch.object(probe, "checked_json", return_value={"cases": cases}), \
+                patch.object(probe, "checked_json", side_effect=lambda path, _: local if path.name == "local-first-use.json" else {"cases": cases}), \
                 patch.object(probe, "metadata", side_effect=AssertionError("reserve metadata read")), \
                 patch.object(probe, "checked_source", side_effect=AssertionError("source read")), \
                 patch.object(probe.web, "plan_queries", side_effect=AssertionError("replan")), \
@@ -215,6 +299,10 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
         self.assertEqual(pair["source_excerpt"], text)
         self.assertTrue(pair["grounded"])
         self.assertEqual(pair["review"], "needs_pair_review")
+        self.assertEqual(result["summary"]["provider_attempts"], 0)
+        self.assertEqual(result["summary"]["queries_in_completed_reports"], 48)
+        self.assertFalse(result["summary"]["provider_credit_usage_complete"])
+        self.assertIsNone(result["summary"]["total_basic_credits"])
 
 
 if __name__ == "__main__":
