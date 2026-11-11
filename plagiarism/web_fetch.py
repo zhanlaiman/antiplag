@@ -24,6 +24,7 @@ MAX_REDIRECTS = 3
 MAX_ROBOTS_REDIRECTS = 5
 REQUEST_TIMEOUT = 8
 TOTAL_TIMEOUT = 20
+HTML_EXTRACTION_VERSION = "html-parser-v2-implied-ends"
 _DNS_SLOTS = BoundedSemaphore(4)
 _REDIRECTS = {301, 302, 303, 307, 308}
 
@@ -126,6 +127,10 @@ class _TextExtractor(HTMLParser):
     SKIP = {"script", "style", "nav", "header", "footer", "form", "noscript", "template", "svg", "canvas", "iframe", "aside", "head", "title"}
     VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
     BLOCK = {"p", "div", "section", "article", "li", "ul", "ol", "table", "tr", "br", "hr", "blockquote", "pre", "dl", "dt", "dd", "h1", "h2", "h3", "h4", "h5", "h6"}
+    CELL = {"td", "th"}
+    CLOSE_P = {"address", "article", "aside", "blockquote", "details", "dialog", "div", "dl", "fieldset",
+               "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup",
+               "hr", "main", "menu", "nav", "ol", "p", "pre", "search", "section", "table", "ul"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -133,7 +138,48 @@ class _TextExtractor(HTMLParser):
         self.nodes = 0
         self.links, self.anchor = [], None
 
+    def _word_boundary(self):
+        if self.pieces and self.pieces[-1] and not self.pieces[-1][-1].isspace():
+            self.pieces.append(" ")
+
+    def _close_scoped(self, closing, boundaries):
+        for index in range(len(self.stack) - 1, -1, -1):
+            tag, ignored = self.stack[index]
+            if tag in closing:
+                if not any(frame[1] for frame in self.stack):
+                    if tag in self.BLOCK:
+                        self.pieces.append("\n\n")
+                    elif tag in self.CELL:
+                        self._word_boundary()
+                if self.anchor is not None and any(t == "a" for t, _ in self.stack[index:]):
+                    self.links.append(self.anchor)
+                    self.anchor = None
+                del self.stack[index:]
+                return
+            # A hidden target may end normally. An ignored frame above it is
+            # a barrier: implied closures must never expose that frame's data.
+            if ignored or tag in boundaries:
+                return
+
+    def _implicit_ends(self, tag):
+        protected = self.SKIP | {"html"}
+        if tag == "body":
+            self._close_scoped({"head"}, protected - {"head"})
+        if tag in self.CLOSE_P:
+            self._close_scoped({"p"}, protected | {"button", "table", "td", "th", "select", "object"})
+        if tag == "li":
+            self._close_scoped({"li"}, protected | {"ul", "ol", "menu"})
+        elif tag in {"dt", "dd"}:
+            self._close_scoped({"dt", "dd"}, protected | {"dl"})
+        elif tag in self.CELL:
+            self._close_scoped(self.CELL, protected | {"tr", "table"})
+        elif tag == "tr":
+            self._close_scoped({"tr"}, protected | {"table"})
+        elif tag in {"tbody", "thead", "tfoot"}:
+            self._close_scoped({"tbody", "thead", "tfoot"}, protected | {"table"})
+
     def handle_starttag(self, tag, attributes):
+        self._implicit_ends(tag)
         self.nodes += 1
         if self.nodes > 50_000 or len(self.stack) >= 128:
             raise FetchError("HTML страницы слишком сложный.", "html_too_complex")
@@ -152,6 +198,8 @@ class _TextExtractor(HTMLParser):
                 self.anchor = {"url": href, "text": ""}
         if tag in self.BLOCK and not ignored and not any(frame[1] for frame in self.stack):
             self.pieces.append("\n\n")
+        elif tag in self.CELL and not ignored and not any(frame[1] for frame in self.stack):
+            self._word_boundary()
         if tag not in self.VOID:
             self.stack.append((tag, ignored))
 
@@ -166,6 +214,8 @@ class _TextExtractor(HTMLParser):
             self.anchor = None
         if tag in self.BLOCK and not any(frame[1] for frame in self.stack):
             self.pieces.append("\n\n")
+        elif tag in self.CELL and any(frame[0] == tag for frame in self.stack) and not any(frame[1] for frame in self.stack):
+            self._word_boundary()
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index][0] == tag:
                 del self.stack[index:]
@@ -462,7 +512,7 @@ class Fetcher:
                     "fetched_at": datetime.now(timezone.utc).isoformat(), "content_type": mime,
                     "encoding": encoding, "bytes_read": wire, "decoded_bytes": len(body),
                     "robots_url": target["origin"] + "/robots.txt",
-                    "extraction": pdf["extraction"] if pdf else "html-parser-v1" if mime == "text/html" else "plain-v1",
+                    "extraction": pdf["extraction"] if pdf else HTML_EXTRACTION_VERSION if mime == "text/html" else "plain-v1",
                     **({"pdf_pages": pdf["page_count"], "pdf_parser_version": pdf["parser_version"]} if pdf else {}),
                     **({"supplemental_texts": supplemental_texts, "optional_status": optional_status,
                         "raw_pdf_sha256": sha256(body).hexdigest()} if pdf and optional_status is not None else {})}

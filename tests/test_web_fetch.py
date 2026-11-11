@@ -106,6 +106,7 @@ class WebFetchTests(unittest.TestCase):
         self.assertEqual(result["text"], "Первый абзац & факт.\n\nВторой абзац.")
         self.assertEqual(result["text_sha256"], sha256(result["text"].encode()).hexdigest())
         self.assertEqual(result["content_type"], "text/html")
+        self.assertEqual(result["extraction"], "html-parser-v2-implied-ends")
         self.assertTrue(page.closed)
         self.assertTrue(all(item[-1].closed for item in self.fixture.connections))
         self.assertTrue(all(item[3] == "93.184.216.34" for item in self.fixture.connections))
