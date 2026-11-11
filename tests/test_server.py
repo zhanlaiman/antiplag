@@ -77,6 +77,28 @@ class ServerTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Background model job did not finish")
 
+    def test_readable_report_serves_saved_html_and_keeps_local_request_guard(self):
+        self.add_source()
+        report = self.check()
+        path = f"/reports/{report['id']}.html"
+        connection = HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=5)
+        try:
+            with patch.object(application.llm, '_request', side_effect=AssertionError('No compute for export')):
+                connection.request('GET', path)
+                response = connection.getresponse()
+                content = response.read().decode('utf-8')
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader('Content-Type'), 'text/html; charset=utf-8')
+            self.assertIn("default-src 'none'", response.getheader('Content-Security-Policy'))
+            self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+            self.assertIn(SOURCE_TEXT, content)
+            self.assertIn('а не весь интернет', content)
+        finally:
+            connection.close()
+        status, body = self.request('GET', path, headers={'Host': 'untrusted.example'})
+        self.assertEqual(status, 403)
+        self.assertIn('локального приложения', body['error'])
+
     def test_model_job_returns_legacy_envelope_and_same_id_does_not_repeat_compute(self):
         source = self.add_source()
         payload = {"source_id": source["id"], "text": SOURCE_TEXT}

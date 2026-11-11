@@ -218,6 +218,8 @@ def retrieve(text, sources, mode="lexical", top_k=5, cache=None, progress=None):
             })
             if len(selected) == top_k:
                 break
+    if progress:
+        progress("Поиск источников завершён", len(queries), len(queries))
     return {
         "candidates": candidates, "mode": mode, "embedding_model": model,
         "stats": {"query_chunks": len(queries), "source_chunks": len(source_chunks),

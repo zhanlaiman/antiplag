@@ -3,7 +3,9 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
+from plagiarism import retrieval
 from plagiarism.jobs import Jobs
 from plagiarism.llm import OllamaError
 from plagiarism.storage import Store
@@ -17,6 +19,28 @@ class JobsTests(unittest.TestCase):
                 return result
             time.sleep(0.01)
         self.fail("Job did not finish")
+
+    def test_retrieval_job_progress_reaches_total_for_every_query_chunk(self):
+        text = " ".join(f"клетка{index}" for index in range(350))
+        sources = [{"id": "biology", "title": "Учебный пример", "text": text}]
+        for mode in ("lexical", "hybrid"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                jobs = Jobs()
+                cache = retrieval.EmbeddingCache(Path(directory) / "vectors.sqlite3")
+
+                def operation(progress):
+                    return retrieval.retrieve(text, sources, mode=mode, cache=cache, progress=progress)
+
+                try:
+                    with patch.object(retrieval, "embedding_identity", return_value="test-digest"), \
+                            patch.object(retrieval.llm, "embed", side_effect=lambda texts, model: [[1.0, 0.0] for _ in texts]):
+                        job = jobs.submit((mode, "four-query-chunks"), operation)
+                        result = self.wait_terminal(jobs, job["id"])
+                    self.assertEqual(result["status"], "complete", result)
+                    self.assertEqual(result["result"]["stats"]["query_chunks"], 4)
+                    self.assertEqual(result["progress"], {"current": 4, "total": 4})
+                finally:
+                    jobs.close()
 
     def test_model_request_is_idempotent_and_recoverable_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:

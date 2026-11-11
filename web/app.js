@@ -63,7 +63,7 @@ function saveModelJobs() {
   try {
     const saved = Object.fromEntries(Object.entries(state.modelJobs).map(([id, entry]) => [id, {
       request_id: id, path: entry.path, body: entry.body, context: entry.context,
-      created_at: entry.created_at, status: entry.status,
+      created_at: entry.created_at, status: entry.status, submission_error: entry.submission_error,
     }]));
     localStorage.setItem(MODEL_JOBS_KEY, JSON.stringify(saved));
     return true;
@@ -247,7 +247,7 @@ function modelJobTitle(entry) {
 }
 
 function modelJobActive(entry) {
-  return ['submitting', 'delivery_unknown', 'missing', ...ACTIVE_JOB_STATUSES].includes(entry.job?.status || entry.status);
+  return ['submitting', 'delivery_unknown', 'missing', 'rejected', ...ACTIVE_JOB_STATUSES].includes(entry.job?.status || entry.status);
 }
 
 function canonicalModelBody(value) {
@@ -301,19 +301,23 @@ function renderModelJobs() {
   const panel = document.querySelector('#model-jobs-panel');
   if (!panel) return;
   const entries = Object.values(state.modelJobs);
+  const openResults = entries.filter(entry => document.getElementById(`model-job-result-${entry.request_id}`)?.open);
+  const focusedId = panel.contains(document.activeElement) ? document.activeElement.id : '';
   panel.hidden = !entries.length;
   panel.innerHTML = entries.map(entry => {
     const job = entry.job;
     const status = job?.status || entry.status;
     const active = ['submitting', ...ACTIVE_JOB_STATUSES].includes(status);
-    const missing = status === 'missing' || status === 'delivery_unknown';
+    const missing = ['missing', 'delivery_unknown', 'rejected'].includes(status);
     const progress = job?.progress?.total ? ` · ${number(job.progress.current)} из ${number(job.progress.total)}` : '';
     const stage = entry.watchMessage || job?.stage || entry.stage || 'В очереди';
     const uncertain = job?.code === 'unconfirmed_exact';
     const outcome = uncertain ? 'Нужна проверка редактора'
       : status === 'complete' ? 'Ответ готов и сохранён'
       : status === 'cancelled' ? 'Задание остановлено'
-      : status === 'failed' ? 'Задание завершилось с ошибкой' : stage;
+      : status === 'failed' ? 'Задание завершилось с ошибкой'
+      : status === 'rejected' ? 'Сервер не принял задание'
+      : missing ? 'Отправка не подтверждена' : stage;
     return `<article class="model-job-notice">
       <div class="model-job-heading"><strong>${escapeHTML(modelJobTitle(entry))}</strong><span>${escapeHTML(entry.body.model || '')}${entry.created_at ? ` · ${escapeHTML(date(entry.created_at))}` : ''}</span></div>
       ${entry.context?.source_title ? `<p class="field-help">${escapeHTML(entry.context.source_title)}</p>` : ''}
@@ -322,8 +326,8 @@ function renderModelJobs() {
       ${job?.error ? uncertain
         ? candidateErrorHTML({ message: job.error, code: job.code, details: job.details })
         : `<div class="inline-error">${escapeHTML(job.error)}</div>` : ''}
-      ${missing ? `<p class="inline-error">${escapeHTML(entry.watchMessage || 'Не удалось подтвердить отправку задания. Автоматического повторного запуска нет.')}</p>` : ''}
-      ${status === 'complete' ? `<details><summary>Посмотреть сохранённый результат</summary>${modelJobResultHTML(entry)}</details>` : ''}
+      ${missing ? `<p class="inline-error">${escapeHTML(entry.submission_error?.message || entry.watchMessage || 'Не удалось подтвердить отправку задания. Автоматического повторного запуска нет.')}</p>` : ''}
+      ${status === 'complete' ? `<details id="model-job-result-${entry.request_id}"><summary id="model-job-summary-${entry.request_id}">Посмотреть сохранённый результат</summary>${modelJobResultHTML(entry)}</details>` : ''}
       <div class="action-row">
         ${active && job?.id ? `<button class="text-button" id="model-job-cancel-${entry.request_id}" type="button" ${status === 'cancelling' ? 'disabled' : ''}>${status === 'cancelling' ? 'Останавливаем после текущего ответа' : 'Остановить'}</button>` : ''}
         ${missing ? `<button class="button small secondary" id="model-job-retry-${entry.request_id}" type="button">Повторить отправку этого задания</button>` : ''}
@@ -331,6 +335,11 @@ function renderModelJobs() {
       </div>
     </article>`;
   }).join('');
+  for (const entry of openResults) {
+    const details = document.getElementById(`model-job-result-${entry.request_id}`);
+    if (details) details.open = true;
+  }
+  if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
   for (const entry of entries) {
     document.getElementById(`model-job-cancel-${entry.request_id}`)?.addEventListener('click', event => busy(event.currentTarget, 'Останавливаем', async () => {
       const { job } = await api(`/api/jobs/${entry.request_id}/cancel`, {});
@@ -369,11 +378,14 @@ async function submitModelJob(entry) {
     if (job.id !== entry.request_id) throw new Error('Сервер вернул неожиданный идентификатор задания.');
     entry.job = job;
     entry.status = job.status;
+    delete entry.submission_error;
     saveModelJobs();
     renderModelJobs();
   } catch (error) {
-    entry.status = 'delivery_unknown';
-    entry.watchMessage = `Отправка не подтверждена. ${error.message}`;
+    entry.status = error.status >= 400 && error.status < 500 ? 'rejected' : 'delivery_unknown';
+    entry.job = null;
+    entry.submission_error = { message: error.message, status: error.status, code: error.code, details: error.details };
+    entry.watchMessage = error.message;
     saveModelJobs();
     renderModelJobs();
     throw error;
@@ -427,7 +439,7 @@ async function modelRequest(path, body, context = {}) {
   }
   const pending = pendingModelRequest(path, body);
   if (pending) {
-    if (['missing', 'delivery_unknown'].includes(pending.status)) {
+    if (['missing', 'delivery_unknown', 'rejected'].includes(pending.status)) {
       throw new Error('Отправка этого задания не подтверждена. Используйте кнопку повторной отправки в уведомлении.');
     }
     return observeModelJob(pending);
@@ -904,7 +916,10 @@ function renderReport() {
     </div>
     <div class="section-heading">
       <div><h2>Фрагменты для сверки</h2><p>По библиотеке источников · ${escapeHTML(date(report.created_at))}</p></div>
-      <button class="text-button" id="download-report" type="button">↓ Сохранить отчёт</button>
+      <div class="action-row">
+        <button class="text-button" id="download-reading-report" type="button">↓ Отчёт для чтения</button>
+        <button class="text-button" id="download-report" type="button">↓ Данные JSON</button>
+      </div>
     </div>
     <div class="stats-row">
       <div class="stat-card">
@@ -952,6 +967,10 @@ function renderReport() {
   document.querySelector('#download-report').addEventListener('click', () => {
     download(`istok-report-${report.id}.json`, JSON.stringify(report, null, 2), 'application/json');
   });
+  document.querySelector('#download-reading-report').addEventListener('click', event => busy(event.currentTarget, 'Готовим отчёт', async () => {
+    const { filename, html } = await api(`/api/report-exports/${encodeURIComponent(report.id)}`);
+    download(filename, html, 'text/html;charset=utf-8');
+  }));
   document.querySelector('#restore-report-text').addEventListener('click', () => {
     saveDraft(report.text);
     document.querySelector('#check-text').value = state.text;
@@ -1254,7 +1273,7 @@ async function loadCandidateJudgments(retrievalId, force = false) {
   }
 }
 
-function updateCandidateCards(retrieval) {
+function updateCandidateCards(retrieval, refreshRewriteFor = null) {
   document.querySelectorAll('[data-candidate]').forEach(card => {
     if (card.dataset.retrieval !== retrieval.id) return;
     const candidate = retrieval.candidates.find(item => item.id === card.dataset.candidate);
@@ -1265,6 +1284,10 @@ function updateCandidateCards(retrieval) {
     card.querySelector('.candidate-judgment').innerHTML = judgment ? judgmentHTML(judgment) : '';
     card.querySelector('.candidate-error').innerHTML = candidateErrorHTML(error);
     if (!state.candidateRewrites[key]) card.querySelector('.candidate-rewrite').replaceChildren();
+    else if (candidate.id === refreshRewriteFor) {
+      card.querySelector('.candidate-rewrite').innerHTML = candidateRewriteHTML(candidate, retrieval);
+      bindCandidateRewrite(card, candidate, retrieval);
+    }
     card.querySelector('.candidate-actions').innerHTML = candidateActionsHTML(candidate, retrieval);
     bindCandidateCardActions(card, candidate, retrieval);
   });
@@ -1468,11 +1491,11 @@ function bindCandidateCardActions(card, candidate, retrieval) {
         throw error;
       } finally {
         candidateRequests.delete(key);
-        updateReportFreshness();
-        if (card.isConnected) {
-          card.querySelector('.candidate-actions').innerHTML = candidateActionsHTML(candidate, retrieval);
-          bindCandidateCardActions(card, candidate, retrieval);
+        if (state.view === 'check' && state.retrievals[state.report?.id]?.id === retrieval.id) {
+          updateCandidateCards(retrieval, candidate.id);
         }
+        updateReportFreshness();
+        updateModelActionControls();
       }
     }));
   });
@@ -2079,7 +2102,7 @@ function updateModelActionControls() {
       const note = document.querySelector('#evaluation-job-note');
       if (note) {
         note.hidden = !pending;
-        note.textContent = pending && ['missing', 'delivery_unknown'].includes(pending.status)
+        note.textContent = pending && ['missing', 'delivery_unknown', 'rejected'].includes(pending.status)
           ? 'Отправка этой оценки не подтверждена. Используйте повторную отправку в уведомлении о задании.'
           : 'Оценка этой модели уже запущена. Состояние и сохранённые ответы показаны в задании сверху.';
       }
@@ -2126,7 +2149,7 @@ window.addEventListener('hashchange', renderView);
   renderView();
   renderModelJobs();
   for (const entry of Object.values(state.modelJobs)) {
-    observeModelJob(entry).catch(() => {});
+    if (entry.status !== 'rejected') observeModelJob(entry).catch(() => {});
   }
   for (const [reportId, job] of Object.entries(state.retrievalJobs)) {
     pollRetrieval(reportId, job.id);

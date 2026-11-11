@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from urllib.parse import urlsplit
 
-from plagiarism import demo, evaluation, llm, retrieval, source_packs
+from plagiarism import demo, evaluation, llm, report_export, retrieval, source_packs
 from plagiarism.jobs import Jobs
 from plagiarism.matching import analyze, MAX_TEXT_CHARS
 from plagiarism.storage import Store
@@ -93,6 +93,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Запрос разрешён только из локального приложения."}, 403)
                 return
             path = urlsplit(self.path).path
+            if method == "GET" and re.fullmatch(r"/reports/[a-f0-9]{32}\.html", path):
+                report_id = path.rsplit("/", 1)[1][:-5]
+                document = self.route("GET", "/api/report-exports/" + report_id, {})
+                content = document["html"].encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+                self.end_headers()
+                self.wfile.write(content)
+                return
             if not path.startswith("/api/"):
                 if method != "GET":
                     self.send_json({"error": "Метод недоступен."}, 405)
@@ -243,6 +257,14 @@ class Handler(BaseHTTPRequestHandler):
                                                          candidate_attempt=candidate_attempt)}
         if method == "GET" and path == "/api/reports":
             return {"reports": store.report_summaries()}
+        if method == "GET" and path.startswith("/api/report-exports/"):
+            report = store.get("report", path.rsplit("/", 1)[1])
+            if not report:
+                raise KeyError(path)
+            saved_retrieval = store.latest_retrieval(report["id"])
+            outcomes = store.candidate_judgments(saved_retrieval["id"]) if saved_retrieval else []
+            return {"filename": f"istok-report-{report['id']}.html",
+                    "html": report_export.render(report, store.match_reviews(report["id"]), saved_retrieval, outcomes)}
         if method == "GET" and path.startswith("/api/reports/"):
             report = store.get("report", path.rsplit("/", 1)[1])
             if not report:

@@ -22,6 +22,7 @@ class FixtureElement {
     this.textContent = '';
     this.hidden = false;
     this.disabled = false;
+    this.open = false;
     this.isConnected = true;
     this.dataset = {};
     this.files = [];
@@ -62,6 +63,13 @@ class FixtureElement {
   querySelector(selector) { return this.children.get(selector) || this.document.querySelector(selector); }
   querySelectorAll() { return []; }
   closest() { return this.parent || null; }
+  contains(element) {
+    while (element) {
+      if (element === this) return true;
+      element = element.parent || element.owner;
+    }
+    return false;
+  }
   setAttribute(name, value) { this[name] = value; }
   removeAttribute(name) { delete this[name]; }
   setCustomValidity(message) { this.validationMessage = message; }
@@ -90,18 +98,31 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
   const storage = new Map(Object.entries(stored));
   const delays = [];
   const intervals = [];
+  const downloads = [];
+  const blobs = new Map();
   const windowListeners = new Map();
   const document = {
-    elements: new Map(), body: { classList: { toggle() {} } },
+    elements: new Map(), body: { classList: { toggle() {} }, append() {} },
     querySelector(selector) { return selector.startsWith('#') ? this.elements.get(selector.slice(1)) || null : null; },
     querySelectorAll() { return []; },
     getElementById(id) { return this.elements.get(id) || null; },
+    createElement(tag) {
+      assert.equal(tag, 'a', 'The fixture only supports download anchors');
+      const anchor = new FixtureElement(this);
+      anchor.click = () => downloads.push({ filename: anchor.download, blob: blobs.get(anchor.href) });
+      anchor.remove = () => { anchor.isConnected = false; };
+      return anchor;
+    },
   };
   const initial = new FixtureElement(document);
   initial.innerHTML = documentHTML;
   const location = { hash: `#${view}` };
   const context = vm.createContext({
-    document, location, console, TextDecoder, Uint8Array, Event, URL, crypto: webcrypto,
+    document, location, console, TextDecoder, Uint8Array, Event, Blob, crypto: webcrypto,
+    URL: class extends URL {
+      static createObjectURL(blob) { const url = `blob:fixture-${blobs.size}`; blobs.set(url, blob); return url; }
+      static revokeObjectURL(url) { blobs.delete(url); }
+    },
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     localStorage: {
       getItem: key => storage.get(key) ?? null,
@@ -131,7 +152,7 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
   // Execute every statement, including startup and normal listener registration.
   vm.runInContext(application, context, { filename: 'web/app.js' });
   return {
-    document, storage, delays, intervals,
+    document, storage, delays, intervals, downloads,
     evaluate: expression => vm.runInContext(expression, context),
     expose: (name, value) => { context[name] = value; },
     element: id => document.getElementById(id),
@@ -581,4 +602,153 @@ test('a restored evaluation blocks the same model and payload until terminal sta
   assert.equal(button.disabled, false);
   assert.equal(app.element('evaluation-job-note').hidden, true);
   assert.ok(calls.every(call => call.body === undefined));
+});
+
+test('manual pair completion refreshes the replacement card after its original card was unmounted', async () => {
+  const completion = deferred();
+  const latest = { id: 'fixture-latest', relation: 'paraphrase', explanation: 'Новая учебная оценка' };
+  let request;
+  const app = fixture({ fetch(url, body) {
+    if (url === '/api/status') return json(modalStatus());
+    if (url === '/api/model-jobs') {
+      request = body;
+      return json({ job: { id: body.request_id, status: 'queued' } });
+    }
+    if (request && url === `/api/jobs/${request.request_id}`) return completion.promise;
+    if (url === '/api/candidate-judgments/fixture-retrieval') return json({ judgments: [{ candidate_id: 'candidate-1', judgment: latest }] });
+  } });
+  await settle();
+  function cardFixture() {
+    const card = new FixtureElement(app.document);
+    card.dataset = { retrieval: 'fixture-retrieval', candidate: 'candidate-1' };
+    const button = new FixtureElement(app.document);
+    button.dataset.candidateAction = 'judge';
+    button.parent = card;
+    card.querySelectorAll = selector => selector === '[data-candidate-action]' ? [button] : [];
+    for (const selector of ['.candidate-judgment', '.candidate-error', '.candidate-rewrite', '.candidate-actions']) {
+      card.children.set(selector, new FixtureElement(app.document));
+    }
+    return { card, button };
+  }
+  const original = cardFixture();
+  let current = original;
+  app.document.querySelectorAll = selector => selector === '[data-candidate]' ? [current.card]
+    : selector === '[data-candidate-action]' ? [current.button] : [];
+  app.expose('originalCard', original.card);
+  app.evaluate(`
+    globalThis.retrieval={id:'fixture-retrieval',report_id:'fixture-report',candidates:[{id:'candidate-1',rank:1,source_title:'Учебный источник'}]};
+    state.report={id:'fixture-report',text:'Учебный текст',matches:[],stats:{}};
+    state.retrievals['fixture-report']=retrieval;
+    bindCandidateCardActions(originalCard,retrieval.candidates[0],retrieval);
+  `);
+  const running = original.button.emit('click');
+  await settle();
+  // Leaving and returning to the view replaces the card while the job survives.
+  original.card.isConnected = false;
+  original.button.isConnected = false;
+  current = cardFixture();
+  current.button.disabled = true;
+  current.card.children.get('.candidate-judgment').innerHTML = 'Предыдущая карточка';
+  completion.resolve(json({ job: { id: request.request_id, status: 'complete', result: { judgment: latest } } }));
+  await running;
+  assert.ok(current.card.children.get('.candidate-judgment').innerHTML.includes('Новая учебная оценка'));
+  assert.equal(current.button.disabled, false);
+  assert.equal(app.evaluate('candidateRequests.size'), 0);
+});
+
+test('refreshing another model job preserves an expanded result and keyboard focus', async () => {
+  const app = fixture();
+  await settle();
+  const first = '1'.repeat(32), second = '2'.repeat(32);
+  app.evaluate(`
+    state.modelJobs['${first}']={request_id:'${first}',path:'/api/judge',body:{},status:'complete',
+      job:{status:'complete',result:{judgment:{relation:'same_topic',explanation:'Учебный результат'}}}};
+    state.modelJobs['${second}']={request_id:'${second}',path:'/api/evaluate',body:{},status:'running',job:{id:'${second}',status:'running',stage:'В очереди'}};
+    renderModelJobs();
+  `);
+  const details = app.element(`model-job-result-${first}`);
+  details.open = true;
+  app.element(`model-job-summary-${first}`).focus();
+  app.evaluate(`state.modelJobs['${second}'].job.stage='Сравниваем';renderModelJobs()`);
+  assert.equal(app.element(`model-job-result-${first}`).open, true);
+  assert.equal(app.document.activeElement, app.element(`model-job-summary-${first}`));
+  const editor = app.element('check-text');
+  editor.value = 'Учебная правка в редакторе';
+  editor.focus();
+  app.evaluate('renderModelJobs()');
+  assert.equal(app.document.activeElement, editor, 'Polling must not steal focus from the editor');
+  assert.equal(editor.value, 'Учебная правка в редакторе');
+});
+
+test('an explicit submission rejection survives reload with its original reason and no automatic retry', async () => {
+  const reason = 'Уже запущены три проверки. Дождитесь завершения одной из них.';
+  const app = fixture({ fetch(url) {
+    if (url === '/api/status') return json(modalStatus());
+    if (url === '/api/model-jobs') return json({ error: reason }, 400);
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебный текст';
+  await app.element('check-text').emit('input');
+  app.element('compare-source').value = 'fixture-source';
+  await app.element('compare-button').emit('click');
+  const saved = app.storage.get('istok.model-jobs.v1');
+  const [entry] = Object.values(JSON.parse(saved));
+  assert.equal(entry.status, 'rejected');
+  assert.equal(entry.submission_error.message, reason);
+  assert.equal(entry.submission_error.status, 400);
+  const calls = [];
+  const reloaded = fixture({ stored: { 'istok.model-jobs.v1': saved }, fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/status') return json(modalStatus());
+  } });
+  await settle();
+  assert.ok(reloaded.element('model-jobs-panel').innerHTML.includes(reason));
+  assert.ok(reloaded.element('model-jobs-panel').innerHTML.includes('Сервер не принял задание'));
+  assert.ok(reloaded.element(`model-job-retry-${entry.request_id}`));
+  assert.ok(calls.every(call => call.body === undefined && !call.url.startsWith('/api/jobs/')));
+});
+
+test('registered HTML export downloads the captured report while a different report is opened', async () => {
+  const exported = deferred();
+  const calls = [];
+  const app = fixture({ fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/report-exports/report-a') return exported.promise;
+  } });
+  await settle();
+  app.evaluate(`
+    saveDraft('Учебная статья A');
+    state.report={id:'report-a',text:state.text,matches:[],stats:{},issues:[]};
+    state.retrievals['report-a']=null;
+    renderReport();
+  `);
+  assert.ok(app.element('report-area').innerHTML.includes('↓ Данные JSON'));
+  const downloading = app.element('download-reading-report').emit('click');
+  await settle();
+  assert.equal(app.downloads.length, 0);
+  app.evaluate(`state.report={id:'report-b',text:'Учебная статья B',matches:[],stats:{},issues:[]};state.retrievals['report-b']=null;renderReport()`);
+  const html = '<!doctype html><html lang="ru"><title>Учебный отчёт A</title></html>';
+  exported.resolve(json({ filename: 'report-a.html', html }));
+  await downloading;
+  assert.equal(app.downloads.length, 1);
+  assert.equal(app.downloads[0].filename, 'report-a.html');
+  assert.equal(app.downloads[0].blob.type, 'text/html;charset=utf-8');
+  assert.equal(await app.downloads[0].blob.text(), html);
+  assert.equal(app.evaluate('state.report.id'), 'report-b');
+  assert.equal(app.storage.get('istok.draft.v1'), 'Учебная статья A');
+  assert.ok(calls.some(call => call.url === '/api/report-exports/report-a'));
+  assert.ok(!calls.some(call => call.url === '/api/report-exports/report-b'));
+  assert.ok(calls.every(call => call.body === undefined));
+});
+
+test('registered HTML export displays a server error and downloads nothing on failure', async () => {
+  const app = fixture({ fetch(url) {
+    if (url === '/api/report-exports/report-a') return json({ error: 'Учебная ошибка экспорта' }, 500);
+  } });
+  await settle();
+  app.evaluate(`state.report={id:'report-a',text:'Учебная статья',matches:[],stats:{},issues:[]};state.retrievals['report-a']=null;renderReport()`);
+  await app.element('download-reading-report').emit('click');
+  assert.equal(app.downloads.length, 0);
+  assert.equal(app.element('toast').textContent, 'Учебная ошибка экспорта');
+  assert.equal(app.element('download-reading-report').disabled, false);
 });
