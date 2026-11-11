@@ -39,6 +39,26 @@ class Reply(io.BytesIO):
         self.close()
 
 
+class MemorySocket:
+    """Byte transport for the real HTTPConnection serializer/parser; no sockets open."""
+    def __init__(self, status=200, response=None):
+        body = json.dumps(response or {"job": {"status": "queued"}}).encode("utf-8")
+        self.reply = (f"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n"
+                      f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode("ascii") + body
+        self.sent, self.closed = [], False
+
+    def sendall(self, data):
+        self.sent.append(bytes(data))
+
+    def makefile(self, mode):
+        if mode != "rb":
+            raise AssertionError("Unexpected HTTP response stream mode")
+        return io.BytesIO(self.reply)
+
+    def close(self):
+        self.closed = True
+
+
 class FakeOpener:
     def __init__(self, payloads=None, error=None):
         self.payloads = payloads or [{"results": [{"url": "https://example.test/article"}], "usage": {"credits": 1}}]
@@ -201,6 +221,39 @@ class DevMetadataPilotTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pilot.queue_case(unknown, self.out, self.run, cid, TEXT, allow_submit=True)
         self.assertEqual(unknown.call_count, 1)
+
+    def test_actual_http_connection_serializes_unicode_json_as_utf8_bytes(self):
+        transport = MemorySocket()
+        body = {"request_id": "a" * 32, "text": "Первую страницу проверили 🙂", "internet_consent": True}
+
+        def connect(connection):
+            connection.sock = transport
+
+        with patch.object(pilot.HTTPConnection, "connect", connect):
+            result = pilot.queue_http(12345, "/api/web-check-jobs", body)
+        headers, payload = b"".join(transport.sent).split(b"\r\n\r\n", 1)
+        expected = pilot.canonical_json(body).encode("utf-8")
+        self.assertTrue(headers.startswith(b"POST /api/web-check-jobs HTTP/1.1\r\n"))
+        self.assertIn(b"Content-Type: application/json", headers)
+        self.assertIn(f"Content-Length: {len(expected)}".encode("ascii"), headers)
+        self.assertEqual(payload, expected)
+        self.assertEqual(json.loads(payload.decode("utf-8")), body)
+        self.assertEqual(result, {"job": {"status": "queued"}})
+        self.assertTrue(transport.closed)
+
+    def test_actual_http_get_404_remains_recoverable_without_a_post_body(self):
+        transport = MemorySocket(status=404)
+
+        def connect(connection):
+            connection.sock = transport
+
+        with patch.object(pilot.HTTPConnection, "connect", connect), self.assertRaises(pilot.QueueHTTPError) as caught:
+            pilot.queue_http(12345, "/api/jobs/" + "a" * 32)
+        headers, payload = b"".join(transport.sent).split(b"\r\n\r\n", 1)
+        self.assertTrue(headers.startswith(b"GET /api/jobs/"))
+        self.assertEqual(payload, b"")
+        self.assertEqual(caught.exception.status, 404)
+        self.assertTrue(transport.closed)
 
     def test_lost_post_response_and_orphan_call_marker_never_resubmit(self):
         http = Mock(side_effect=[pilot.QueueHTTPError(404), TimeoutError("POST outcome unknown")])

@@ -369,6 +369,20 @@ class QueueHTTPError(RuntimeError):
         self.status = status
 
 
+def queue_http(port, path, body=None):
+    connection = HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        connection.request("GET" if body is None else "POST", path,
+            None if body is None else canonical_json(body).encode("utf-8"), {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        if response.status != 200:
+            response.read()
+            raise QueueHTTPError(response.status)
+        return json.load(response)
+    finally:
+        connection.close()
+
+
 def queue_case(http, out, run, cid, text, *, allow_submit):
     """GET first even when a report/marker already exists; unknown never becomes POST."""
     config = run["configuration"]
@@ -482,19 +496,7 @@ def _live_locked(out, run, texts):
     service.saas, service.store, service.jobs = None, Store(), Jobs()
     Thread(target=service.serve_forever, daemon=True).start()
 
-    def http(path, body=None):
-        connection = HTTPConnection("127.0.0.1", service.server_port, timeout=20)
-        try:
-            connection.request("GET" if body is None else "POST", path,
-                None if body is None else canonical_json(body), {"Content-Type": "application/json"})
-            response = connection.getresponse()
-            if response.status != 200:
-                response.read()
-                raise QueueHTTPError(response.status)
-            return json.load(response)
-        finally:
-            connection.close()
-
+    http = partial(queue_http, service.server_port)
     try:
         for cid in CASE_IDS:
             identifier = run["configuration"]["request_ids"][cid]
