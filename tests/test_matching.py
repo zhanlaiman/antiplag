@@ -11,6 +11,36 @@ def source(text=ORIGINAL, identifier="one"):
 
 
 class MatchingTests(unittest.TestCase):
+    def test_short_tail_after_one_inserted_word_is_literal_and_excludes_the_edit(self):
+        from plagiarism.matching import _tokens
+        seed = "Редактор проверил каждую строку перед публикацией заметки"
+        tail = "и сохранил исходные материалы"
+        text = seed + " ещё " + tail
+        result = analyze(text, [source(seed + " " + tail)])
+        exact = [m for m in result["matches"] if m["kind"] == "exact"]
+        self.assertEqual([m["excerpt"] for m in exact], [seed, tail])
+        self.assertTrue(all(normalize(m["excerpt"]) == normalize(m["source_excerpt"]) for m in exact))
+        edited = text.index("ещё")
+        self.assertFalse(any(m["start"] <= edited < m["end"] for m in exact))
+        self.assertEqual(sum(len(_tokens(m["excerpt"])) for m in exact), 11)
+
+    def test_short_tail_requires_a_seed_one_edit_and_the_same_sentence(self):
+        seed = "Редактор проверил каждую строку перед публикацией заметки"
+        tail = "и сохранил исходные материалы"
+        for gap in (" лишние два ", ". Ещё ", "\n\nещё "):
+            text = seed + gap + tail
+            exact = [m for m in analyze(text, [source(seed + " " + tail)])["matches"] if m["kind"] == "exact"]
+            self.assertEqual([m["excerpt"] for m in exact], [seed])
+        self.assertEqual(analyze(tail, [source(seed + " " + tail)])["matches"], [])
+
+    def test_exact_quote_does_not_expand_a_fuzzy_highlight_into_its_attribution(self):
+        quote = "В прошлом году на шахматных часах появился флажок для обозначения оставшегося времени"
+        text = "Приведём подсказку из статьи о шахматах русской Википедии: «" + quote + "»."
+        result = analyze(text, [source(quote + ".")])
+        self.assertTrue(result["matches"])
+        self.assertTrue(all(m["kind"] == "exact" for m in result["matches"]))
+        self.assertTrue(all(m["start"] >= text.index(quote) and m["quoted"] for m in result["matches"]))
+
     def test_exact_evidence_preserves_original_offsets(self):
         text = "🧪 Введение. " + ORIGINAL + " Следующий абзац."
         result = analyze(text, [source()])
@@ -49,7 +79,7 @@ class MatchingTests(unittest.TestCase):
         original = ' '.join(changed) + '.'
         result = analyze(text, [source(original)])
         exact = [match for match in result['matches'] if match['kind'] == 'exact']
-        self.assertEqual(len(exact), 2)
+        self.assertEqual(len(exact), 3)
         self.assertTrue(any(match['kind'] == 'similar' for match in result['matches']))
         for match in result['matches']:
             self.assertEqual(match['excerpt'], text[match['start']:match['end']])

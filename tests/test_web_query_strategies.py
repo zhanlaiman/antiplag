@@ -133,6 +133,38 @@ class CitationStrategyTests(unittest.TestCase):
                 self.assertEqual(" ".join(t.value for t in _tokens(text[q["start"]:q["end"]])), q["query"][1:-1])
 
 
+class ParagraphCoverageTests(unittest.TestCase):
+    def test_second_request_covers_another_paragraph_instead_of_the_opening_again(self):
+        from plagiarism.web_search import COVERAGE_STRATEGY
+        first = " ".join("характеристика%d" % i for i in range(70))
+        second = " ".join("измерение%d" % i for i in range(25))
+        text = first + "\n\n" + second
+        queries = plan_queries(text, strategy=COVERAGE_STRATEGY)
+        self.assertEqual(len(queries), 2)
+        self.assertLess(queries[0]["start"], len(first))
+        self.assertGreater(queries[1]["start"], len(first))
+
+    def test_quotes_keep_priority_and_single_request_behavior_is_unchanged(self):
+        from plagiarism.web_search import COVERAGE_STRATEGY, CITATION_STRATEGY
+        quote = "Испытательная установка записывает изменение частоты сигнала после охлаждения образца"
+        text = "Контекст редактора обсуждает старые записи измерений. " * 12 + "\n«" + quote + "»"
+        for strategy in (COVERAGE_STRATEGY, CITATION_STRATEGY):
+            self.assertTrue(any(q["start"] == text.index(quote) for q in plan_queries(text, strategy=strategy)))
+        self.assertEqual(plan_queries(text, limit=1, strategy=COVERAGE_STRATEGY),
+                         plan_queries(text, limit=1, strategy=CITATION_STRATEGY))
+
+    def test_default_preserves_request_budget_and_grounded_offsets(self):
+        for size in (6, 80, 81, 160, 400, 710):
+            text = "\n\n".join(" ".join("слово%d" % i for i in range(start, min(start + 40, size)))
+                                  for start in range(0, size, 40))
+            for limit in (1, 2, 3, 6):
+                queries = plan_queries(text, limit=limit)
+                self.assertLessEqual(len(queries), min(limit, (size + 79) // 80))
+                self.assertEqual(len(queries), len({q["query"] for q in queries}))
+                for q in queries:
+                    self.assertEqual(" ".join(t.value for t in _tokens(text[q["start"]:q["end"]])), q["query"][1:-1])
+
+
 class RelatedPageTests(unittest.TestCase):
     def test_follows_one_relevant_link_and_counts_it_inside_page_budget(self):
         from plagiarism.web_search import CITATION_STRATEGY

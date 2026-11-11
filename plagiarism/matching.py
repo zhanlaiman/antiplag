@@ -13,7 +13,7 @@ import unicodedata
 
 MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
-MATCHER_VERSION = "lexical-v2-kind-aware-dedup"
+MATCHER_VERSION = "lexical-v3-anchored-tails"
 MIN_WORDS = 6
 MIN_CHARACTERS = 35
 # These combining marks cover Cyrillic stress and Latin/Cyrillic diacritics.
@@ -143,7 +143,36 @@ def _exact_matches(text, source, target_tokens, source_tokens):
             position += max(1, best_length - MIN_WORDS + 1)
         else:
             position += 1
-    return _deduplicate(matches)
+    matches = _deduplicate(matches)
+    return _deduplicate(matches + _anchored_exact_tails(text, source, target_tokens, source_tokens, matches))
+
+
+def _anchored_exact_tails(text, source, target_tokens, source_tokens, matches):
+    """Retain a short literal tail after a long exact seed and one edited word."""
+    target_ends = {token.end: i + 1 for i, token in enumerate(target_tokens)}
+    source_ends = {token.end: i + 1 for i, token in enumerate(source_tokens)}
+    tails = []
+    for match in matches:
+        target_end = target_ends[match["end"]]
+        source_end = source_ends[match["source_end"]]
+        for target_skip, source_skip in ((1, 0), (0, 1), (1, 1)):
+            target_start = target_end + target_skip
+            source_start = source_end + source_skip
+            length = 0
+            while (target_start + length < len(target_tokens) and source_start + length < len(source_tokens)
+                   and target_tokens[target_start + length].value == source_tokens[source_start + length].value):
+                length += 1
+            if not 3 <= length < MIN_WORDS:
+                continue
+            target_stop = target_tokens[target_start + length - 1].end
+            source_stop = source_tokens[source_start + length - 1].end
+            if (re.search(r"[.!?]|\n\s*\n", text[match["end"]:target_stop])
+                    or re.search(r"[.!?]|\n\s*\n", source["text"][match["source_end"]:source_stop])):
+                continue
+            tails.append(_make_match(text, source, target_tokens, source_tokens,
+                                     target_start, target_start + length, source_start, source_start + length,
+                                     "exact", 1.0))
+    return tails
 
 
 def _segments(text, tokens):
@@ -178,6 +207,8 @@ def _similar_matches(text, source, target_tokens, source_tokens, exact):
             {"start": max(character_start, match["start"]), "end": min(character_end, match["end"])}
             for match in exact
             if match["start"] < character_end and match["end"] > character_start
+            # Short supported tails must not hide the edits between long seeds.
+            and len(_tokens(match["excerpt"])) >= MIN_WORDS
         ])
         if covered / (character_end - character_start) >= 0.75:
             continue
@@ -196,7 +227,16 @@ def _similar_matches(text, source, target_tokens, source_tokens, exact):
                 if match["end"] - match["start"] >= MIN_CHARACTERS:
                     matches.append(match)
                     break
-    return matches
+    selected = []
+    for candidate in matches:
+        source_already_exact = any(
+            anchor["start"] >= candidate["start"] and anchor["end"] <= candidate["end"]
+            and anchor["source_start"] <= candidate["source_start"] and anchor["source_end"] >= candidate["source_end"]
+            for anchor in exact
+        )
+        if not source_already_exact:
+            selected.append(candidate)
+    return selected
 
 
 def _deduplicate(matches):

@@ -31,7 +31,8 @@ QUERY_STRATEGY = "uniform-quoted-v1"
 DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
 HYBRID_STRATEGY = "hybrid-paragraph-v1"
 CITATION_STRATEGY = "hybrid-citation-v2"
-DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
+COVERAGE_STRATEGY = "hybrid-paragraph-v3"
+DEFAULT_QUERY_STRATEGY = COVERAGE_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
     "fetch_timeout": "Сайт не ответил за отведённое время.",
@@ -121,12 +122,17 @@ def _citation_queries(text):
     return candidates
 
 
-def _hybrid_queries(text, count, priority=()):
+def _hybrid_queries(text, count, priority=(), diverse=False):
     """Split the same request allowance between two text-only planners."""
     if count == 1:
         return list(priority[:1]) or plan_queries(text, limit=1, strategy=DISTINCTIVE_STRATEGY)
     uniform = plan_queries(text, limit=(count + 1) // 2, strategy=QUERY_STRATEGY)
-    distinctive = list(priority) + plan_queries(text, limit=count // 2, strategy=DISTINCTIVE_STRATEGY)
+    distinctive = list(priority)
+    if diverse:
+        covered_paragraphs = {text.count("\n", 0, item["start"]) for item in uniform}
+        alternatives = plan_queries(text, limit=MAX_QUERIES, strategy=DISTINCTIVE_STRATEGY)
+        distinctive.extend(item for item in alternatives if text.count("\n", 0, item["start"]) not in covered_paragraphs)
+    distinctive.extend(plan_queries(text, limit=count // 2, strategy=DISTINCTIVE_STRATEGY))
     candidates = []
     for i in range(max(len(uniform), len(distinctive))):
         candidates.extend(group[i] for group in (uniform, distinctive) if i < len(group))
@@ -149,13 +155,15 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
+    if strategy == COVERAGE_STRATEGY:
+        return _hybrid_queries(text, count, _citation_queries(text), diverse=True)
     if strategy == CITATION_STRATEGY:
         return _hybrid_queries(text, count, _citation_queries(text))
     if strategy == HYBRID_STRATEGY:
@@ -454,7 +462,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                                 "origin": "web_fetch", "fetched_at": fetched.get("fetched_at"),
                                 "text_sha256": sha256(fetched["text"].encode()).hexdigest(),
                                 "license_status": "not_verified", "training_consent": False}})
-            if query_strategy == CITATION_STRATEGY and url not in linked_urls and len(ordered) < MAX_URLS and not fully_covered:
+            if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY) and url not in linked_urls and len(ordered) < MAX_URLS and not fully_covered:
                 page_matches = analyze(text, [sources[-1]])["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)

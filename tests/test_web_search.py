@@ -114,10 +114,11 @@ class WebSearchTests(unittest.TestCase):
         source = words.copy()
         source[6], source[14] = 'changed006', 'changed014'
         report = web_search.run(text, searcher=Search(), fetcher=Pages(text=' '.join(source) + '.'))
-        self.assertEqual(report['stats']['matched_words'], 13)
+        self.assertEqual(report['stats']['matched_words'], 18)
         self.assertEqual(report['stats']['total_words'], 20)
-        self.assertEqual(report['stats']['uniqueness_percent'], 35)
-        self.assertEqual(sum(match['kind'] == 'exact' for match in report['matches']), 2)
+        self.assertEqual(report['stats']['uniqueness_percent'], 10)
+        self.assertEqual(sum(match['kind'] == 'exact' for match in report['matches']), 3)
+        self.assertTrue(any(match['kind'] == 'similar' for match in report['matches']))
 
     def test_partial_upper_bound_rounds_up_from_integer_counts_even_near_zero(self):
         text, source = ' '.join(['aa'] * 1999 + ['bb']), ' '.join(['aa'] * 1999)
@@ -187,7 +188,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertLessEqual(len(report['web']['discovered_urls']), 30)
         self.assertLessEqual(len(report['web']['attempted_urls']), 12)
         self.assertEqual(report['web']['query_strategy'], web_search.DEFAULT_QUERY_STRATEGY)
-        self.assertEqual(report['web']['matcher_version'], 'lexical-v2-kind-aware-dedup')
+        self.assertEqual(report['web']['matcher_version'], web_search.MATCHER_VERSION)
         self.assertEqual(report['web']['default_fetch_limits']['max_response_bytes'], 1024 * 1024)
         self.assertTrue(any(error['code'] == 'url_limit_reached' for error in report['web']['errors']))
 
