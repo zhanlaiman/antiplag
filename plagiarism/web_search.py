@@ -15,7 +15,7 @@ import re
 import sqlite3
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, build_opener
 from uuid import uuid4
 
@@ -38,6 +38,7 @@ DENSE_STRATEGY = "hybrid-citation-v4-dense"
 DEFAULT_QUERY_STRATEGY = DENSE_STRATEGY
 DOMAIN_URL_STRATEGY = "domain-round-robin-v1"
 BALANCED_URL_STRATEGY = "hybrid-domain-query-v2"
+PATH_URL_STRATEGY = "hybrid-input-path-v3"
 DEFAULT_URL_STRATEGY = BALANCED_URL_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
@@ -428,7 +429,7 @@ def _related_link(fetched, text, seen):
 
 def _fetch_order(urls, query_groups, strategy):
     """Order discovered URLs without inspecting expected sources or page text."""
-    if strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY):
+    if strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY, PATH_URL_STRATEGY):
         raise ValueError("Неизвестный способ отбора страниц для чтения.")
     grouped, allowed = {}, set()
     for url in urls:
@@ -458,6 +459,16 @@ def _fetch_order(urls, query_groups, strategy):
     return ordered
 
 
+def _rank_url_paths(ordered, text):
+    """Stably promote URLs whose path contains words from the input document."""
+    words = {token.value for token in _tokens(text) if len(token.value) >= 4 and not token.value.isdecimal()}
+    def relevance(url):
+        path_words = {token.value for token in _tokens(unquote(urlsplit(url).path))
+                      if len(token.value) >= 4 and not token.value.isdecimal()}
+        return len(words & path_words)
+    return sorted(ordered, key=lambda url: -relevance(url))
+
+
 def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
@@ -467,7 +478,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     started = time.monotonic()
     if url_strategy is None:
         url_strategy = os.environ.get("ISTOK_WEB_URL_STRATEGY", DEFAULT_URL_STRATEGY)
-    if url_strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY):
+    if url_strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY, PATH_URL_STRATEGY):
         raise ValueError("Неизвестный способ отбора страниц для чтения.")
     if query_strategy is None:
         query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", DEFAULT_QUERY_STRATEGY)
@@ -530,7 +541,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 stopped_code = error.code
                 break
     queries_unattempted = len(queries) - queries_attempted
-    ordered = _fetch_order(urls, query_groups, url_strategy)[:MAX_URLS]
+    ordered = _fetch_order(urls, query_groups, url_strategy)
+    if url_strategy == PATH_URL_STRATEGY:
+        ordered = _rank_url_paths(ordered, text)
+    ordered = ordered[:MAX_URLS]
     outside_limit = max(0, len(urls) - len(ordered))
     selected_urls = set(ordered)
     skipped_urls = [url for url in urls if url not in selected_urls]

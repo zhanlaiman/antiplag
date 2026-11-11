@@ -1,5 +1,6 @@
 import os
 import unittest
+from urllib.parse import quote
 from unittest.mock import patch
 
 from plagiarism.web_search import (
@@ -7,7 +8,9 @@ from plagiarism.web_search import (
     CITATION_STRATEGY,
     DOMAIN_URL_STRATEGY,
     MAX_URLS,
+    PATH_URL_STRATEGY,
     _fetch_order,
+    _rank_url_paths,
     run,
 )
 
@@ -20,6 +23,26 @@ def source_groups():
 
 
 class URLOrderTests(unittest.TestCase):
+    def test_path_evidence_can_restore_a_later_result_on_the_same_host(self):
+        groups = [[f"https://q{q}-rank{r}.test/page" for r in range(5)] for q in range(6)]
+        expected = "https://encyclopedia.test/wiki/" + quote("Шахматные_часы")
+        groups[0][0] = "https://encyclopedia.test/wiki/" + quote("Память")
+        groups[1][2] = expected
+        urls = list(dict.fromkeys(url for group in groups for url in group))
+        old = _fetch_order(urls, groups, BALANCED_URL_STRATEGY)
+        ordered = _rank_url_paths(_fetch_order(urls, groups, PATH_URL_STRATEGY),
+                                  "Ребёнок осматривал доску и часы перед началом партии.")
+        self.assertNotIn(expected, old[:MAX_URLS])
+        self.assertEqual(ordered[0], expected)
+        self.assertEqual(set(old), set(ordered))
+
+    def test_only_nonnumeric_path_words_supply_evidence_and_ties_are_stable(self):
+        urls = ["https://часы.test/page?topic=часы#приборы", "https://source.test/2026/год",
+                "https://source.test/" + quote("приборы_и_часы")]
+        self.assertEqual(_rank_url_paths(urls, "Автор обсуждает часы и приборы в 2026 году."),
+                         [urls[2], urls[0], urls[1]])
+        self.assertEqual(_rank_url_paths(urls, "Редактор осматривал старинную обсерваторию перед открытием."), urls)
+
     def test_balanced_order_keeps_two_sources_on_the_same_host_from_different_queries(self):
         groups = source_groups()
         urls = [url for group in groups for url in group]
