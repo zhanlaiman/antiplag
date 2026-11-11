@@ -34,6 +34,8 @@ CITATION_STRATEGY = "hybrid-citation-v2"
 COVERAGE_STRATEGY = "hybrid-paragraph-v3"
 DENSE_STRATEGY = "hybrid-citation-v4-dense"
 DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
+DOMAIN_URL_STRATEGY = "domain-round-robin-v1"
+BALANCED_URL_STRATEGY = "hybrid-domain-query-v2"
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
     "fetch_timeout": "Сайт не ответил за отведённое время.",
@@ -386,13 +388,49 @@ def _related_link(fetched, text, seen):
     return max(candidates)[1] if candidates else None
 
 
-def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None):
+def _fetch_order(urls, query_groups, strategy):
+    """Order discovered URLs without inspecting expected sources or page text."""
+    if strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY):
+        raise ValueError("Неизвестный способ отбора страниц для чтения.")
+    grouped, allowed = {}, set()
+    for url in urls:
+        if url not in allowed:
+            allowed.add(url)
+            grouped.setdefault(urlsplit(url).hostname, []).append(url)
+    domains = []
+    while any(grouped.values()):
+        for group in grouped.values():
+            if group:
+                domains.append(group.pop(0))
+    if strategy == DOMAIN_URL_STRATEGY:
+        return domains
+    ordered = domains[:MAX_URLS // 2]
+    seen = set(ordered)
+    # Preserve provider rank within each query, including unsupported-result gaps.
+    for rank in range(max(map(len, query_groups), default=0)):
+        for group in query_groups:
+            if rank >= len(group):
+                continue
+            url = group[rank]
+            if url in allowed and url not in seen:
+                seen.add(url)
+                ordered.append(url)
+    # Callers may have discovered URLs outside the supplied query groups.
+    ordered.extend(url for url in domains if url not in seen)
+    return ordered
+
+
+def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
     This is a first lexical web search, not a guarantee over every internet page.
     If a planned query or attempted page fails, no final uniqueness is claimed.
     """
     started = time.monotonic()
+    if url_strategy is None:
+        url_strategy = os.environ.get("ISTOK_WEB_URL_STRATEGY", DOMAIN_URL_STRATEGY)
+    if url_strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY):
+        raise ValueError("Неизвестный способ отбора страниц для чтения.")
     if query_strategy is None:
         query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
@@ -411,6 +449,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         from plagiarism.web_fetch import Fetcher
         fetcher = Fetcher()
     urls, seen, errors = [], set(), []
+    query_groups = []
     rejected_urls, rejected_seen = [], set()
     queries_attempted = queries_completed = discovered = duplicates = 0
     stopped_code = None
@@ -424,10 +463,13 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
             if not isinstance(results, list) or any(not isinstance(result, dict) for result in results):
                 raise WebSearchError("Некорректный ответ поискового сервиса.", "search_provider_error")
             queries_completed += 1
+            group = []
+            query_groups.append(group)
             for result in results:
                 discovered += 1
                 raw_url = result.get("url")
                 url = _canonical_url(raw_url)
+                group.append(url)
                 if not url:
                     marker = sha256(str(raw_url).encode("utf-8", errors="replace")).hexdigest()
                     if marker not in rejected_seen:
@@ -450,15 +492,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 stopped_code = error.code
                 break
     queries_unattempted = len(queries) - queries_attempted
-    # Round-robin domains prevents one large site from taking the whole fetch cap.
-    grouped = {}
-    for url in urls:
-        grouped.setdefault(urlsplit(url).hostname, []).append(url)
-    ordered = []
-    while any(grouped.values()) and len(ordered) < MAX_URLS:
-        for group in grouped.values():
-            if group and len(ordered) < MAX_URLS:
-                ordered.append(group.pop(0))
+    ordered = _fetch_order(urls, query_groups, url_strategy)[:MAX_URLS]
     outside_limit = max(0, len(urls) - len(ordered))
     selected_urls = set(ordered)
     skipped_urls = [url for url in urls if url not in selected_urls]
@@ -527,7 +561,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
 
     result.update(text=text, sources=sources, scope="web_search", web={
         "provider": provider, "status": "complete" if complete else "partial",
-        "query_strategy": query_strategy, "matcher_version": MATCHER_VERSION,
+        "query_strategy": query_strategy, "url_strategy": url_strategy, "matcher_version": MATCHER_VERSION,
         "queries_planned": len(queries), "queries_attempted": queries_attempted, "queries_completed": queries_completed,
         "queries_unattempted": queries_unattempted, "query_stop_code": stopped_code,
         "query_spans": [{"start": item["start"], "end": item["end"]} for item in queries],
