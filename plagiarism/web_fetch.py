@@ -406,6 +406,8 @@ class Fetcher:
             mime = headers["Content-Type"].split(";", 1)[0].strip().lower()
             title = target["host"]
             pdf = None
+            supplemental_texts = []
+            optional_status = None
             links = []
             if mime == "application/pdf":
                 from plagiarism.pdf_source import PDFError, extract_pdf
@@ -414,6 +416,24 @@ class Fetcher:
                 except PDFError as error:
                     raise FetchError(str(error), error.code) from None
                 text = _normalize_whitespace(pdf["text"])
+                optional_status = pdf.get("optional_status")
+                if optional_status is not None:
+                    try:
+                        variants = pdf.get("supplemental_texts", [])
+                        if not isinstance(optional_status, dict) or not isinstance(variants, list) or len(variants) > 1:
+                            raise ValueError("Invalid optional PDF views")
+                        for supplemental in variants:
+                            if not isinstance(supplemental, dict) or not isinstance(supplemental.get("text"), str):
+                                raise ValueError("Invalid optional PDF text")
+                            normalized = _normalize_whitespace(supplemental["text"])
+                            if (len(normalized.strip()) < 35 or "\0" in normalized
+                                    or len(text) + len(normalized) > MAX_TEXT_CHARACTERS):
+                                raise ValueError("Invalid optional PDF text")
+                            supplemental_texts.append({**supplemental, "text": normalized,
+                                                       "text_sha256": sha256(normalized.encode("utf-8")).hexdigest()})
+                    except (KeyError, TypeError, ValueError):
+                        supplemental_texts = []
+                        optional_status = {"engine": "pdfium", "status": "failed", "code": "pdf_parse_failed"}
                 title = _normalize_whitespace(pdf.get("title", ""))[:300] or title
                 encoding = "pdf-text"
             elif mime == "text/html":
@@ -443,5 +463,7 @@ class Fetcher:
                     "encoding": encoding, "bytes_read": wire, "decoded_bytes": len(body),
                     "robots_url": target["origin"] + "/robots.txt",
                     "extraction": pdf["extraction"] if pdf else "html-parser-v1" if mime == "text/html" else "plain-v1",
-                    **({"pdf_pages": pdf["page_count"], "pdf_parser_version": pdf["parser_version"]} if pdf else {})}
+                    **({"pdf_pages": pdf["page_count"], "pdf_parser_version": pdf["parser_version"]} if pdf else {}),
+                    **({"supplemental_texts": supplemental_texts, "optional_status": optional_status,
+                        "raw_pdf_sha256": sha256(body).hexdigest()} if pdf and optional_status is not None else {})}
         raise FetchError("Слишком много перенаправлений страницы.", "too_many_redirects")

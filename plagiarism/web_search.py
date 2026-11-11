@@ -22,6 +22,7 @@ from uuid import uuid4
 from plagiarism.auth_provider import NoRedirect
 from plagiarism.matching import MATCHER_VERSION, MAX_TEXT_CHARS, MIN_WORDS, _tokens, analyze
 from plagiarism.search_credentials import key_for, selected_provider
+from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY, analyze_with_supplements
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -373,6 +374,41 @@ def _word_coverage(text, matches):
             "matched_word_percent": round(100 * covered / len(tokens), 1) if tokens else 0}
 
 
+def _supplemental_source_views(source, fetched):
+    """Keep one bounded, independently stored view of the same physical PDF."""
+    if fetched.get("content_type") != "application/pdf":
+        return []
+    values = fetched.get("supplemental_texts", [])
+    if not isinstance(values, list) or len(values) > 1:
+        return []
+    raw_digest = fetched.get("raw_pdf_sha256")
+    pages = fetched.get("pdf_pages")
+    if (not isinstance(raw_digest, str) or re.fullmatch(r"[0-9a-f]{64}", raw_digest) is None
+            or type(pages) is not int or not 1 <= pages <= 40):
+        return []
+    views = []
+    for value in values:
+        if (not isinstance(value, dict) or value.get("id") != "pdfium-v1"
+                or value.get("parser_version") != "5.14.0" or value.get("extraction") != "pdfium-text-v1"
+                or value.get("raw_pdf_sha256") != raw_digest or value.get("page_count") != pages
+                or not isinstance(value.get("text"), str) or len(value["text"].strip()) < 35
+                or len(source["text"]) + len(value["text"]) > MAX_TEXT_CHARS or "\0" in value["text"]):
+            continue
+        try:
+            digest = sha256(value["text"].encode()).hexdigest()
+        except UnicodeError:
+            continue
+        if value.get("text_sha256") not in (None, digest):
+            continue
+        views.append({"id": source["id"] + "-pdfium-v1", "representation_of": source["id"],
+            "title": source["title"], "url": source["url"], "text": value["text"],
+            "provenance": {**source["provenance"], "text_sha256": digest,
+                           "extraction": "pdfium-text-v1", "parser_version": "5.14.0",
+                           "evidence_policy": PDF_EVIDENCE_POLICY,
+                           "raw_pdf_sha256": raw_digest, "pdf_pages": pages}})
+    return views
+
+
 def _related_link(fetched, text, seen):
     """Select one on-site content link by wording in the submitted document."""
     words = {t.value for t in _tokens(text) if len(t.value) >= 5 and not t.value.isdecimal()}
@@ -501,6 +537,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         errors.append({"stage": "limit", "code": "url_limit_reached", "count": outside_limit,
                        "message": "Часть найденных ссылок не проверена из-за лимита загрузок."})
     sources, final_urls = [], set()
+    supplements, optional_pdf_status = [], []
     urls_attempted = 0
     attempted_urls = []
     link_discoveries, linked_urls = [], set()
@@ -530,8 +567,13 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                                 "origin": "web_fetch", "fetched_at": fetched.get("fetched_at"),
                                 "text_sha256": sha256(fetched["text"].encode()).hexdigest(),
                                 "license_status": "not_verified", "training_consent": False}})
+            page_supplements = _supplemental_source_views(sources[-1], fetched)
+            supplements.extend(page_supplements)
+            if fetched.get("content_type") == "application/pdf" and isinstance(fetched.get("optional_status"), dict):
+                optional_pdf_status.append({**{key: fetched["optional_status"][key]
+                    for key in ("engine", "status", "code", "reason") if key in fetched["optional_status"]}, "url": final})
             if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and not fully_covered:
-                page_matches = analyze(text, [sources[-1]])["matches"]
+                page_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)
                 fully_covered = coverage["matched_words"] == coverage["total_words"]
@@ -567,7 +609,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     if not sources:
         errors.append({"stage": "coverage", "code": "no_sources_checked",
                        "message": "Не проверено ни одного источника. Уникальность не установлена."})
-    result = analyze(text, sources)
+    result = analyze_with_supplements(text, sources, supplements)
     words = _word_coverage(text, result["matches"])
     complete = not errors and not queries_unattempted
     total, unmatched = words["total_words"], words["total_words"] - words["matched_words"]
@@ -578,7 +620,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         result["stats"]["uniqueness_upper_bound_percent"] = ((1000 * unmatched + total - 1) // total) / 10
     from plagiarism import pdf_source, web_fetch
 
-    result.update(text=text, sources=sources, scope="web_search", web={
+    result.update(text=text, sources=sources + supplements, scope="web_search", web={
         "provider": provider, "status": "complete" if complete else "partial",
         "query_strategy": query_strategy, "url_strategy": url_strategy, "matcher_version": MATCHER_VERSION,
         "queries_planned": len(queries), "queries_attempted": queries_attempted, "queries_completed": queries_completed,
@@ -591,6 +633,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "discovered_urls": list(dict.fromkeys(urls[:30] + [link["url"] for link in link_discoveries])),
         "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
+        "supplemental_text_views": len(supplements),
+        "pdf_evidence_policy": PDF_EVIDENCE_POLICY if supplements else None,
+        "optional_pdf_status": optional_pdf_status,
         "urls_outside_limit": outside_limit, "urls_rejected": rejected_urls, "errors": errors,
         "elapsed_seconds": round(time.monotonic() - started, 3), "score_basis": "exact_word_coverage",
         "default_fetch_limits": {"max_response_bytes": web_fetch.MAX_RESPONSE_BYTES,

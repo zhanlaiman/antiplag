@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.replay_saved_dev_search import CachedPages, FrozenSearch, annotate_replay, dump, load_queries
+from scripts import replay_saved_dev_search as replay
+from scripts.replay_saved_dev_search import CachedPages, FrozenSearch, annotate_replay, dump, load_queries, load_source_pool, report_source_pages
 from plagiarism.web_fetch import FetchError
 from plagiarism.web_search import WebSearchError
 
@@ -108,6 +109,56 @@ class SavedReplaySafetyTests(unittest.TestCase):
         records, metadata = load_queries(self.root, "D01", digest)
         self.assertEqual(records, {})
         self.assertEqual(metadata["status"], "per_query_replies_not_saved")
+
+    def pdf_report(self):
+        original = TEXT.replace("material", "mate rial")
+        primary = {"id": "primary", "url": URL, "title": "Owned PDF", "text": original,
+                   "provenance": {"text_sha256": sha256(original.encode()).hexdigest()}}
+        view = {"id": "primary-pdfium-v1", "representation_of": "primary", "url": URL,
+                "title": "Owned PDF", "text": TEXT,
+                "provenance": {"text_sha256": sha256(TEXT.encode()).hexdigest(), "parser_version": "5.14.0",
+                    "extraction": "pdfium-text-v1", "raw_pdf_sha256": "a" * 64, "pdf_pages": 1}}
+        return {"id": "owned-report", "sources": [view, primary], "web": {
+            "optional_pdf_status": [{"url": URL, "engine": "pdfium", "status": "complete", "code": None}]}}
+
+    def test_flat_same_url_snapshots_restore_primary_and_a_bounded_supplement(self):
+        from plagiarism import web_search
+        from plagiarism.pdf_evidence import analyze_with_supplements
+        report = self.pdf_report()
+        restored = report_source_pages(report, {"source": "owned"})
+        self.assertEqual(len(restored), 1)
+        page = restored[URL]
+        self.assertEqual(page["text"], report["sources"][1]["text"])
+        self.assertEqual(page["supplemental_texts"][0]["text"], TEXT)
+        self.assertEqual(page["supplemental_texts"][0]["page_count"], 1)
+        self.assertEqual(page["optional_status"]["status"], "complete")
+        primary = report["sources"][1]
+        views = web_search._supplemental_source_views(primary, page)
+        self.assertEqual(len(views), 1)
+        result = analyze_with_supplements(TEXT, [primary], views)
+        self.assertEqual(result["stats"]["source_count"], 1)
+        self.assertEqual(result["stats"]["checked_source_count"], 1)
+        self.assertTrue(any(m["kind"] == "exact" and m["excerpt"] == TEXT.rstrip(".") for m in result["matches"]))
+
+    def test_latest_primary_without_supplement_does_not_inherit_an_older_view(self):
+        baseline, dense = self.root / "baseline", self.root / "dense"
+        dump(dense / "run.json", {"case_ids": ["D01"]})
+        old = self.pdf_report()
+        dump(baseline / "D01.json", old)
+        latest = deepcopy(old["sources"][1])
+        latest["text"] = "A newer independently saved source body has no optional PDF view attached."
+        latest["provenance"]["text_sha256"] = sha256(latest["text"].encode()).hexdigest()
+        dump(dense / "D01.json", {"id": "latest", "sources": [latest]})
+        with patch.object(replay, "ROOT", self.root):
+            pool, _, _ = load_source_pool(baseline, dense)
+        self.assertEqual(pool[URL]["text"], latest["text"])
+        self.assertNotIn("supplemental_texts", pool[URL])
+
+    def test_orphan_view_cannot_become_a_primary_page(self):
+        report = self.pdf_report()
+        report["sources"] = report["sources"][:1]
+        with self.assertRaises(ValueError):
+            report_source_pages(report, {})
 
 
 if __name__ == "__main__":

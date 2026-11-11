@@ -290,6 +290,41 @@ class WebFetchTests(unittest.TestCase):
         self.assert_code("unsupported_content_type", lambda: fixture.fetcher().fetch("https://example.org/article.pdf"))
         self.assertEqual(len(fixture.requests), 1)
 
+    def test_pdf_supplemental_text_is_normalized_hashed_and_keeps_noncharacters(self):
+        data = b"%PDF-1.4\nowned"
+        self.fixture.add("example.org", "/article.pdf", Response(data, headers={"Content-Type": "application/pdf"}))
+        primary = "The editor compared the original documents before preparing the final public report."
+        alternative = "The editor\r\n  compared\u00a0the original documents before preparing the final public report.\ufffe"
+        parsed = {"text": primary, "page_count": 1, "parser_version": "7.0.1", "extraction": "pypdf-text-v1",
+                  "optional_status": {"engine": "pdfium", "status": "complete", "code": None},
+                  "raw_pdf_sha256": sha256(data).hexdigest(),
+                  "supplemental_texts": [{"id": "pdfium-v1", "text": alternative, "parser_version": "5.14.0",
+                                          "extraction": "pdfium-text-v1", "page_count": 1}]}
+        with patch.object(pdf_source, "extract_pdf", return_value=parsed):
+            result = self.fixture.fetcher().fetch("https://example.org/article.pdf")
+        supplemental = result["supplemental_texts"][0]
+        self.assertEqual(result["text"], primary)
+        self.assertEqual(supplemental["text"], web_fetch._normalize_whitespace(alternative))
+        self.assertIn("\ufffe", supplemental["text"])
+        self.assertEqual(supplemental["text_sha256"], sha256(supplemental["text"].encode()).hexdigest())
+        self.assertEqual(result["raw_pdf_sha256"], sha256(data).hexdigest())
+        self.assertEqual(result["pdf_pages"], 1)
+        self.assertEqual(len(self.fixture.requests), 2)
+
+    def test_malformed_optional_views_do_not_discard_a_successful_primary_pdf(self):
+        data = b"%PDF-1.4\nowned"
+        self.fixture.add("example.org", "/article.pdf", Response(data, headers={"Content-Type": "application/pdf"}))
+        primary = "The editor compared the original documents before preparing the final public report."
+        parsed = {"text": primary, "page_count": 1, "parser_version": "7.0.1", "extraction": "pypdf-text-v1",
+                  "optional_status": {"engine": "pdfium", "status": "complete", "code": None},
+                  "supplemental_texts": [{"id": "one", "text": primary}, {"id": "two", "text": primary}]}
+        with patch.object(pdf_source, "extract_pdf", return_value=parsed):
+            result = self.fixture.fetcher().fetch("https://example.org/article.pdf")
+        self.assertEqual(result["text"], primary)
+        self.assertEqual(result["supplemental_texts"], [])
+        self.assertEqual(result["optional_status"]["code"], "pdf_parse_failed")
+        self.assertEqual(len(self.fixture.requests), 2)
+
     def test_per_request_and_total_deadlines_apply_across_redirects(self):
         def delayed():
             self.fixture.now += 9

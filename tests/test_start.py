@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
@@ -7,6 +8,42 @@ from scripts import start
 
 
 class StartTests(unittest.TestCase):
+    def test_existing_pdf_parser_configuration_reaches_site_without_model_startup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / ".runtime"
+            runtime.mkdir()
+            (runtime / "local-inference-disabled").touch()
+            python = root / "existing-python"
+            python.touch()
+            (runtime / "pdf-extraction.json").write_text(json.dumps({"engine": "pdfium", "python": str(python)}))
+            app = Mock()
+            app.wait.return_value = 0
+            with patch.object(start, "ROOT", root), patch.object(start.shutil, "which") as which, \
+                    patch.object(start, "ollama_running") as probe, \
+                    patch.object(start.subprocess, "Popen", return_value=app) as popen, \
+                    patch.dict(start.os.environ, {"ISTOK_MODEL_PROVIDER": "local"}, clear=True), patch("builtins.print"):
+                self.assertEqual(start.main(), 0)
+            which.assert_not_called()
+            probe.assert_not_called()
+            self.assertEqual(popen.call_args.kwargs["env"]["ISTOK_PDF_ALTERNATIVE_ENGINE"], "pdfium")
+            self.assertEqual(popen.call_args.kwargs["env"]["ISTOK_PDFIUM_PYTHON"], str(python))
+            # An explicit environment override can disable the optional parser.
+            with patch.object(start, "ROOT", root), patch.object(start.shutil, "which"), \
+                    patch.object(start.subprocess, "Popen", return_value=app) as popen, \
+                    patch.dict(start.os.environ, {"ISTOK_MODEL_PROVIDER": "local", "ISTOK_PDF_ALTERNATIVE_ENGINE": "off"}, clear=True), patch("builtins.print"):
+                start.main()
+            self.assertEqual(popen.call_args.kwargs["env"]["ISTOK_PDF_ALTERNATIVE_ENGINE"], "off")
+
+    def test_missing_malformed_or_relative_pdf_config_keeps_normal_startup(self):
+        with TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            self.assertEqual(start.pdf_environment(runtime), {})
+            path = runtime / "pdf-extraction.json"
+            for value in ('{', 'null', '{"engine":"pdfium","python":"relative/bin/python"}', 'x' * 4097):
+                path.write_text(value)
+                self.assertEqual(start.pdf_environment(runtime), {})
+
     def test_cloud_configuration_selects_client_environment_without_local_probe(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

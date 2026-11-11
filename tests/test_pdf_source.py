@@ -1,6 +1,9 @@
 import io
 import json
+import os
+from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -157,6 +160,146 @@ class RealOptionalPDFWorkerTests(unittest.TestCase):
         with self.assertRaises(pdf_source.PDFError) as caught:
             pdf_source.extract_pdf(data)
         self.assertEqual(caught.exception.code, "pdf_encrypted")
+
+
+class SupplementalPDFWorkerTests(unittest.TestCase):
+    valid = PDFBoundaryTests.valid
+    def setUp(self):
+        self.environment = patch.dict(os.environ, {"ISTOK_PDF_ALTERNATIVE_ENGINE": "pdfium",
+                                                  "ISTOK_PDFIUM_PYTHON": sys.executable})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def alternative(self, **changes):
+        return {**self.valid(), "text": ASCII.replace("green", "bright green"),
+                "parser_version": pdf_source.PDFIUM_PARSER_VERSION, "extraction": "pdfium-text-v1", **changes}
+
+    def workers(self, alternative=None, optional_error=None, primary=None, elapsed_primary=0,
+                optional_returncode=0, elapsed_optional=0):
+        self.clock = [100.0]
+        def run(command, **kwargs):
+            self.assertEqual(command[1:3], ["-I", "-B"])
+            self.assertTrue(kwargs["close_fds"])
+            self.assertEqual(set(kwargs["env"]), {"PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE"})
+            if command[-1] == "--worker":
+                self.clock[0] += elapsed_primary
+                value = self.valid() if primary is None else primary
+            else:
+                self.assertEqual(command[-1], "--pdfium-worker")
+                self.assertTrue(Path(command[0]).is_absolute())
+                if optional_error:
+                    raise optional_error
+                self.clock[0] += elapsed_optional
+                value = self.alternative() if alternative is None else alternative
+            kwargs["stdout"].write(json.dumps(value).encode())
+            return SimpleNamespace(returncode=0 if command[-1] == "--worker" else optional_returncode)
+        return run
+
+    def extract_with(self, **options):
+        worker = self.workers(**options)
+        with patch.object(pdf_source.time, "monotonic", side_effect=lambda: self.clock[0]), \
+                patch.object(pdf_source.subprocess, "run", side_effect=worker) as run:
+            result = pdf_source.extract_pdf(owned_pdf())
+        return result, run
+
+    def test_default_off_preserves_primary_shape_and_never_starts_optional_worker(self):
+        with patch.dict(os.environ, {"ISTOK_PDF_ALTERNATIVE_ENGINE": ""}):
+            result, run = self.extract_with()
+        self.assertEqual(result, self.valid())
+        self.assertEqual(run.call_count, 1)
+
+    def test_optional_receives_same_bytes_and_only_remaining_combined_budget(self):
+        result, run = self.extract_with(elapsed_primary=3.5)
+        self.assertEqual(run.call_count, 2)
+        self.assertIs(run.call_args_list[0].kwargs["input"], run.call_args_list[1].kwargs["input"])
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 5)
+        self.assertEqual(run.call_args_list[1].kwargs["timeout"], 1.5)
+        self.assertEqual(result["text"], ASCII)
+        self.assertEqual(result["supplemental_texts"][0]["id"], "pdfium-v1")
+        self.assertEqual(result["optional_status"]["status"], "complete")
+
+    def test_provided_shorter_budget_is_shared_and_expired_budget_skips_optional(self):
+        worker = self.workers(elapsed_primary=0.4)
+        with patch.object(pdf_source.time, "monotonic", side_effect=lambda: self.clock[0]), \
+                patch.object(pdf_source.subprocess, "run", side_effect=worker) as run:
+            result = pdf_source.extract_pdf(owned_pdf(), timeout=0.5)
+        self.assertAlmostEqual(run.call_args_list[1].kwargs["timeout"], 0.1)
+        self.assertEqual(result["optional_status"]["status"], "complete")
+        result, run = self.extract_with(elapsed_primary=5.1)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["optional_status"], {"engine": "pdfium", "status": "skipped", "code": "pdf_timeout"})
+        result, _ = self.extract_with(elapsed_primary=4, elapsed_optional=2)
+        self.assertEqual(result["supplemental_texts"], [])
+        self.assertEqual(result["optional_status"]["code"], "pdf_timeout")
+
+    def test_primary_failure_is_never_replaced_by_an_optional_success(self):
+        worker = self.workers(primary={"error": "pdf_no_text"})
+        with patch.object(pdf_source.subprocess, "run", side_effect=worker) as run, self.assertRaises(pdf_source.PDFError) as caught:
+            pdf_source.extract_pdf(owned_pdf())
+        self.assertEqual(caught.exception.code, "pdf_no_text")
+        self.assertEqual(run.call_count, 1)
+
+    def test_optional_timeout_missing_parser_and_invalid_output_keep_primary(self):
+        for options, expected in (({"optional_error": subprocess.TimeoutExpired("owned", 1)}, "pdf_timeout"),
+                ({"optional_error": OSError("owned")}, "pdf_parser_unavailable"),
+                ({"optional_error": RuntimeError("owned")}, "pdf_parse_failed"),
+                ({"optional_returncode": 95}, "pdf_resource_limit"),
+                ({"alternative": {"error": "pdf_resource_limit"}}, "pdf_resource_limit"),
+                ({"alternative": []}, "pdf_parse_failed"),
+                ({"alternative": self.alternative(parser_version="other")}, "pdf_parser_unavailable"),
+                ({"alternative": self.alternative(page_count=41)}, "pdf_page_limit"),
+                ({"alternative": self.alternative(text="bad")}, "pdf_parse_failed"),
+                ({"alternative": self.alternative(page_count=2)}, "pdf_parse_failed")):
+            with self.subTest(options=options):
+                result, _ = self.extract_with(**options)
+                self.assertEqual(result["text"], ASCII)
+                self.assertEqual(result["supplemental_texts"], [])
+                self.assertEqual(result["optional_status"]["code"], expected)
+
+    def test_combined_character_cap_keeps_primary_and_noncharacters_are_not_rewritten(self):
+        with patch.object(pdf_source, "MAX_TEXT_CHARACTERS", 130):
+            result, _ = self.extract_with(alternative=self.alternative(text=ASCII))
+        self.assertEqual(result["text"], ASCII)
+        self.assertEqual(result["supplemental_texts"], [])
+        self.assertEqual(result["optional_status"]["reason"], "combined_text_budget")
+        result, _ = self.extract_with(alternative=self.alternative(text=ASCII + "\ufffe"))
+        self.assertIn("\ufffe", result["supplemental_texts"][0]["text"])
+
+    def test_relative_optional_interpreter_never_runs_and_primary_survives(self):
+        with patch.dict(os.environ, {"ISTOK_PDFIUM_PYTHON": "relative-python"}):
+            result, run = self.extract_with()
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["optional_status"]["code"], "pdf_parser_unavailable")
+
+
+class RealSupplementalPDFiumTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.python = os.environ.get("ISTOK_PDFIUM_PYTHON")
+        if not cls.python or not Path(cls.python).is_absolute() or not Path(cls.python).is_file():
+            raise unittest.SkipTest("An explicit optional PDFium interpreter is not configured")
+        try:
+            found = subprocess.run([cls.python, "-I", "-c", "from importlib.metadata import version; print(version('pypdfium2'))"],
+                                   capture_output=True, timeout=3, check=True).stdout.decode().strip()
+        except (OSError, subprocess.SubprocessError):
+            raise unittest.SkipTest("Pinned PDFium is not available")
+        if found != pdf_source.PDFIUM_PARSER_VERSION:
+            raise unittest.SkipTest("Pinned PDFium is not available")
+
+    def test_real_ascii_optional_text_is_isolated_and_primary_is_preserved(self):
+        with patch.dict(os.environ, {"ISTOK_PDF_ALTERNATIVE_ENGINE": "pdfium", "ISTOK_PDFIUM_PYTHON": self.python}):
+            result = pdf_source.extract_pdf(owned_pdf())
+        self.assertEqual(result["text"], ASCII)
+        self.assertEqual(result["optional_status"]["status"], "complete")
+        self.assertIn(ASCII, result["supplemental_texts"][0]["text"])
+        self.assertEqual(result["supplemental_texts"][0]["parser_version"], "5.14.0")
+
+    def test_optional_worker_enforces_its_own_page_and_text_boundaries(self):
+        with patch.dict(os.environ, {"ISTOK_PDFIUM_PYTHON": self.python}):
+            for data, code in ((owned_pdf(pages=41), "pdf_page_limit"), (owned_pdf(image_only=True), "pdf_no_text")):
+                with self.subTest(code=code), self.assertRaises(pdf_source.PDFError) as caught:
+                    pdf_source._extract_pdfium(data, 5)
+                self.assertEqual(caught.exception.code, code)
 
 
 if __name__ == "__main__":

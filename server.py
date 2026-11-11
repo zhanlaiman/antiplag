@@ -43,7 +43,8 @@ def public_report(report, reviews=None):
     if report.get("scope") == "web_search":
         result["source_snapshots_count"] = sum(
             1 for source in report.get("sources", [])
-            if isinstance(source, dict) and isinstance(source.get("text"), str) and source["text"].strip())
+            if isinstance(source, dict) and not source.get("representation_of")
+            and isinstance(source.get("text"), str) and source["text"].strip())
     return result
 
 

@@ -101,6 +101,58 @@ def load_queries(directory, cid, text_hash):
                      "warning": "Flat report discovered_urls are never used as per-query search replies."}
 
 
+def report_source_pages(report, origin):
+    """Restore each primary and its stored PDF view as ONE fetched-page payload."""
+    sources = report.get("sources", [])
+    by_id = {source["id"]: source for source in sources}
+    if len(by_id) != len(sources):
+        raise ValueError("Duplicate saved source identity")
+    pages = {}
+    for source in sources:
+        text, provenance = source["text"], source.get("provenance", {})
+        digest = sha256(text.encode()).hexdigest()
+        if provenance.get("text_sha256", digest) != digest:
+            raise ValueError("Changed cached source text")
+        if source.get("representation_of"):
+            continue
+        url = canonical(source["url"])
+        pages[source["id"]] = {"url": url, "requested_url": url, "title": source.get("title", ""),
+            "text": text, "text_sha256": digest, "fetched_at": provenance.get("fetched_at"),
+            "_replay_origin": dict(origin)}
+    for source in sources:
+        parent_id = source.get("representation_of")
+        if not parent_id:
+            continue
+        parent = by_id.get(parent_id)
+        if (parent_id not in pages or parent is None
+                or canonical(source["url"]) != canonical(parent["url"])):
+            raise ValueError("Saved supplemental view has no matching primary page")
+        page, provenance = pages[parent_id], source.get("provenance", {})
+        if provenance.get("extraction") != "pdfium-text-v1" or provenance.get("parser_version") != "5.14.0":
+            page.setdefault("_replay_unavailable_supplemental_ids", []).append(source["id"])
+            continue
+        if page.get("supplemental_texts"):
+            raise ValueError("More than one saved supplemental PDF view")
+        value = {"id": "pdfium-v1", "text": source["text"],
+            "text_sha256": sha256(source["text"].encode()).hexdigest(),
+            "parser_version": provenance["parser_version"], "extraction": provenance["extraction"]}
+        # Missing historical metadata stays missing; it is never inferred from
+        # gold labels or another fetch of the same URL.
+        if "raw_pdf_sha256" in provenance:
+            page["raw_pdf_sha256"] = value["raw_pdf_sha256"] = provenance["raw_pdf_sha256"]
+        if "pdf_pages" in provenance:
+            page["pdf_pages"] = value["page_count"] = provenance["pdf_pages"]
+        page.update(content_type="application/pdf", supplemental_texts=[value])
+    statuses = {canonical(item["url"]): {key: value for key, value in item.items() if key != "url"}
+                for item in report.get("web", {}).get("optional_pdf_status", [])}
+    result = {}
+    for page in pages.values():
+        if page["url"] in statuses:
+            page["optional_status"] = statuses[page["url"]]
+        result[page["url"]] = page
+    return result
+
+
 def load_source_pool(baseline=BASELINE, dense=DENSE):
     """All 30 baseline and the six chosen fresh reports; no gold source files."""
     pool, origins, known_links = {}, [], {}
@@ -119,18 +171,10 @@ def load_source_pool(baseline=BASELINE, dense=DENSE):
             for link in report.get("web", {}).get("link_discoveries", []):
                 parent = canonical(link["parent_url"])
                 known_links.setdefault(cid, {}).setdefault(parent, set()).add(canonical(link["url"]))
-            for source in report.get("sources", []):
-                url, text = canonical(source["url"]), source["text"]
-                digest = sha256(text.encode()).hexdigest()
-                provenance = source.get("provenance", {})
-                if provenance.get("text_sha256", digest) != digest:
-                    raise ValueError("Changed cached source text")
-                # These snapshots did not preserve original link labels. Do not
-                # turn link_discoveries into artificial link/anchor metadata.
-                pool[url] = {"url": url, "requested_url": url, "title": source.get("title", ""),
-                             "text": text, "text_sha256": digest, "fetched_at": provenance.get("fetched_at"),
-                             "_replay_origin": {"case_id": cid, "report_id": report.get("id"),
-                                                "source": "saved_report_without_link_metadata"}}
+            # Choose a complete per-report snapshot atomically. A later plain
+            # snapshot must not inherit an older view from another PDF fetch.
+            pool.update(report_source_pages(report, {"case_id": cid, "report_id": report.get("id"),
+                        "source": "saved_report_without_link_metadata"}))
     return pool, origins, known_links
 
 

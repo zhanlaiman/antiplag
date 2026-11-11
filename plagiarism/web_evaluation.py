@@ -13,6 +13,7 @@ import re
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from plagiarism.matching import literal_equivalent
+from plagiarism.pdf_evidence import PrimarySupport
 
 
 SCENARIOS = frozenset({"copy", "short_insertion", "multiple_sources", "quote", "paraphrase",
@@ -136,6 +137,7 @@ def _report(report, case):
     errors = report["web"].get("errors", [])
     _require(isinstance(errors, list) and all(isinstance(item, dict) for item in errors), f"{case['id']}: некорректный web.errors.")
     valid, invalid, seen = [], [], set()
+    primary_support = {}
     for index, match in enumerate(report["matches"]):
         try:
             _require(isinstance(match, dict) and match.get("kind") in {"exact", "similar"}, "Некорректная запись подсветки.")
@@ -150,6 +152,17 @@ def _report(report, case):
             if match["kind"] == "exact":
                 _require(literal_equivalent(match["excerpt"], match["source_excerpt"]),
                          "Exact-подсветка содержит разные нормализованные тексты.")
+            if source.get("representation_of"):
+                primary_id = source["representation_of"]
+                primary = sources.get(primary_id)
+                _require(primary is not None and not primary.get("representation_of"),
+                         "У дополнительного текста PDF отсутствует первичный снимок.")
+                _require(primary["canonical_url"] == url, "Дополнительный текст ссылается на другой PDF.")
+                if primary_id not in primary_support:
+                    primary_support[primary_id] = PrimarySupport(primary["text"], primary_id)
+                proof = primary_support[primary_id].evidence(match)
+                _require(proof is not None and match.get("pdf_spacing_evidence") == proof,
+                         "Дополнительная PDF-выдержка не подтверждена первичным текстом.")
             signature = (url, *target, *original)
             if match["kind"] == "exact" and signature not in seen:
                 valid.append({"url": url, "target_span": target, "source_span": original})

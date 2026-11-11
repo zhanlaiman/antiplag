@@ -15,6 +15,21 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+def pdf_environment(runtime):
+    """Use an explicitly configured existing parser; never install anything."""
+    try:
+        path = runtime / "pdf-extraction.json"
+        if path.stat().st_size > 4096:
+            return {}
+        config = json.loads(path.read_text(encoding="utf-8"))
+        python = Path(config["python"])
+        if config.get("engine") == "pdfium" and python.is_absolute() and python.is_file():
+            return {"ISTOK_PDF_ALTERNATIVE_ENGINE": "pdfium", "ISTOK_PDFIUM_PYTHON": str(python)}
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return {}
+
+
 def ollama_running():
     try:
         with urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as response:
@@ -47,8 +62,14 @@ def main():
     print("Откройте http://127.0.0.1:8766", flush=True)
     python = sys.executable
     app_options = {"cwd": ROOT}
+    pdf_options = pdf_environment(runtime)
+    if pdf_options:
+        environment = dict(os.environ)
+        for key, value in pdf_options.items():
+            environment.setdefault(key, value)
+        app_options["env"] = environment
     if provider == "modal":
-        environment = {**os.environ, "ISTOK_MODEL_PROVIDER": "modal"}
+        environment = {**app_options.get("env", os.environ), "ISTOK_MODEL_PROVIDER": "modal"}
         environment.setdefault("MODAL_CONFIG_PATH", str(runtime / "modal-config.toml"))
         cloud_python = runtime / "modal-venv" / "bin" / "python"
         if cloud_python.is_file():

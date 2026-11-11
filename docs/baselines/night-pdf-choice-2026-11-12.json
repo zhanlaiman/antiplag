@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-11-11T19:42:16.289421+00:00",
+  "status": "chosen_before_first_reserved_pdf_inspection",
+  "policy": "pdfium-spacing-primary-order-v1",
+  "primary_parser": "pypdf 7.0.1",
+  "supplemental_parser": "pypdfium2 5.14.0",
+  "production_enabled": false,
+  "rules": [
+    "primary extraction remains mandatory and unchanged",
+    "one additional independent PDF text, same raw SHA and page count",
+    "supplementary exact evidence only",
+    "reject Unicode noncharacters, NUL, surrogates in evidence",
+    "same ordered non-whitespace evidence must occur contiguously in primary text",
+    "source excerpts and offsets refer to independently stored full view",
+    "one shared five-second extraction budget and existing byte/page/memory caps"
+  ],
+  "reserved_pdf_sha256": "36eae5d5812250c57e31cd87e591e6fd63fa2384ac4d8c53d7e0306807c75680",
+  "reserved_first_use_plan": {
+    "quote_lengths_words": [
+      10,
+      20,
+      40
+    ],
+    "positions_fraction": [
+      0.25,
+      0.5,
+      0.75
+    ],
+    "selection": "Use literal contiguous primary-source token spans at these fixed fractions, clamp to source length. Nine artificial quote targets. No manual choice or adaptation.",
+    "controls": "Two authored English independent texts about document formatting, fixed before inspecting reserved prose.",
+    "network_searches": 0,
+    "new_fetches": 0,
+    "retuning_after_reveal": "If policy changes after first use, mark this publication used for tuning; never call it fresh holdout again.",
+    "independent_controls": [
+      "The librarian checked the spacing around headings and adjusted the page margins before sharing a short guide with colleagues. Each section explains an ordinary editorial task using independently written examples from a fictional office.",
+      "A researcher compared several document layouts and kept a notebook of questions about punctuation, numbered lists, and readable type. The exercise describes a personal workflow for reviewing drafts and makes no claim to reproduce an external publication."
+    ]
+  },
+  "implementation_file_sha256": {
+    "plagiarism/pdf_source.py": "e2a02e6c20668ded32d37845fc4710a5c2846aee7aed0e115bc2aed243c19275",
+    "plagiarism/pdf_evidence.py": "1cdf9f3da819c4a1970e94c9a4a623d220991a52d032f35311d3202d2c0690af",
+    "plagiarism/web_search.py": "36db05816b85ea2bf85e77db83758fb1af2ec4f5d94186c8e33e90afebff8387",
+    "plagiarism/web_evaluation.py": "63d834d915db9be20100e83e3aa35c4ddc8895ea7ffe4f915fd5fb39cb4f09d6",
+    "plagiarism/web_fetch.py": "7067e8aab2c9888fd634b534b948962b1fb520fa97e2b72ad4868226fb11c43d"
+  }
+}
