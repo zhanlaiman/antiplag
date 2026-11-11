@@ -1181,7 +1181,7 @@ function renderHome() {
           <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте статью, заметку или абзац, который хотите проверить…"></textarea>
           <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
           <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>С пробелами</span></div>
-          <label class="home-consent"><input id="home-consent" type="checkbox">Разрешаю отправить поисковые фрагменты этого текста внешнему поисковому сервису для поиска источников.</label>
+          <label class="home-consent"><input id="home-consent" type="checkbox">Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска источников.</label>
           <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
           <p class="home-quota" id="home-quota" hidden></p>
           <p class="home-connect-note" id="home-search-unavailable" ${webConfigured() ? 'hidden' : ''}>Интернет-поиск пока не подключён к этому экземпляру. Кнопка станет доступна после подключения сервиса.</p>
@@ -1207,7 +1207,7 @@ function renderHome() {
           <div role="group" aria-label="До ${maxQueries} поисковых запросов за проверку"><small>До</small><strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span>поисковых запросов за проверку</span></div>
           <div role="group" aria-label="До ${maxUrls} страниц для сверки"><small>До</small><strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span>страниц для сверки текста</span></div>
         </div>
-        <p class="home-processing-note">Для интернет-проверки поисковые фрагменты передаются внешнему поисковому сервису. Смысловая сверка с Qwen — отдельный дополнительный инструмент.</p>
+        <p class="home-processing-note">Для интернет-проверки поисковые фрагменты передаются внешним поисковым сервисам. Смысловая сверка с Qwen — отдельный дополнительный инструмент.</p>
       </section>
       <section class="home-v2-library home-section" data-reveal>
         <p class="home-section-label">Для собственных материалов</p><h2>Есть своя библиотека?</h2><p>Сравнивайте текст с выбранными публикациями отдельно от интернет-поиска. В вашем рабочем пространстве <strong id="home-library-count">${number(state.sources.length)}</strong> материалов.</p><a href="#sources">Открыть библиотеку ↗</a>
@@ -1324,7 +1324,7 @@ function renderCheck() {
             <span>${isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
           <div class="internet-options" id="internet-options" hidden>
-            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста внешнему поисковому сервису для поиска страниц-источников.</label>
+            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска страниц-источников.</label>
           </div>
           <div class="editor-footer">
             <p id="draft-status">Черновик сохраняется на этом Mac</p>
@@ -1557,12 +1557,14 @@ function setReportAddress(surface, report) {
 function webCoverageHTML(report) {
   const web = report.web || {};
   const replay = report.offline_replay && typeof report.offline_replay === 'object';
+  const mixed = web.hybrid_reply_provenance && typeof web.hybrid_reply_provenance === 'object';
   const savedPages = replay && report.offline_replay.fresh_page_load_attempts === 0;
   return `<section class="card web-coverage">
     <h3>${webCheckComplete(report) ? 'Проверка найденных страниц завершена' : 'Проверка завершена не полностью'}</h3>
-    ${replay ? `<p class="warning">Повтор сохранённых данных: используется прежняя поисковая выдача.${savedPages ? ' Источники проверены по сохранённым снимкам.' : ''}</p>` : ''}
-    <p>${replay ? 'Использовано сохранённых поисковых ответов' : 'Поисковых запросов выполнено'} ${number(web.queries_completed)} из ${number(web.queries_planned)}.
-      ${savedPages ? 'Проверено снимков страниц' : 'Проверено страниц'} ${number(web.sources_checked)}. ${replay ? 'Обработано адресов' : 'Попыток загрузки'} ${number(web.urls_attempted)}.</p>
+    ${replay ? `<p class="warning">Повтор сохранённых данных: используется прежняя поисковая выдача.${savedPages ? ' Источники проверены по сохранённым снимкам.' : ''}</p>` : mixed ? '<p class="warning">Часть поисковой выдачи взята из сохранённых данных.</p>' : ''}
+    <p>${replay ? 'Использовано сохранённых поисковых ответов' : mixed ? 'Обработано поисковых ответов' : 'Поисковых запросов выполнено'} ${number(web.queries_completed)} из ${number(web.queries_planned)}.
+      ${savedPages ? 'Проверено снимков страниц' : 'Проверено страниц'} ${number(web.sources_checked)}. ${replay || mixed ? 'Обработано адресов' : 'Попыток загрузки'} ${number(web.urls_attempted)}.</p>
+    ${web.post_wiki_enabled ? `<p class="field-help">Дополнительный поиск по русской Википедии: ${number(web.post_wiki_queries_completed)} из ${number(web.post_wiki_queries_planned)} запросов. Подсветка строится только по тексту прочитанных страниц.</p>` : ''}
     <p class="field-help">Уникальность — доля слов без найденных дословных совпадений в загруженных страницах. Поисковые сниппеты не используются как доказательство. Оценка Qwen в этот процент не входит.</p>
     ${web.status !== 'complete' && Number.isFinite(report.stats?.uniqueness_upper_bound_percent) ? '<p class="field-help">По найденным совпадениям указана верхняя граница уникальности. Проверка остальных страниц неполная, окончательный процент не установлен.</p>' : ''}
     ${web.errors?.length ? `<details><summary>Не удалось проверить · ${number(web.errors.length)}</summary><ul>${web.errors.map(error => `<li>${escapeHTML(typeof error === 'string' ? error : error.message || 'Источник недоступен')} ${typeof error === 'object' ? safeLink(error.url) : ''}</li>`).join('')}</ul></details>` : ''}

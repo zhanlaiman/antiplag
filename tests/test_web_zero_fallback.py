@@ -93,6 +93,9 @@ class WebZeroFallbackTests(unittest.TestCase):
             for key in list(web.os.environ):
                 if key.startswith('ISTOK_WEB_'):
                     web.os.environ.pop(key)
+            # Isolate the primary zero-fallback cap; the combined public
+            # 8-query/26-page defaults have separate integration coverage.
+            web.os.environ['ISTOK_WEB_WIKI_FOLLOWUP'] = '0'
             report = web.run(text, request_id='authored-final-defaults', searcher=search, fetcher=pages)
             self.assertEqual(pages.calls[0], reference)
             self.assertEqual(len(pages.calls), 24)

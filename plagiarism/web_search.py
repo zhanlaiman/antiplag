@@ -43,6 +43,7 @@ PATH_URL_STRATEGY = "hybrid-input-path-v3"
 DEFAULT_URL_STRATEGY = PATH_URL_STRATEGY
 DEFAULT_NAMED_REFERENCES = True
 DEFAULT_ZERO_FALLBACK = True
+DEFAULT_WIKI_FOLLOWUP = True
 ZERO_FALLBACK_POLICY = "initial-zero-extra-twelve-v1"
 ZERO_FALLBACK_EXTRA_URLS = 12
 ZERO_FALLBACK_SECONDS = 300
@@ -242,8 +243,13 @@ def status():
              "Поиск по интернету ещё не подключён. Нужны ключ Brave и подтверждённые условия хранения результатов."
              if provider == "brave" else "Выбранный поисковый сервис недоступен.")
     zero_fallback = os.environ.get("ISTOK_WEB_ZERO_FALLBACK", "1" if DEFAULT_ZERO_FALLBACK else "0") == "1"
+    wiki_followup = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP", "1" if DEFAULT_WIKI_FOLLOWUP else "0") == "1"
     return {"provider": provider, "configured": configured,
-            "max_queries": MAX_QUERIES, "max_urls": MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if zero_fallback else MAX_URLS,
+            "max_queries": MAX_QUERIES + (2 if wiki_followup else 0),
+            "max_primary_queries": MAX_QUERIES, "max_secondary_queries": 2 if wiki_followup else 0,
+            "secondary_provider": "mediawiki" if wiki_followup else None,
+            "wiki_followup_enabled": wiki_followup,
+            "max_urls": 26 if wiki_followup else MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if zero_fallback else MAX_URLS,
             "max_initial_urls": MAX_URLS, "zero_fallback_enabled": zero_fallback,
             "error": None if configured else error}
 
@@ -478,13 +484,24 @@ def _rank_url_paths(ordered, text):
 
 
 def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None,
-        use_named_references=None, use_zero_fallback=None):
+        use_named_references=None, use_zero_fallback=None, use_wiki_followup=None, wiki_searcher=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
     This is a first lexical web search, not a guarantee over every internet page.
     If a planned query or attempted page fails, no final uniqueness is claimed.
     """
     started = time.monotonic()
+    custom_io = searcher is not None or fetcher is not None
+    if use_wiki_followup is None:
+        configured = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP")
+        if configured not in (None, "0", "1"):
+            raise ValueError("Неверная настройка дополнительного поиска Wikipedia.")
+        enabled = DEFAULT_WIKI_FOLLOWUP if configured is None else configured == "1"
+        # Supplying primary test/replay adapters must not construct a real
+        # secondary provider implicitly. An explicit opt-in or adapter enables it.
+        use_wiki_followup = enabled and (not custom_io or wiki_searcher is not None)
+    if type(use_wiki_followup) is not bool:
+        raise ValueError("Неверная настройка дополнительного поиска Wikipedia.")
     if url_strategy is None:
         url_strategy = os.environ.get("ISTOK_WEB_URL_STRATEGY", DEFAULT_URL_STRATEGY)
     if url_strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY, PATH_URL_STRATEGY):
@@ -737,6 +754,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         source_snapshots = zero_phase["prefix_sources"] + [source for source in source_snapshots if source["id"] not in prefix_ids]
     result.update(text=text, sources=source_snapshots, scope="web_search", web={
         "provider": provider, "status": "complete" if complete else "partial",
+        "post_wiki_enabled": False,
         "query_strategy": query_strategy, "url_strategy": url_strategy, "matcher_version": MATCHER_VERSION,
         "zero_fallback_enabled": use_zero_fallback,
         "zero_fallback_policy": ZERO_FALLBACK_POLICY if use_zero_fallback else None,
@@ -779,6 +797,16 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                         "Пересказ и перевод требуют отдельной смысловой сверки; они не включены в этот процент."]})
     if not complete:
         result["issues"].append({"kind": "partial_web_check", "message": "Проверка по интернету неполная. Итоговая уникальность не установлена; найденные совпадения сохранены."})
+    if use_wiki_followup:
+        from plagiarism.web_wiki_followup import append_post_wiki
+        if wiki_searcher is None:
+            from plagiarism.search_mediawiki import MediaWikiSearch
+            wiki_searcher = MediaWikiSearch()
+        if progress:
+            progress("Дополнительно ищем в русской Википедии", 0, 2, phase="web_search")
+        result, _ = append_post_wiki(text, result, queries, primary_urls=urls,
+            attempted_urls=attempted_urls, final_aliases=final_urls, request_id=request_id,
+            started_at=started, secondary_searcher=wiki_searcher, fetcher=fetcher, progress=progress)
     if progress:
         progress("Сохраняем проверку уникальности", len(ordered), len(ordered), phase="saving")
     return result

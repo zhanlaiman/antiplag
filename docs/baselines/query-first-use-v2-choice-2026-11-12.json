@@ -1,0 +1,32 @@
+{
+  "frozen": true,
+  "frozen_at": "2026-11-11T21:49:26.460055+00:00",
+  "git_head": "77f85ae65e63a342554b884ee94ca02d91a8238b",
+  "plan_sha256": "b6e6a86cbb4c9e166b624115070aaa080f87b527acb9e9e93ed889bd17141bd4",
+  "amendment_sha256": "ead96eae5382de36740761431c131a21dbff46ec2ef10a58f42e524c80ed03c4",
+  "query_strategy": "hybrid-citation-v4-dense",
+  "url_strategy": "hybrid-input-path-v3",
+  "named_references": true,
+  "zero_fallback": true,
+  "source_followup_policy": "productive-priority-v1",
+  "zero_fallback_policy": "initial-zero-extra-twelve-v1",
+  "pdf_alternative_engine": "pdfium",
+  "pdf_evidence_policy": "pdfium-spacing-primary-order-v1",
+  "pdfium_python": "/Users/air/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+  "matcher_version": "lexical-v4.1-cached-anchors",
+  "html_extraction_version": "html-parser-v2-implied-ends",
+  "maximum_total_fresh_queries": 48,
+  "maximum_queries_per_document": 6,
+  "maximum_url_attempts": 24,
+  "initial_url_attempts": 12,
+  "extra_phase_total_time_budget_seconds": 300,
+  "validation": {
+    "python_tests": 690,
+    "node_tests": 56,
+    "js_syntax_checks": 3,
+    "all_passed": true,
+    "python_log_sha256": "31de7372eb701f99b2c81aec778eb2102dca56566645764d424cd711fda10a03",
+    "node_log_sha256": "d39ff7d99f16b797077069c92a1c3932f73a834aa5470934ac5765912db11e1d"
+  },
+  "final70_unopened": true
+}

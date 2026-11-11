@@ -1085,6 +1085,27 @@ test('saved-data web reports distinguish replayed replies and pages from fresh n
   assert.ok(mixed.includes('используется прежняя поисковая выдача'));
   assert.ok(!mixed.includes('Источники проверены по сохранённым снимкам'));
   assert.ok(mixed.includes('Проверено страниц 1. Обработано адресов 1'));
+  delete report.offline_replay;
+  report.web.hybrid_reply_provenance = { cached_Tavily_slots: 4, Wiki_slots: 2 };
+  app.expose('savedDataReport', report);
+  app.evaluate('state.report=savedDataReport;renderReport()');
+  const partialReplay = app.element('report-area').innerHTML;
+  assert.ok(partialReplay.includes('Часть поисковой выдачи взята из сохранённых данных'));
+  assert.ok(partialReplay.includes('Обработано поисковых ответов 1 из 2'));
+  assert.ok(!partialReplay.includes('Использовано сохранённых поисковых ответов'));
+  assert.ok(!partialReplay.includes('Поисковых запросов выполнено'));
+  report.web.post_wiki_enabled = true;
+  report.web.post_wiki_queries_planned = 2;
+  report.web.post_wiki_queries_completed = 1;
+  report.web.queries_planned = 8;
+  report.web.queries_completed = 7;
+  report.web.urls_attempted = 26;
+  app.expose('savedDataReport', report);
+  app.evaluate('state.report=savedDataReport;renderReport()');
+  const supplemented = app.element('report-area').innerHTML;
+  assert.ok(supplemented.includes('Обработано поисковых ответов 7 из 8'));
+  assert.ok(supplemented.includes('Дополнительный поиск по русской Википедии: 1 из 2 запросов'));
+  assert.ok(supplemented.includes('Обработано адресов 26'));
 });
 
 test('Internet mode explains missing configuration and never sends a check without it', async () => {

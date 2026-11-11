@@ -51,9 +51,14 @@ def diagnostic_pilot_expenses(base, root):
     # Lazy import avoids a module cycle through the format pilot's shared DEV
     # key constant. Neither collector reads corpus inputs or initializes APIs.
     from scripts.query_format_accounting import collect as query_format_expenses
+    from scripts.unfamiliar_v2_accounting import collect as first_use_v2_expenses
+    from scripts.short_paragraph_pilot_accounting import collect as short_paragraph_expenses
     metadata_rows, metadata_hashes = metadata_pilot_expenses(base, root)
     format_rows, format_hashes = query_format_expenses(base, root)
-    return metadata_rows + format_rows, {**metadata_hashes, **format_hashes}
+    v2_rows, v2_hashes = first_use_v2_expenses(base, root)
+    short_rows, short_hashes = short_paragraph_expenses(base, root)
+    return metadata_rows + format_rows + v2_rows + short_rows, {
+        **metadata_hashes, **format_hashes, **v2_hashes, **short_hashes}
 
 
 def source_pair_transitions(before, after):
