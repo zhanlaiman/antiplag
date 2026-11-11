@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from plagiarism.matching import MATCHER_VERSION, MIN_WORDS, _tokens, analyze
-from plagiarism.web_search import DEFAULT_QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, MAX_QUERIES, MAX_URLS, QUERY_STRATEGY, plan_queries
+from plagiarism.web_search import CITATION_STRATEGY, DEFAULT_QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, MAX_QUERIES, MAX_URLS, QUERY_STRATEGY, plan_queries
 
 
 DEV = ROOT / "data/private/web-evaluation/materials/dev-30"
@@ -231,7 +231,7 @@ def render_table(bundle):
         "У каждого способа тот же предел в шесть фраз и двенадцать страниц на документ. "
         "Характерный поиск ранжирует окна по редкости сочетаний в документе. "
         "Гибрид делит запросы между равномерными окнами и характерными фразами. "
-        "При одном запросе он выбирает характерную фразу. Поисковые фразы строятся только по входному тексту.",
+        "При одном запросе он выбирает характерную фразу. Вариант citation-v2 отдаёт приоритет цитатам и названиям с годом в ближайшем контексте. Поисковые фразы строятся только по входному тексту.",
         "",
         f"Размечено {len(evidence)} участков в {len(rows)} документах, из них {len(literal)} допускают дословную подсветку. "
         f"Документов с разметкой, подтверждённой человеком, {bundle['gold_reviewed']}. "
@@ -305,8 +305,11 @@ def main():
     parser.add_argument("--table", type=Path, help="Таблица для сравнения по каждому документу.")
     parser.add_argument("--probe-text", type=Path, help="Сохранить слепой текст реконструкции 40/710.")
     parser.add_argument("--include-hybrid", action="store_true", help="Добавить сочетание обоих способов.")
+    parser.add_argument("--include-citations", action="store_true", help="Добавить гибрид с границами цитат и датированными названиями.")
     args = parser.parse_args()
-    strategies = (*STRATEGIES, HYBRID_STRATEGY) if args.include_hybrid else STRATEGIES
+    strategies = (*STRATEGIES, HYBRID_STRATEGY) if args.include_hybrid or args.include_citations else STRATEGIES
+    if args.include_citations:
+        strategies = (*strategies, CITATION_STRATEGY)
     bundle, probe = measure(args.dev.resolve(), strategies)
     args.output.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n")
     if args.table:

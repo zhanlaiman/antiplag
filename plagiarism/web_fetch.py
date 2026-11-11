@@ -130,18 +130,25 @@ class _TextExtractor(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.stack, self.pieces, self.title = [], [], []
         self.nodes = 0
+        self.links, self.anchor = [], None
 
     def handle_starttag(self, tag, attributes):
         self.nodes += 1
         if self.nodes > 50_000 or len(self.stack) >= 128:
             raise FetchError("HTML страницы слишком сложный.", "html_too_complex")
         values = dict(attributes)
+        if tag == "a":
+            self.anchor = None
         style = values.get("style") or ""
         ignored = (tag in self.SKIP or "hidden" in values or str(values.get("aria-hidden", "")).lower() == "true"
                    or bool(re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", style, re.I))
                    or values.get("role") in {"navigation", "banner", "contentinfo", "search"}
                    or bool(re.search(r"(?:^|\s)(?:cookie-banner|cookie-consent|site-header|site-footer)(?:\s|$)",
                                      (values.get("class") or "") + " " + (values.get("id") or ""), re.I)))
+        if tag == "a" and not ignored and not any(frame[1] for frame in self.stack) and len(self.links) < 1024:
+            href = values.get("href", "")
+            if href and len(href) <= 4096:
+                self.anchor = {"url": href, "text": ""}
         if tag in self.BLOCK and not ignored and not any(frame[1] for frame in self.stack):
             self.pieces.append("\n\n")
         if tag not in self.VOID:
@@ -153,6 +160,9 @@ class _TextExtractor(HTMLParser):
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
+        if tag == "a" and self.anchor is not None:
+            self.links.append(self.anchor)
+            self.anchor = None
         if tag in self.BLOCK and not any(frame[1] for frame in self.stack):
             self.pieces.append("\n\n")
         for index in range(len(self.stack) - 1, -1, -1):
@@ -161,6 +171,8 @@ class _TextExtractor(HTMLParser):
                 break
 
     def handle_data(self, data):
+        if self.anchor is not None and not any(frame[1] for frame in self.stack):
+            self.anchor["text"] = (self.anchor["text"] + data)[:500]
         if any(tag == "title" for tag, _ in self.stack) and all(not ignored or tag in {"head", "title"} for tag, ignored in self.stack):
             if sum(map(len, self.title)) < 1000:
                 self.title.append(data[:1000])
@@ -391,6 +403,7 @@ class Fetcher:
             mime = headers["Content-Type"].split(";", 1)[0].strip().lower()
             title = target["host"]
             pdf = None
+            links = []
             if mime == "application/pdf":
                 from plagiarism.pdf_source import PDFError, extract_pdf
                 try:
@@ -412,6 +425,7 @@ class Fetcher:
                     raise FetchError("Не удалось разобрать текст HTML-страницы.", "invalid_html") from error
                 text = _normalize_whitespace("".join(parser.pieces))
                 title = _normalize_whitespace("".join(parser.title))[:300] or title
+                links = [{"url": urljoin(target["url"], link["url"]), "text": link["text"]} for link in parser.links]
             else:
                 decoded, encoding = self._decode(body, headers["Content-Type"])
                 text = _normalize_whitespace(decoded)
@@ -420,7 +434,7 @@ class Fetcher:
                 raise FetchError("На странице не найден доступный текст.", "empty_text")
             if len(text) > MAX_TEXT_CHARACTERS:
                 raise FetchError("Извлечённый текст превышает 200000 символов.", "text_too_large")
-            return {"url": target["url"], "requested_url": requested_url, "title": title, "text": text,
+            return {"url": target["url"], "requested_url": requested_url, "title": title, "text": text, "links": links,
                     "text_sha256": sha256(text.encode("utf-8")).hexdigest(),
                     "fetched_at": datetime.now(timezone.utc).isoformat(), "content_type": mime,
                     "encoding": encoding, "bytes_read": wire, "decoded_bytes": len(body),

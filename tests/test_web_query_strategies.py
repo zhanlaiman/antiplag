@@ -100,5 +100,88 @@ class HybridStrategyTests(unittest.TestCase):
         self.assertEqual(result["web"]["query_strategy"], HYBRID_STRATEGY)
 
 
+class CitationStrategyTests(unittest.TestCase):
+    def test_long_citation_is_searched_without_surrounding_editorial_words(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        quote = "Испытательная установка записывает изменение частоты сигнала после охлаждения образца"
+        for left, right in [("«", "»"), ("“", "”"), ("„", "“"), ('"', '"')]:
+            text = "Автор исследования уточняет " + left + quote + right + ". " + "Обсуждение результатов продолжалось после окончания опыта. " * 12
+            queries = plan_queries(text, strategy=CITATION_STRATEGY)
+            selected = [q for q in queries if q["start"] == text.index(quote)]
+            self.assertTrue(selected)
+            self.assertLessEqual(selected[0]["end"], text.index(quote) + len(quote))
+            self.assertLessEqual(len(queries), (len(_tokens(text)) + 79) // 80)
+
+    def test_short_dated_title_retains_six_words_of_context(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        text = "В дневнике есть запись о необычной выставке 1937 года «Город машин»."
+        queries = plan_queries(text, strategy=CITATION_STRATEGY)
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(queries[0]["query"], '"необычной выставке 1937 года город машин"')
+        unconnected = "В 1937 году это произошло. Теперь речь идёт о «Городе машин»."
+        from plagiarism.web_search import _citation_queries
+        self.assertEqual(_citation_queries(unconnected), [])
+
+    def test_many_identical_quotes_respect_request_cap_and_unicode_offsets(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        text = '😀 «Каждое измерение требует проверки единиц и условий проведения опыта».\n' * 50
+        for limit in (1, 2, 3, 6):
+            queries = plan_queries(text, limit=limit, strategy=CITATION_STRATEGY)
+            self.assertLessEqual(len(queries), limit)
+            self.assertEqual(len(queries), len({q["query"] for q in queries}))
+            for q in queries:
+                self.assertEqual(" ".join(t.value for t in _tokens(text[q["start"]:q["end"]])), q["query"][1:-1])
+
+
+class RelatedPageTests(unittest.TestCase):
+    def test_follows_one_relevant_link_and_counts_it_inside_page_budget(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        text = "Исследователь внимательно изучил старинные чертежи большой обсерватории."
+        first, related = "https://source.test/start", "https://source.test/reference"
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": first}]
+        class Pages:
+            def __init__(self):
+                self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                return {"url": url, "text": text if url == related else "Описание здания содержит только сведения о площади помещений.",
+                        "links": [{"url": related, "text": "Чертежи обсерватории"},
+                                  {"url": "https://different.test/", "text": "Чертежи обсерватории"}]}
+        pages = Pages()
+        report = run(text, searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertEqual(pages.calls, [first, related])
+        self.assertEqual(report["web"]["urls_attempted"], 2)
+        self.assertEqual(report["stats"]["matched_words"], len(_tokens(text)))
+        self.assertEqual(report["web"]["link_discoveries"][0]["parent_url"], first)
+
+    def test_link_discovery_cannot_exceed_twelve_loads(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": "https://source.test/page%d" % i} for i in range(12)]
+        class Pages:
+            def __init__(self):
+                self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                return {"url": url, "text": "На этой странице опубликованы сведения о часах работы.",
+                        "links": [{"url": "https://source.test/extra", "text": "Обсерватории"}]}
+        pages = Pages()
+        report = run("Исследователь изучил старинные чертежи большой обсерватории перед поездкой.", searcher=Search(),
+                     fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertEqual(len(pages.calls), 12)
+        self.assertEqual(report["web"]["link_discoveries"], [])
+
+    def test_hidden_and_navigation_links_are_excluded_from_source_candidates(self):
+        from plagiarism.web_fetch import _TextExtractor
+        parser = _TextExtractor()
+        parser.feed('<nav><a href="/nav">Обсерватории</a></nav><a hidden href="/hidden">Чертежи</a>'
+                    '<p><a href="/ref">Чертежи <b>обсерватории</b></a></p>')
+        parser.close()
+        self.assertEqual(parser.links, [{"url": "/ref", "text": "Чертежи обсерватории"}])
+
+
 if __name__ == "__main__":
     unittest.main()

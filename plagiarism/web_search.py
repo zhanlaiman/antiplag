@@ -4,6 +4,7 @@ No language model is called. Search snippets never become matching evidence.
 """
 
 from datetime import datetime, timezone
+from bisect import bisect_left
 from collections import Counter
 from contextlib import contextmanager
 from hashlib import sha256
@@ -29,7 +30,8 @@ MAX_URLS = 12
 QUERY_STRATEGY = "uniform-quoted-v1"
 DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
 HYBRID_STRATEGY = "hybrid-paragraph-v1"
-DEFAULT_QUERY_STRATEGY = HYBRID_STRATEGY
+CITATION_STRATEGY = "hybrid-citation-v2"
+DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
@@ -85,12 +87,40 @@ def _distinctive_windows(text, tokens, width, count):
     return sorted(chosen)
 
 
-def _hybrid_queries(text, count):
+def _citation_queries(text):
+    """Use quotation boundaries and dated titles as text-only source clues."""
+    tokens = _tokens(text)
+    candidates = []
+    starts = [token.start for token in tokens]
+    for match in re.finditer(r'«([^«»]+)»|“([^“”]+)”|„([^„“]+)“|"([^"\n]+)"', text):
+        group = next(i for i in range(1, 5) if match.group(i) is not None)
+        start, end = match.span(group)
+        quoted_start = bisect_left(starts, start)
+        first, last = quoted_start, bisect_left(starts, end)
+        if first == last:
+            continue
+        if last - first < MIN_WORDS:
+            # A two-word title alone is weak. A nearby year supplies useful context.
+            first = max(0, last - MIN_WORDS)
+            context = tokens[first:quoted_start]
+            if last - first < MIN_WORDS or not any(re.fullmatch(r"(?:1[0-9]{3}|20[0-9]{2})", t.value) for t in context):
+                continue
+            # Do not attach a title to a previous sentence or paragraph.
+            if re.search(r"[.!?\n]", text[tokens[first].start:tokens[quoted_start].start]):
+                continue
+        window = tokens[first:min(last, first + 10)]
+        query = '"' + ' '.join(token.value[:40] for token in window) + '"'
+        if len(query) <= 390:
+            candidates.append({"query": query, "start": window[0].start, "end": window[-1].end})
+    return candidates
+
+
+def _hybrid_queries(text, count, priority=()):
     """Split the same request allowance between two text-only planners."""
     if count == 1:
-        return plan_queries(text, limit=1, strategy=DISTINCTIVE_STRATEGY)
+        return list(priority[:1]) or plan_queries(text, limit=1, strategy=DISTINCTIVE_STRATEGY)
     uniform = plan_queries(text, limit=(count + 1) // 2, strategy=QUERY_STRATEGY)
-    distinctive = plan_queries(text, limit=count // 2, strategy=DISTINCTIVE_STRATEGY)
+    distinctive = list(priority) + plan_queries(text, limit=count // 2, strategy=DISTINCTIVE_STRATEGY)
     candidates = []
     for i in range(max(len(uniform), len(distinctive))):
         candidates.extend(group[i] for group in (uniform, distinctive) if i < len(group))
@@ -113,13 +143,15 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
+    if strategy == CITATION_STRATEGY:
+        return _hybrid_queries(text, count, _citation_queries(text))
     if strategy == HYBRID_STRATEGY:
         return _hybrid_queries(text, count)
     windows = _distinctive_windows(text, tokens, width, count) if strategy == DISTINCTIVE_STRATEGY else None
@@ -291,6 +323,22 @@ def _word_coverage(text, matches):
             "matched_word_percent": round(100 * covered / len(tokens), 1) if tokens else 0}
 
 
+def _related_link(fetched, text, seen):
+    """Select one on-site content link by wording in the submitted document."""
+    words = {t.value for t in _tokens(text) if len(t.value) >= 5 and not t.value.isdecimal()}
+    candidates = []
+    origin = urlsplit(fetched["url"]).netloc
+    for item in fetched.get("links", []):
+        url = _canonical_url(item.get("url"))
+        if not url or url in seen or urlsplit(url).netloc != origin or urlsplit(url).query:
+            continue
+        label = {t.value for t in _tokens(item.get("text", "")) if len(t.value) >= 5 and not t.value.isdecimal()}
+        common = words & label
+        if common:
+            candidates.append((len(common) / max(1, len(label)), url))
+    return max(candidates)[1] if candidates else None
+
+
 def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
@@ -373,6 +421,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     sources, final_urls = [], set()
     urls_attempted = 0
     attempted_urls = []
+    link_discoveries, linked_urls = [], set()
     for index, url in enumerate(ordered):
         if progress:
             progress("Сверяем доступные страницы", index, len(ordered), phase="web_fetch")
@@ -398,6 +447,14 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                                 "origin": "web_fetch", "fetched_at": fetched.get("fetched_at"),
                                 "text_sha256": sha256(fetched["text"].encode()).hexdigest(),
                                 "license_status": "not_verified", "training_consent": False}})
+            if query_strategy == CITATION_STRATEGY and url not in linked_urls and len(ordered) < MAX_URLS:
+                related = _related_link(fetched, text, seen | final_urls)
+                if related and not _word_coverage(text, analyze(text, [sources[-1]])["matches"])["matched_words"]:
+                    seen.add(related)
+                    urls.append(related)
+                    ordered.append(related)
+                    linked_urls.add(related)
+                    link_discoveries.append({"parent_url": final, "url": related, "basis": "input_anchor_overlap"})
         except (RuntimeError, OSError, ValueError, KeyError) as error:
             errors.append({"stage": "fetch", "url": url, "code": getattr(error, "code", "fetch_error"),
                            "message": "Страница недоступна или не разрешает автоматическую загрузку."})
@@ -422,7 +479,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "queries_unattempted": queries_unattempted, "query_stop_code": stopped_code,
         "query_spans": [{"start": item["start"], "end": item["end"]} for item in queries],
         "urls_found": len(urls) + len(rejected_urls), "urls_supported": len(urls), "urls_discovered": discovered,
-        "discovered_urls": urls[:30], "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
+        "link_discoveries": link_discoveries, "discovered_urls": urls[:30], "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
         "urls_outside_limit": outside_limit, "urls_rejected": rejected_urls, "errors": errors,
         "elapsed_seconds": round(time.monotonic() - started, 3), "score_basis": "exact_word_coverage",
