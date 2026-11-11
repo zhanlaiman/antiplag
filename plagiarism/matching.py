@@ -13,7 +13,7 @@ import unicodedata
 
 MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
-MATCHER_VERSION = "lexical-v3-anchored-tails"
+MATCHER_VERSION = "lexical-v4-line-wrap-variants"
 MIN_WORDS = 6
 MIN_CHARACTERS = 35
 # These combining marks cover Cyrillic stress and Latin/Cyrillic diacritics.
@@ -64,6 +64,35 @@ def normalize(text):
     the breve in й and Latin accents, retain their canonical Unicode meaning.
     """
     return " ".join(token.value for token in _tokens(text))
+
+
+def _joined_line_tokens(text, tokens):
+    """Offer a line-wrap interpretation while retaining original character spans.
+
+    The original stream is still compared separately: a real hyphenated word
+    split at a line ending must keep its existing evidence.
+    """
+    if not re.search(r"-[ \t]*(?:\r\n|\n|\r)[ \t]*", text):
+        return tokens
+    joined = []
+    for token in tokens:
+        if (joined and joined[-1].value[-1].isalpha() and token.value[0].isalpha()
+                and re.fullmatch(r"-[ \t]*(?:\r\n|\n|\r)[ \t]*", text[joined[-1].end:token.start])):
+            previous = joined.pop()
+            joined.append(Token(previous.value + token.value, previous.start, token.end))
+        else:
+            joined.append(token)
+    return joined
+
+
+def literal_equivalent(first, second):
+    """Confirm original or single-line dehyphenated evidence, without editing it."""
+    def forms(text):
+        tokens = _tokens(text)
+        return {tuple(token.value for token in tokens),
+                tuple(token.value for token in _joined_line_tokens(text, tokens))}
+    first_forms = forms(first)
+    return bool(first_forms.intersection(forms(second)) - {()})
 
 
 def _issues(text):
@@ -271,6 +300,7 @@ def analyze(text, sources):
     if len(sources) > MAX_SOURCES:
         raise ValueError(f"За одну проверку можно сравнить до {MAX_SOURCES} источников.")
     target_tokens = _tokens(text)
+    target_joined = _joined_line_tokens(text, target_tokens)
     matches = []
     for source in sources:
         if not isinstance(source.get("text"), str):
@@ -279,6 +309,15 @@ def analyze(text, sources):
             raise ValueError(f"Источник должен содержать не больше {MAX_TEXT_CHARS} символов.")
         source_tokens = _tokens(source["text"])
         exact = _exact_matches(text, source, target_tokens, source_tokens)
+        source_joined = _joined_line_tokens(source["text"], source_tokens)
+        target_variants = [target_tokens] + ([target_joined] if len(target_joined) < len(target_tokens) else [])
+        source_variants = [source_tokens] + ([source_joined] if len(source_joined) < len(source_tokens) else [])
+        for target_variant in target_variants:
+            for source_variant in source_variants:
+                if target_variant is target_tokens and source_variant is source_tokens:
+                    continue
+                exact.extend(_exact_matches(text, source, target_variant, source_variant))
+        exact = _deduplicate(exact)
         similar = _similar_matches(text, source, target_tokens, source_tokens, exact)
         matches.extend(_deduplicate(similar + exact))
     matches.sort(key=lambda match: (match["start"], -match["score"], str(match["source_id"])))

@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from plagiarism.matching import normalize
+from plagiarism.matching import literal_equivalent
 
 
 SCENARIOS = frozenset({"copy", "short_insertion", "multiple_sources", "quote", "paraphrase",
@@ -148,8 +148,7 @@ def _report(report, case):
             _require(match.get("excerpt") == text[target[0]:target[1]], "excerpt не подтверждается report.text.")
             _require(match.get("source_excerpt") == source["text"][original[0]:original[1]], "source_excerpt не подтверждается source.text.")
             if match["kind"] == "exact":
-                normalized = normalize(match["excerpt"])
-                _require(bool(normalized) and normalized == normalize(match["source_excerpt"]),
+                _require(literal_equivalent(match["excerpt"], match["source_excerpt"]),
                          "Exact-подсветка содержит разные нормализованные тексты.")
             signature = (url, *target, *original)
             if match["kind"] == "exact" and signature not in seen:

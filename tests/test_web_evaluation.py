@@ -185,6 +185,26 @@ class WebEvaluationTests(unittest.TestCase):
         self.assertTrue(case["invalid_highlights"])
         self.assertEqual(case["validated_exact_highlights"], 0)
 
+    def test_line_wrap_exact_evidence_retains_the_original_snapshot_and_scores(self):
+        from plagiarism.matching import analyze
+        report = deepcopy(self.report)
+        report["sources"][0]["text"] = TEXT.replace("особенности", "особен-\nности")
+        report["matches"] = analyze(TEXT, report["sources"])["matches"]
+        self.save(reports={"report.json": report})
+        result = self.run_score()["cases"][0]
+        self.assertEqual(result["outcome"], "found")
+        self.assertEqual(result["invalid_highlights"], [])
+
+    def test_paragraph_break_is_not_accepted_as_dehyphenated_exact_evidence(self):
+        report = deepcopy(self.report)
+        broken = TEXT.replace("особенности", "особен-\n\nности")
+        report["sources"][0]["text"] = broken
+        report["matches"][0].update(source_end=len(broken), source_excerpt=broken)
+        self.save(reports={"report.json": report})
+        result = self.run_score()["cases"][0]
+        self.assertTrue(result["invalid_highlights"])
+        self.assertEqual(result["validated_exact_highlights"], 0)
+
     def test_read_source_implies_discovery_even_with_old_or_redirect_audit(self):
         for audit in (None, ["https://example.org/original-redirect"]):
             with self.subTest(audit=audit):
