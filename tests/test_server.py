@@ -162,6 +162,21 @@ class ServerTests(unittest.TestCase):
         status, body = self.request("POST", "/api/check", {"text": SOURCE_TEXT})
         self.assertEqual(status, 400, body)
 
+    def test_source_pack_installation_is_idempotent_and_preserves_attribution(self):
+        status, body = self.request("GET", "/api/source-packs")
+        self.assertEqual(status, 200, body)
+        pack = next(item for item in body["packs"] if item["id"] == "economics-ru-v1")
+        self.assertEqual(pack["installed_count"], 0)
+        for expected_new in (pack["source_count"], 0):
+            status, body = self.request("POST", "/api/source-packs/install", {"pack_id": pack["id"]})
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["installed_count"], expected_new)
+            self.assertEqual(body["sources"][0]["provenance"]["license_name"], "CC BY-SA 4.0")
+        status, body = self.request("GET", "/api/source-packs")
+        installed = next(item for item in body["packs"] if item["id"] == pack["id"])
+        self.assertEqual(installed["installed_count"], pack["source_count"])
+        self.assertEqual(self.httpd.store.counts()["sources"], pack["source_count"])
+
     def test_model_unavailable_does_not_disable_local_matching(self):
         self.add_source()
         unavailable = {"available": False, "model": "qwen3:4b", "models": [], "error": "Ollama недоступна"}
@@ -261,6 +276,61 @@ class ServerTests(unittest.TestCase):
             "retrieval_id": retrieval["id"], "candidate_id": candidate["id"], "judgment_id": wrong["id"],
         })
         self.assertEqual(status, 400, body)
+
+    def test_later_failed_recheck_invalidates_old_positive_rewrite(self):
+        self.add_source()
+        report = self.check()
+        candidate = {"id": "candidate-1-1", "query_excerpt": SOURCE_TEXT, "source_excerpt": SOURCE_TEXT}
+        retrieval = self.httpd.store.save("retrieval", {"report_id": report["id"], "candidates": [candidate]})
+        old = self.httpd.store.save("candidate-judgment", {
+            "retrieval_id": retrieval["id"], "candidate_id": candidate["id"], "judgment": {"relation": "exact"},
+        })
+        self.httpd.store.save("candidate-error", {
+            "retrieval_id": retrieval["id"], "candidate_id": candidate["id"], "error": "Повторная проверка не завершилась",
+        })
+        with patch.object(application.llm, "rewrite") as rewrite:
+            status, body = self.request("POST", "/api/candidate-rewrite", {
+                "retrieval_id": retrieval["id"], "candidate_id": candidate["id"], "judgment_id": old["id"],
+            })
+        self.assertEqual(status, 400, body)
+        rewrite.assert_not_called()
+
+    def test_batch_saves_success_and_failure_before_returning_final_result(self):
+        self.add_source()
+        report = self.check()
+        candidates = [{
+            "id": f"candidate-1-{index}", "query_excerpt": SOURCE_TEXT, "source_excerpt": SOURCE_TEXT,
+        } for index in (1, 2)]
+        retrieval = self.httpd.store.save("retrieval", {"report_id": report["id"], "candidates": candidates})
+        with patch.object(application.llm, "judge", side_effect=[
+            {"relation": "exact", "model": "qwen3:4b"}, application.llm.OllamaError("Ошибка второй пары"),
+        ]):
+            status, body = self.request("POST", "/api/candidate-check-jobs", {"retrieval_id": retrieval["id"]})
+            self.assertEqual(status, 200, body)
+            job_id = body["job"]["id"]
+            for _ in range(100):
+                status, body = self.request("GET", f"/api/jobs/{job_id}")
+                if body["job"]["status"] in {"complete", "failed"}:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(body["job"]["status"], "complete", body)
+        self.assertEqual(body["job"]["result"]["counts"], {"total": 2, "positive": 1, "errors": 1, "uncertain": 0})
+        # Reopening the store simulates losing the in-memory job registry.
+        self.httpd.store = Store(self.httpd.store.path)
+        status, body = self.request("GET", f"/api/candidate-judgments/{retrieval['id']}")
+        self.assertEqual(status, 200, body)
+        results = {item["candidate_id"]: item for item in body["judgments"]}
+        self.assertEqual(results[candidates[0]["id"]]["judgment"]["relation"], "exact")
+        self.assertEqual(results[candidates[1]["id"]]["error"], "Ошибка второй пары")
+        with patch.object(application.llm, "judge", side_effect=application.llm.OllamaError("Повторная ошибка")):
+            status, body = self.request("POST", "/api/candidate-judge", {
+                "retrieval_id": retrieval["id"], "candidate_id": candidates[0]["id"],
+            })
+        self.assertEqual(status, 503, body)
+        status, body = self.request("GET", f"/api/candidate-judgments/{retrieval['id']}")
+        latest = next(item for item in body["judgments"] if item["candidate_id"] == candidates[0]["id"])
+        self.assertEqual(latest["error"], "Повторная ошибка")
+        self.assertNotIn("judgment", latest)
 
     def test_match_decisions_persist_and_preserve_original_report(self):
         self.add_source()

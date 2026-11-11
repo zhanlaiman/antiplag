@@ -15,8 +15,12 @@ MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
 MIN_WORDS = 6
 MIN_CHARACTERS = 35
-WORD_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
+# These combining marks cover Cyrillic stress and Latin/Cyrillic diacritics.
+# Attached marks remain part of a token when Unicode cannot compose them.
+WORD_PATTERN = re.compile(r"[^\W_](?:[^\W_]|[\u0300-\u036f])*", re.UNICODE)
+CLUSTER_PATTERN = re.compile(r".[\u0300-\u036f]*", re.DOTALL)
 INVISIBLE = frozenset("\u200b\u200c\u200d\u2060\ufeff\u00ad")
+CYRILLIC_STRESS = str.maketrans({"\u0300": None, "\u0301": None})
 CONFUSABLES = str.maketrans("aceopxykmtbh", "асеорхукмтвн")
 
 
@@ -30,24 +34,34 @@ class Token:
 def _tokens(text):
     characters = []
     offsets = []
-    for position, character in enumerate(text):
-        if character in INVISIBLE:
+    end_offsets = []
+    for cluster in CLUSTER_PATTERN.finditer(text):
+        original = "".join(character for character in cluster.group() if character not in INVISIBLE)
+        if not original:
             continue
-        normalized = unicodedata.normalize("NFKC", character).lower().replace("ё", "е")
+        normalized = unicodedata.normalize("NFD", original)
+        if re.search(r"[А-Яа-яЁё]", normalized):
+            normalized = normalized.translate(CYRILLIC_STRESS)
+        normalized = unicodedata.normalize("NFKC", normalized).lower().replace("ё", "е")
         characters.extend(normalized)
-        offsets.extend([position] * len(normalized))
+        offsets.extend([cluster.start()] * len(normalized))
+        end_offsets.extend([cluster.end()] * len(normalized))
     normalized_text = "".join(characters)
     tokens = []
     for word in WORD_PATTERN.finditer(normalized_text):
         value = word.group()
         if re.search(r"[а-я]", value):
             value = value.translate(CONFUSABLES)
-        tokens.append(Token(value, offsets[word.start()], offsets[word.end() - 1] + 1))
+        tokens.append(Token(value, offsets[word.start()], end_offsets[word.end() - 1]))
     return tokens
 
 
 def normalize(text):
-    """Normalize case, spacing, zero-width characters and mixed-script words."""
+    """Normalize typography while preserving original evidence offsets.
+
+    Cyrillic acute/grave stress marks are ignored. Other diacritics, including
+    the breve in й and Latin accents, retain their canonical Unicode meaning.
+    """
     return " ".join(token.value for token in _tokens(text))
 
 

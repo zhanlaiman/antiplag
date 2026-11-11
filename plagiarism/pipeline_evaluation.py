@@ -1,6 +1,7 @@
 """Development comparison of lexical matching with retrieval plus pair judging."""
 
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
 from hashlib import sha256
@@ -141,10 +142,82 @@ def _summary(results, engine):
         "false_positive_known_independent_source_pairs": [{"example_id": case_id, "source_id": source_id} for case_id, source_id in false_pairs],
         "unverified_positive_source_pairs": [{"example_id": case_id, "source_id": source_id} for case_id, source_id in unverified],
         "errors": sum(item[engine].get("errors", 0) for item in results),
+        "uncertain_pairs": sum(pair.get("error_code") == "unconfirmed_exact" for item in results for pair in item[engine]["pairs"]),
+        "request_errors": sum(item[engine].get("errors", 0) for item in results)
+                          - sum(pair.get("error_code") == "unconfirmed_exact" for item in results for pair in item[engine]["pairs"]),
         "articles_with_errors": sum(bool(item[engine].get("errors")) for item in results),
         "elapsed_seconds": round(sum(item[engine]["elapsed_seconds"] for item in results), 3),
         "by_kind": by_kind,
     }
+
+
+def audit_evidence_spans(result, dataset_path=retrieval_evaluation.DATASET_PATH):
+    """Add an offset-only audit to a saved run without running search or Qwen.
+
+    Touching an expected span checks evidence location. It cannot establish
+    whether the model's explanation or its relation label is correct.
+    """
+    dataset = retrieval_evaluation.load_dataset(dataset_path)
+    if result.get("dataset_fingerprint") != dataset["fingerprint"]:
+        raise ValueError("Для аудита нужен тот же набор примеров, который использовался в прогоне.")
+    audited = deepcopy(result)
+    cases = {case["id"]: case for case in dataset["cases"]}
+    sources = {source["id"]: source for source in dataset["sources"]}
+    articles_with_evidence = 0
+    positive_articles = 0
+    wrong_passages = []
+    for item in audited["results"]:
+        if item["example_id"] not in cases:
+            raise ValueError("Сохранённый пример отсутствует в исходном наборе.")
+        case = cases[item["example_id"]]
+        source_id = case.get("expected_source_id")
+        hybrid = item["hybrid_qwen"]
+        if source_id is None:
+            hybrid["evidence_touches_expected_span"] = None
+            continue
+        positive_articles += 1
+        source = sources[source_id]
+        excerpt = case["expected_source_excerpt"]
+        expected_start = source["text"].index(excerpt)
+        expected_end = expected_start + len(excerpt)
+        required_overlap = min(12, 0.25 * len(excerpt))
+        article_touches = False
+        for pair in hybrid["pairs"]:
+            if pair["source_id"] != source_id or not pair.get("positive"):
+                continue
+            evidence = pair.get("evidence", {})
+            start, end = evidence.get("evidence_source_start"), evidence.get("evidence_source_end")
+            literal = (type(start) is int and type(end) is int
+                       and 0 <= start < end <= len(source["text"])
+                       and source["text"][start:end] == evidence.get("evidence_source"))
+            overlap = max(0, min(end, expected_end) - max(start, expected_start)) if literal else 0
+            touches = literal and overlap >= required_overlap
+            span_audit = {
+                "expected_source_start": expected_start, "expected_source_end": expected_end,
+                "overlap_characters": overlap, "overlap_fraction": round(overlap / len(excerpt), 4),
+                "required_overlap_characters": required_overlap,
+                "literal_source_evidence_verified": literal,
+                "evidence_touches_expected_span": touches,
+            }
+            pair["expected_span_audit"] = span_audit
+            article_touches = article_touches or touches
+            if not touches:
+                wrong_passages.append({"example_id": item["example_id"], "source_id": source_id,
+                    "candidate_id": pair["candidate"]["id"], "relation": pair.get("judgment", {}).get("relation"),
+                    "overlap_fraction": span_audit["overlap_fraction"]})
+        hybrid["evidence_touches_expected_span"] = article_touches
+        articles_with_evidence += int(article_touches)
+    metrics = audited["metrics"]["hybrid_qwen"]
+    metrics["positive_articles_with_evidence_touching_expected_span"] = articles_with_evidence
+    metrics["evidence_touches_expected_span_rate"] = round(articles_with_evidence / positive_articles, 4) if positive_articles else None
+    metrics["wrong_source_passage_positive_findings"] = wrong_passages
+    audited["evidence_span_audit"] = {
+        "version": "expected-source-overlap-v1",
+        "threshold_rule": "overlap_characters >= min(12, 0.25 * expected_excerpt_characters)",
+        "note": "Пересечение выбранной выдержки с ожидаемым фрагментом подтверждает её расположение. Правильность смыслового вывода и метки exact или paraphrase требует отдельной оценки.",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return audited
 
 
 def run(split="test", top_k=5, on_result=None, *, model=None, max_cases=None,
@@ -219,6 +292,7 @@ def run(split="test", top_k=5, on_result=None, *, model=None, max_cases=None,
                     else:
                         hybrid["model_calls"] += 1
                         judgment = judge_fn(text, source_text, name)
+                        hybrid["model_calls"] += max(0, judgment.get("attempts", 1) - 1)
                         _grounded(judgment, text, source_text, candidate["query_start"], candidate["source_start"])
                         cache.save(key, {"judgment": judgment, **provenance,
                                          "elapsed_seconds": round(time.monotonic() - pair_started, 3),
@@ -232,6 +306,11 @@ def run(split="test", top_k=5, on_result=None, *, model=None, max_cases=None,
                         hybrid["source_hit"] = True
                 except (RuntimeError, ValueError, OSError) as error:
                     pair["error"] = str(error)
+                    pair["error_code"] = getattr(error, "code", "model_error")
+                    details = getattr(error, "details", None)
+                    if details:
+                        pair["error_details"] = details
+                        hybrid["model_calls"] += max(0, details.get("attempts", 1) - 1)
                     hybrid["errors"] += 1
                 pair["elapsed_seconds"] = round(time.monotonic() - pair_started, 3)
                 hybrid["pairs"].append(pair)
@@ -245,7 +324,7 @@ def run(split="test", top_k=5, on_result=None, *, model=None, max_cases=None,
         results.append(item)
         if on_result:
             on_result({"phase": "case", **item}, case_index + 1, len(cases))
-    return {
+    result = {
         "dataset": dataset["id"], "dataset_fingerprint": dataset["fingerprint"], "dataset_note": dataset["note"],
         "synthetic": True, "usage": "development_smoke", "split": split, "top_k": top_k,
         "top_k_scope": "per_query_chunk", "max_cases": max_cases, **provenance,
@@ -257,3 +336,4 @@ def run(split="test", top_k=5, on_result=None, *, model=None, max_cases=None,
         "elapsed_seconds": round(time.monotonic() - started, 3), "created_at": datetime.now(timezone.utc).isoformat(),
         "interpretation": "Поиск и Qwen проверены на синтетических примерах разработки. Совпадение источника не подтверждает правильность смыслового вывода. Ложными парами считаются только положительные находки для явно размеченных независимых источников. Остальные положительные пары требуют разметки. Ошибки запросов учитываются отдельно; отсутствие находки при ошибке не подтверждает отсутствие заимствования.",
     }
+    return audit_evidence_spans(result, dataset_path)

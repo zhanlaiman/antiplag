@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from urllib.parse import urlsplit
 
-from plagiarism import demo, evaluation, llm, retrieval
+from plagiarism import demo, evaluation, llm, retrieval, source_packs
 from plagiarism.jobs import Jobs
 from plagiarism.matching import analyze, MAX_TEXT_CHARS
 from plagiarism.storage import Store
@@ -43,7 +43,8 @@ def judge_candidate(store, record, candidate, model):
             judgment = llm.judge(candidate["query_excerpt"], candidate["source_excerpt"], model)
     except (llm.OllamaError, ValueError) as error:
         store.save("candidate-error", {"retrieval_id": record["id"], "candidate_id": candidate["id"],
-                                       "error": str(error), "model": model})
+                                       "error": str(error), "model": model, "details": getattr(error, "details", None),
+                                       "code": getattr(error, "code", "model_error")})
         raise
     saved = store.save("candidate-judgment", {"retrieval_id": record["id"], "candidate_id": candidate["id"], "judgment": judgment})
     return {**judgment, "id": saved["id"]}
@@ -103,7 +104,8 @@ class Handler(BaseHTTPRequestHandler):
         except KeyError:
             self.send_json({"error": "Запись не найдена. Обновите страницу."}, 404)
         except llm.OllamaError as error:
-            self.send_json({"error": str(error)}, 503)
+            self.send_json({"error": str(error), "code": getattr(error, "code", "model_error"),
+                            "details": getattr(error, "details", None)}, 503)
         except (BrokenPipeError, ConnectionResetError):
             logging.info("Client disconnected")
         except Exception:
@@ -126,6 +128,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self, path):
         files = {"/": "index.html", "/index.html": "index.html", "/style.css": "style.css", "/app.js": "app.js"}
+        files["/fonts/InterVariable.woff2"] = "fonts/InterVariable.woff2"
+        files["/fonts/Inter-LICENSE.txt"] = "fonts/Inter-LICENSE.txt"
+        files["/fonts/PTSerif-Regular.ttf"] = "fonts/PTSerif-Regular.ttf"
+        files["/fonts/PTSerif-OFL.txt"] = "fonts/PTSerif-OFL.txt"
         if path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -137,7 +143,10 @@ class Handler(BaseHTTPRequestHandler):
             raise KeyError(path)
         content = file.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", (mimetypes.guess_type(file.name)[0] or "text/plain") + "; charset=utf-8")
+        content_type = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type += "; charset=utf-8"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -155,6 +164,16 @@ class Handler(BaseHTTPRequestHandler):
             return {"model": model_status, "embedding": embedding, "counts": store.counts(), "scope": "local_library"}
         if method == "GET" and path == "/api/sources":
             return {"sources": store.sources()}
+        if method == "GET" and path == "/api/source-packs":
+            existing_ids = {source["id"] for source in store.sources()}
+            packs = source_packs.list_packs()
+            for pack in packs:
+                sources = source_packs.load_pack(pack["id"])["sources"]
+                pack["installed_count"] = sum(source["id"] in existing_ids for source in sources)
+            return {"packs": packs}
+        if method == "POST" and path == "/api/source-packs/install":
+            pack = source_packs.load_pack(field(body, "pack_id", 80))
+            return store.install_sources(pack["sources"])
         if method == "POST" and path == "/api/sources":
             title = field(body, "title", 300)
             text = field(body, "text")
@@ -248,6 +267,8 @@ class Handler(BaseHTTPRequestHandler):
                     entry["judgment"] = {**item["judgment"], "id": item["id"]}
                 else:
                     entry["error"] = item["error"]
+                    entry["code"] = item.get("code", "model_error")
+                    entry["details"] = item.get("details")
                 judgments.append(entry)
             return {"judgments": judgments}
         if method == "POST" and path == "/api/candidate-check-jobs":
@@ -265,10 +286,14 @@ class Handler(BaseHTTPRequestHandler):
                         judgment = judge_candidate(store, record, candidate, model)
                         judgments.append({"candidate_id": candidate["id"], "judgment": judgment})
                     except (llm.OllamaError, ValueError) as error:
-                        judgments.append({"candidate_id": candidate["id"], "error": str(error)})
+                        judgments.append({"candidate_id": candidate["id"], "error": str(error),
+                                          "code": getattr(error, "code", "model_error"),
+                                          "details": getattr(error, "details", None)})
                 progress("Сохраняем результаты", len(judgments), len(judgments))
                 result = {"retrieval_id": record["id"], "report_id": record["report_id"], "judgments": judgments,
-                          "counts": {"total": len(judgments), "errors": sum("error" in item for item in judgments),
+                          "counts": {"total": len(judgments),
+                                     "errors": sum("error" in item and item.get("code") != "unconfirmed_exact" for item in judgments),
+                                     "uncertain": sum(item.get("code") == "unconfirmed_exact" for item in judgments),
                                      "positive": sum(item.get("judgment", {}).get("relation") in {"exact", "paraphrase"} for item in judgments)},
                           "elapsed_seconds": round(time.monotonic() - started, 3)}
                 return store.save("candidate-check", result)
@@ -291,6 +316,7 @@ class Handler(BaseHTTPRequestHandler):
             if (not saved_judgment or saved_judgment["retrieval_id"] != record["id"]
                     or saved_judgment["candidate_id"] != candidate_id):
                 raise ValueError("Сначала сравните эту пару фрагментов с Qwen.")
+            self.validate_latest_judgment(store, record["id"], candidate_id, saved_judgment["id"])
             judgment = saved_judgment["judgment"]
             if judgment["relation"] not in {"exact", "paraphrase"}:
                 raise ValueError("Для этой пары модель не выделила совпадение или пересказ. Выберите другой фрагмент.")
@@ -303,7 +329,9 @@ class Handler(BaseHTTPRequestHandler):
             with MODEL_LOCK:
                 rewrite = llm.rewrite(original_text, source_text,
                                       candidate["source_title"], candidate["source_url"], mode, self.model(body))
+            self.validate_latest_judgment(store, record["id"], candidate_id, saved_judgment["id"])
             rewrite.update(original_text=original_text,
+                           judgment_id=saved_judgment["id"],
                            replacement_start=candidate["query_start"] + target_start,
                            replacement_end=candidate["query_start"] + target_end)
             return {"rewrite": rewrite}
@@ -357,6 +385,12 @@ class Handler(BaseHTTPRequestHandler):
             return {"records": records}
         raise KeyError(path)
 
+    def validate_latest_judgment(self, store, retrieval_id, candidate_id, judgment_id):
+        latest = next((item for item in store.candidate_judgments(retrieval_id)
+                       if item["candidate_id"] == candidate_id), None)
+        if not latest or latest["id"] != judgment_id:
+            raise ValueError("Эта пара уже проверена повторно. Обновите оценку перед созданием правки.")
+
     def validate_span(self, text, start, end, evidence):
         if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text)
                 or not isinstance(evidence, str) or text[start:end] != evidence):
@@ -378,6 +412,9 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", options.port), Handler)
     server.daemon_threads = True
     server.store = Store(options.database) if options.database else Store()
+    if not options.database and not server.store.counts()["sources"]:
+        for pack in source_packs.list_packs():
+            server.store.install_sources(source_packs.load_pack(pack["id"])["sources"])
     server.jobs = Jobs()
     print(f"Исток готов — http://127.0.0.1:{options.port}", flush=True)
     try:

@@ -57,6 +57,48 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(result["stats"]["checked_source_count"], 0)
         self.assertEqual(result["matches"], [])
 
+    def test_cyrillic_acute_and_grave_stress_are_typographic_variants(self):
+        self.assertEqual(normalize("Эконо\u0301мика Пла\u0300новая"), normalize("Экономика Плановая"))
+        self.assertEqual(normalize("эконо\u0341мика"), normalize("экономика"))
+
+    def test_stressed_source_matches_plain_text_with_original_end_offsets(self):
+        plain = "Плановая экономика изучает распределение ограниченных ресурсов воды"
+        accented = "Пла\u0301новая эконо\u0301мика изучает распределение ограниченных ресурсов воды\u0301"
+        text = "🧪 Введение. " + plain + "."
+        source_text = "🧪 Справка. " + accented + "."
+        result = analyze(text, [source(source_text)])
+        match = result["matches"][0]
+        self.assertEqual(match["kind"], "exact")
+        self.assertEqual(match["excerpt"], plain)
+        self.assertEqual(match["source_excerpt"], accented)
+        self.assertEqual(source_text[match["source_start"]:match["source_end"]], accented)
+        self.assertTrue(match["source_excerpt"].endswith("\u0301"))
+        self.assertEqual(result["issues"], [])
+
+    def test_trailing_stress_in_checked_text_stays_inside_evidence(self):
+        plain = "Плановая экономика изучает распределение ограниченных ресурсов воды"
+        text = "🧪 " + plain + "\u0301."
+        result = analyze(text, [source(plain + ".")])
+        match = result["matches"][0]
+        self.assertEqual(match["excerpt"], plain + "\u0301")
+        self.assertEqual(text[match["start"]:match["end"]], match["excerpt"])
+        self.assertEqual(result["issues"], [])
+
+    def test_breve_is_preserved_and_canonical_forms_match(self):
+        self.assertEqual(normalize("район"), normalize("раи\u0306он"))
+        self.assertNotEqual(normalize("район"), normalize("раион"))
+        plain = "Район использует новые способы распределения ограниченных ресурсов"
+        decomposed = plain.replace("й", "и\u0306")
+        match = analyze(plain, [source(decomposed)])["matches"][0]
+        self.assertEqual(match["kind"], "exact")
+        self.assertEqual(match["source_excerpt"], decomposed)
+
+    def test_canonical_latin_accents_and_other_marks_remain_meaningful(self):
+        self.assertEqual(normalize("café"), normalize("cafe\u0301"))
+        self.assertEqual(normalize("cafè"), normalize("cafe\u0300"))
+        self.assertNotEqual(normalize("café"), normalize("cafe"))
+        self.assertNotEqual(normalize("q\u0308"), normalize("q"))
+
 
 if __name__ == "__main__":
     unittest.main()

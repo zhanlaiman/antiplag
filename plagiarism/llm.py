@@ -6,12 +6,15 @@ import os
 import re
 import socket
 import threading
+from difflib import SequenceMatcher
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from plagiarism.matching import normalize
+
 
 DEFAULT_MODEL = "qwen3:4b"
-JUDGE_VERSION = "sentence-selection-v3"
+JUDGE_VERSION = "sentence-selection-v4-exact-validation"
 MAX_PASSAGE_LENGTH = 12000
 MAX_RESPONSE_BYTES = 2_000_000
 RELATIONS = ("exact", "paraphrase", "same_topic", "unrelated")
@@ -39,6 +42,11 @@ REWRITE_SCHEMA = {
 
 class OllamaError(RuntimeError):
     """A readable error suitable for the local UI."""
+
+    def __init__(self, message, details=None, code="model_error"):
+        super().__init__(message)
+        self.details = details
+        self.code = code
 
 
 def selected_model(model=None):
@@ -206,6 +214,43 @@ def _segments(text, prefix):
     return segments
 
 
+def _validate_judgment(result, text, source_text, text_spans, source_spans):
+    for field in JUDGMENT_SCHEMA["required"]:
+        if not isinstance(result.get(field), str):
+            raise OllamaError("Модель пропустила обязательные поля результата.")
+    if result["relation"] not in RELATIONS or not result["explanation"].strip():
+        raise OllamaError("Модель вернула неизвестный тип совпадения.")
+    evidence = {}
+    for field, spans, original in (("evidence_text", text_spans, text),
+                                  ("evidence_source", source_spans, source_text)):
+        segment_id = result[field + "_id"]
+        if segment_id and segment_id not in spans:
+            raise OllamaError("Выбранный моделью фрагмент отсутствует в тексте. Повторите проверку.")
+        span = spans.get(segment_id)
+        excerpt = span["text"] if span else ""
+        if span and original[span["start"]:span["end"]] != excerpt:
+            raise OllamaError("Выдержка отсутствует в тексте. Результат требует повторной проверки.")
+        if result["relation"] in ("exact", "paraphrase") and len(excerpt.strip()) < 12:
+            raise OllamaError("Модель не указала достаточно подробные выдержки для сравнения.")
+        evidence[field] = excerpt
+        evidence[field + "_start"] = span["start"] if span else None
+        evidence[field + "_end"] = span["end"] if span else None
+    return {key: result[key] for key in JUDGMENT_SCHEMA["required"]} | evidence
+
+
+def _exact_evidence_overlap(text, source_text):
+    """Check the literal-word claim on selected evidence, retaining original spans."""
+    words = normalize(text).split()
+    source_words = normalize(source_text).split()
+    longest = SequenceMatcher(None, words, source_words, autojunk=False).find_longest_match()
+    matched_characters = len(" ".join(words[longest.a:longest.a + longest.size]))
+    coverage = longest.size / max(1, len(words), len(source_words))
+    verified = (longest.size >= 6 and matched_characters >= 35
+                or longest.size >= 4 and matched_characters >= 20 and coverage >= 0.8)
+    return {"verified": verified, "contiguous_words": longest.size,
+            "normalized_characters": matched_characters, "longer_span_coverage": round(coverage, 4)}
+
+
 def judge(text, source_text, model=None):
     """Classify a pair; model selects existing spans instead of transcribing them."""
     _pair(text, source_text)
@@ -247,30 +292,49 @@ def judge(text, source_text, model=None):
         "For same_topic or unrelated, use empty evidence IDs. Return JSON with relation, explanation, "
         "evidence_text_id, evidence_source_id. Write explanation briefly in Russian."
     )
-    result, name = _chat(prompt, {"text_segments": text_segments, "source_segments": source_segments}, schema, model)
-    for field in JUDGMENT_SCHEMA["required"]:
-        if not isinstance(result.get(field), str):
-            raise OllamaError("Модель пропустила обязательные поля результата.")
-    if result["relation"] not in RELATIONS or not result["explanation"].strip():
-        raise OllamaError("Модель вернула неизвестный тип совпадения.")
-    evidence = {}
-    for field, spans, original in (("evidence_text", text_spans, text),
-                                  ("evidence_source", source_spans, source_text)):
-        segment_id = result[field + "_id"]
-        if segment_id and segment_id not in spans:
-            raise OllamaError("Выбранный моделью фрагмент отсутствует в тексте. Повторите проверку.")
-        span = spans.get(segment_id)
-        excerpt = span["text"] if span else ""
-        if span and original[span["start"]:span["end"]] != excerpt:
-            raise OllamaError("Выдержка отсутствует в тексте. Результат требует повторной проверки.")
-        if result["relation"] in ("exact", "paraphrase") and len(excerpt.strip()) < 12:
-            raise OllamaError("Модель не указала достаточно подробные выдержки для сравнения.")
-        evidence[field] = excerpt
-        evidence[field + "_start"] = span["start"] if span else None
-        evidence[field + "_end"] = span["end"] if span else None
-    return {key: result[key] for key in JUDGMENT_SCHEMA["required"]} | {
-        **evidence, "model": name, "requires_review": True, "evidence_method": "sentence_selection",
-        "judge_version": JUDGE_VERSION,
+    inputs = {"text_segments": text_segments, "source_segments": source_segments}
+    result, name = _chat(prompt, inputs, schema, model)
+    validated = _validate_judgment(result, text, source_text, text_spans, source_spans)
+    attempts = 1
+    retry = None
+    overlap = None
+    if validated["relation"] == "exact":
+        overlap = _exact_evidence_overlap(validated["evidence_text"], validated["evidence_source"])
+        if not overlap["verified"]:
+            attempts = 2
+            retry = {"reason": "exact_evidence_mismatch", "judgment": validated, "overlap": overlap}
+            feedback = (
+                "\nYour previous exact result selected " + validated["evidence_text_id"] + " and "
+                + validated["evidence_source_id"] + ". A deterministic comparison found only "
+                + str(overlap["contiguous_words"]) + " consecutive matching normalized words "
+                + "in those selected sentences. They do not substantiate the exact label. "
+                + "Re-evaluate the original passages. Select another pair of existing IDs that "
+                + "demonstrates substantial literal wording for exact, or return a different "
+                + "relation supported by the content. Four or five consecutive words are sufficient "
+                + "only for short nearly identical sentences. Preserve the original text and source. "
+                + "Return a fresh JSON judgment using the same schema."
+            )
+            try:
+                result, name = _chat(prompt + feedback, inputs, schema, model)
+                validated = _validate_judgment(result, text, source_text, text_spans, source_spans)
+            except OllamaError as error:
+                raise OllamaError(str(error), {"attempts": attempts, "consistency_retry": retry}) from error
+            overlap = None
+            if validated["relation"] == "exact":
+                overlap = _exact_evidence_overlap(validated["evidence_text"], validated["evidence_source"])
+                if not overlap["verified"]:
+                    raise OllamaError(
+                        "Модель повторно указала дословное совпадение, которое выбранные выдержки не подтверждают. "
+                        "Сравните фрагменты вручную.",
+                        {"attempts": attempts, "consistency_retry": retry,
+                         "final_judgment": validated, "final_overlap": overlap},
+                        code="unconfirmed_exact",
+                    )
+    return validated | {
+        "model": name, "requires_review": True, "evidence_method": "sentence_selection",
+        "judge_version": JUDGE_VERSION, "attempts": attempts,
+        "exact_evidence_verified": overlap["verified"] if overlap else None,
+        "exact_evidence_overlap": overlap, "consistency_retry": retry,
     }
 
 

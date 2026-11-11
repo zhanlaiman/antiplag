@@ -72,6 +72,25 @@ class PipelineEvaluationTests(unittest.TestCase):
         self.assertEqual(second["cache_hits"], 4)
         self.assertEqual(second["metrics"]["hybrid_qwen"]["source_hit_rate"], 1)
 
+    def test_consistency_retry_requests_and_error_details_are_preserved(self):
+        calls = 0
+
+        def with_retries(text, source, model):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                error = llm.OllamaError("Выдержки не подтверждают дословное совпадение")
+                error.details = {"attempts": 2, "final_judgment": {"relation": "exact"}}
+                raise error
+            return {**self.positive_judgment(text, source, model), "attempts": 2}
+
+        self.judge.side_effect = with_retries
+        result = self.run_evaluation()
+        self.assertEqual(result["model_calls"], 8)
+        pair = result["results"][0]["hybrid_qwen"]["pairs"][0]
+        self.assertEqual(pair["error_details"]["attempts"], 2)
+        self.assertFalse(pair["positive"])
+
     def test_model_digest_and_adapter_changes_invalidate_checkpoint(self):
         self.run_evaluation()
         self.run_evaluation(digest="digest-b")
@@ -156,6 +175,44 @@ class PipelineEvaluationTests(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["model_calls"], 1)
         self.assertEqual(self.dataset_path.read_bytes(), original_bytes)
+
+    def test_source_hit_with_wrong_passage_is_reported_separately(self):
+        gold = self.sources[0]["text"]
+        context = "Отдельное вступление без характерных подробностей. "
+        self.sources[0]["text"] = context + gold
+        self.write_dataset()
+
+        def wrong_passage(text, source, model):
+            answer = self.positive_judgment(text, source, model)
+            if source == self.sources[0]["text"]:
+                answer.update(evidence_source=context, evidence_source_start=0, evidence_source_end=len(context))
+            return answer
+
+        self.judge.side_effect = wrong_passage
+        result = self.run_evaluation(max_cases=1)
+        metrics = result["metrics"]["hybrid_qwen"]
+        self.assertEqual(metrics["positive_sources_found"], 1)
+        self.assertEqual(metrics["positive_articles_with_evidence_touching_expected_span"], 0)
+        audit = result["results"][0]["hybrid_qwen"]["pairs"][0]["expected_span_audit"]
+        self.assertEqual(audit["overlap_fraction"], 0)
+        self.assertFalse(audit["evidence_touches_expected_span"])
+        self.assertEqual(len(metrics["wrong_source_passage_positive_findings"]), 1)
+
+    def test_posthoc_span_audit_preserves_input_and_uses_no_model_calls(self):
+        result = self.run_evaluation(max_cases=1)
+        before = json.dumps(result, sort_keys=True)
+        calls = self.judge.call_count
+        audited = evaluation.audit_evidence_spans(result, self.dataset_path)
+        self.assertEqual(self.judge.call_count, calls)
+        self.assertEqual(json.dumps(result, sort_keys=True), before)
+        self.assertTrue(audited["results"][0]["hybrid_qwen"]["evidence_touches_expected_span"])
+
+    def test_posthoc_audit_rejects_changed_dataset(self):
+        result = self.run_evaluation(max_cases=1)
+        self.sources[0]["title"] = "Изменившаяся версия"
+        self.write_dataset()
+        with self.assertRaisesRegex(ValueError, "тот же набор"):
+            evaluation.audit_evidence_spans(result, self.dataset_path)
 
 
 if __name__ == "__main__":

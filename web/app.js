@@ -4,10 +4,12 @@ const DRAFT_KEY = 'istok.draft.v1';
 const MODEL_KEY = 'istok.model.v1';
 const RETRIEVAL_JOBS_KEY = 'istok.retrieval-jobs.v1';
 const CANDIDATE_JOBS_KEY = 'istok.candidate-jobs.v1';
+const REVIEW_DRAFTS_KEY = 'istok.review-drafts.v1';
 const ACTIVE_JOB_STATUSES = ['queued', 'running', 'cancelling'];
 const retrievalPolls = new Set();
 const candidateRequests = new Set();
 const candidateJobPolls = new Set();
+const fileReadTokens = new WeakMap();
 
 function restoreDraft() {
   try {
@@ -65,6 +67,31 @@ function saveActiveJobs(storageKey, jobs) {
   }
 }
 
+function restoreReviewDrafts() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(REVIEW_DRAFTS_KEY) || '{}');
+    const findings = Object.fromEntries(Object.entries(saved.findings || {})
+      .filter(([, value]) => typeof value === 'string' && value.length <= 8000));
+    const examples = Object.fromEntries(Object.entries(saved.examples || {})
+      .filter(([, value]) => value && typeof value.comment === 'string' && typeof value.relation === 'string'));
+    return { findings, examples };
+  } catch {
+    return { findings: {}, examples: {} };
+  }
+}
+
+function saveReviewDrafts() {
+  try {
+    localStorage.setItem(REVIEW_DRAFTS_KEY, JSON.stringify({
+      findings: state.findingDrafts, examples: state.exampleDrafts,
+    }));
+  } catch {
+    // Dirty review fields remain available in the current tab.
+  }
+}
+
+const reviewDrafts = restoreReviewDrafts();
+
 function updateDraftStatus() {
   const status = document.querySelector('#draft-status');
   if (!status) return;
@@ -81,7 +108,10 @@ function updateReportFreshness() {
   if (apply) apply.disabled = stale;
   const retrieval = state.retrievals[state.report?.id];
   document.querySelectorAll('[data-apply-candidate]').forEach(button => {
-    button.disabled = stale || Boolean(retrieval && candidateCheckRunning(retrieval.id));
+    const card = button.closest('[data-candidate]');
+    const key = card ? `${card.dataset.retrieval}:${card.dataset.candidate}` : '';
+    button.disabled = stale || Boolean(retrieval && candidateCheckRunning(retrieval.id)) || candidateRequests.has(key);
+
   });
 }
 
@@ -90,11 +120,13 @@ const state = {
   view: 'check', viewRevision: 0, text: restoreDraft(), sources: [], status: null, model: restoreModel(), report: null,
   selectedMatch: null, rewrite: null, judgment: null, examples: [], run: null,
   retrievals: {}, retrievalJobs: restoreActiveJobs(RETRIEVAL_JOBS_KEY), candidateJudgments: {}, candidateRewrites: {},
-  candidateErrors: {}, candidateLoaded: new Set(), candidateCheckJobs: restoreActiveJobs(CANDIDATE_JOBS_KEY),
+  candidateErrors: {}, candidateLoaded: new Set(), candidateGenerations: {}, candidateLoadRequests: {},
+  homeReport: null, homeMatch: null, sourcePacks: null,
+  findingDrafts: reviewDrafts.findings, exampleDrafts: reviewDrafts.examples, candidateCheckJobs: restoreActiveJobs(CANDIDATE_JOBS_KEY),
 };
 const main = document.querySelector('#main-content');
-const relationNames = { exact: 'Дословное совпадение', paraphrase: 'Пересказ', same_topic: 'Общая тема', unrelated: 'Разные тексты' };
-const viewNames = { check: 'Проверка текста', sources: 'Источники', evaluation: 'Оценка Qwen', history: 'История' };
+const relationNames = { exact: 'Дословное совпадение', paraphrase: 'Возможный пересказ', same_topic: 'Общая тема', unrelated: 'Разные тексты' };
+const viewNames = { home: 'Главная', check: 'Проверка текста', sources: 'Источники', evaluation: 'Оценка Qwen', history: 'История' };
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const number = value => Number(value || 0).toLocaleString('ru-RU');
 const chars = value => Array.from(value);
@@ -131,7 +163,13 @@ async function api(path, data, method) {
   let result;
   try { result = await response.json(); }
   catch { throw new Error('Сервер вернул неожиданный ответ. Проверьте, что локальная версия запущена.'); }
-  if (!response.ok) throw new Error(result.error || result.message || 'Не удалось выполнить запрос.');
+  if (!response.ok) {
+    const error = new Error(result.error || result.message || 'Не удалось выполнить запрос.');
+    error.status = response.status;
+    error.code = result.code;
+    error.details = result.details;
+    throw error;
+  }
   return result;
 }
 let toastTimer;
@@ -192,22 +230,234 @@ function updateCharacterCount() {
   const wordCount = document.querySelector('#word-count');
   if (wordCount) wordCount.textContent = `${number(state.text.trim() ? state.text.trim().split(/\s+/u).length : 0)} слов`;
 }
-async function readTextFile(input, target) {
-  const file = input.files[0];
-  if (!file) return;
-  if (!/\.(txt|md)$/i.test(file.name)) { toast('В этой версии доступны текстовые файлы .txt и .md.', true); input.value = ''; return; }
-  if (file.size > 800000) { toast('Файл слишком большой. Используйте текст до 200 000 знаков.', true); input.value = ''; return; }
-  const previousValue = target.value;
-  const text = await file.text();
-  input.value = '';
-  if (!target.isConnected || target.value !== previousValue) return;
+function textLengthError(text) {
+  return chars(text).length > 200000 ? 'В тексте больше 200 000 знаков. Сократите его перед проверкой.' : '';
+}
+
+function validateTextLength(target) {
+  const message = textLengthError(target.value);
+  target.setCustomValidity(message);
+  target.setAttribute('aria-invalid', message ? 'true' : 'false');
+  const error = document.getElementById(target.id === 'check-text' ? 'check-error' : 'source-text-limit-error');
+  if (error) {
+    error.textContent = message;
+    error.classList.toggle('inline-error', Boolean(message));
+  }
+  return !message;
+}
+
+function decodeTextFile(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 4 && ((bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0 && bytes[3] === 0)
+    || (bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 0xfe && bytes[3] === 0xff))) {
+    throw new Error('Кодировка UTF-32 пока не поддерживается. Сохраните текстовый файл в UTF-8.');
+  }
+  const utf8BOM = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  let encoding = 'utf-8';
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) encoding = 'utf-16le';
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) encoding = 'utf-16be';
+  let text;
+  let guessed = false;
+  try {
+    text = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+  } catch {
+    if (utf8BOM) {
+      throw new Error('Не удалось прочитать файл UTF-8. Проверьте его кодировку и загрузите снова.');
+    }
+    if (encoding !== 'utf-8') {
+      throw new Error('Не удалось прочитать файл UTF-16. Сохраните его в UTF-8 и загрузите снова.');
+    }
+    try {
+      text = new TextDecoder('windows-1251', { fatal: true }).decode(bytes);
+      encoding = 'windows-1251';
+      guessed = true;
+    } catch {
+      throw new Error('Не удалось прочитать кодировку файла. Сохраните текст в UTF-8 и загрузите снова.');
+    }
+  }
+  if (/[\u0000-\u0008\u000b\u000e-\u001f\u007f-\u009f]/u.test(text)) {
+    throw new Error('Файл содержит двоичные данные или неподдерживаемую кодировку. Сохраните обычный текст в UTF-8.');
+  }
   if (chars(text).length > 200000) {
     throw new Error('В файле больше 200 000 знаков. Выберите более короткий текст.');
   }
-  target.value = text;
-  target.dispatchEvent(new Event('input', { bubbles: true }));
-  input.value = '';
+  return { text, encoding, guessed };
 }
+
+function showImportHint(target, decoded) {
+  const hint = document.getElementById(`${target.id}-import-hint`);
+  if (!hint) return;
+  hint.hidden = !decoded.guessed;
+  hint.textContent = decoded.guessed
+    ? 'Предположительно, файл сохранён в Windows-1251. Проверьте, правильно ли отображается текст.'
+    : '';
+}
+
+async function readTextFile(input, target) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = '';
+  const token = {};
+  fileReadTokens.set(target, token);
+  if (!/\.(txt|md)$/i.test(file.name)) {
+    throw new Error('В этой версии доступны текстовые файлы .txt и .md.');
+  }
+  if (file.size > 800004) {
+    throw new Error('Файл слишком большой. Используйте текст до 200 000 знаков.');
+  }
+  const previousValue = target.value;
+  let editedWhileReading = false;
+  const onInput = () => { editedWhileReading = true; };
+  target.addEventListener('input', onInput);
+  let decoded;
+  try {
+    const buffer = await file.arrayBuffer();
+    if (!target.isConnected || editedWhileReading || target.value !== previousValue
+      || fileReadTokens.get(target) !== token) return;
+    decoded = decodeTextFile(buffer);
+  } finally {
+    target.removeEventListener('input', onInput);
+  }
+  target.value = decoded.text;
+  showImportHint(target, decoded);
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function scrollHomeSection(id) {
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.getElementById(id).scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+}
+
+function renderHome() {
+  main.innerHTML = `
+    <div class="home-page">
+      <header class="home-nav">
+        <a class="home-brand" href="#home" aria-label="Исток, главная"><span class="home-brand-mark">и</span>исток<span class="home-brand-dot">.</span></a>
+        <nav aria-label="Главная навигация">
+          <a href="#check">Проверить</a>
+          <a href="#home" data-home-scroll="home-how">Как это работает</a>
+          <a href="#home" data-home-scroll="home-demo">Пример отчёта</a>
+        </nav>
+        <a class="home-nav-cta" href="#check">Открыть проверку <span aria-hidden="true">↗</span></a>
+      </header>
+      <section class="home-hero">
+        <div class="home-hero-copy home-reveal">
+          <p class="home-overline">Проверка текста с опорой на источники</p>
+          <h1>
+            <span class="home-headline-line">У каждого</span>
+            <span class="home-headline-line">совпадения</span>
+            <span class="home-headline-line">есть <em>источник.</em></span>
+          </h1>
+          <p class="home-hero-description">Найдите заимствования в статье. Увидьте исходный фрагмент. Решите, что требует ссылки или правки.</p>
+          <div class="home-hero-actions">
+            <a class="home-primary" href="#check">Проверить документ <span aria-hidden="true">↗</span></a>
+            <button class="home-text-link" data-home-demo type="button">Посмотреть пример <span aria-hidden="true">↘</span></button>
+          </div>
+          <p class="home-hero-helper">TXT / MD · Сравнение с вашей библиотекой источников.</p>
+          ${state.text.trim() ? '<p class="home-draft-note">Ваш сохранённый черновик доступен в редакторе.</p>' : ''}
+        </div>
+        <div class="home-proof home-reveal" aria-label="Учебный пример сравнения фрагментов">
+          <div class="home-proof-heading"><span>Фрагмент статьи</span><span>Учебный пример</span></div>
+          <article class="home-proof-paper">
+            <div class="home-paper-top"><span class="home-paper-icon" aria-hidden="true">▤</span><span>Общие пространства в городе</span></div>
+            <p>Общие пространства в городе могут объединять людей вокруг повседневных дел.</p>
+            <p><mark>Городские сады помогают жителям выращивать овощи рядом с домом и знакомиться с соседями.</mark></p>
+            <p class="home-paper-faded">Для небольшого участка особенно важны доступ к воде, солнечное место и регулярный уход за почвой.</p>
+            <div class="home-paper-finding"><span class="home-finding-dot"></span>Этот фрагмент есть в источнике</div>
+          </article>
+          <div class="home-proof-connector" aria-hidden="true"><span></span>↙</div>
+          <article class="home-proof-source">
+            <div class="home-source-eyebrow">МАТЕРИАЛ БИБЛИОТЕКИ</div>
+            <h2>Городские сады</h2>
+            <p>Городские сады помогают жителям выращивать овощи рядом с домом и знакомиться с соседями.</p>
+            <button class="home-source-link" data-home-demo type="button">Сверить в настоящем отчёте <span aria-hidden="true">↗</span></button>
+          </article>
+        </div>
+        <div class="home-hero-bottom"><span>Статья и источник рядом.</span><a href="#home" data-home-scroll="home-demo">Посмотрите сами <span aria-hidden="true">↓</span></a></div>
+      </section>
+      <section class="home-how home-section" id="home-how">
+        <div class="home-section-heading"><p class="home-section-label">Рабочий процесс</p><h2>От найденного фрагмента<br>к решению редактора.</h2></div>
+        <div class="home-workflow">
+          <article><span class="home-step-symbol" aria-hidden="true">↥</span><h3>Добавьте статью <br>и материалы</h3><p>Загрузите свой текст и библиотеку публикаций, с которыми его нужно сравнить.</p></article>
+          <article><span class="home-step-symbol" aria-hidden="true">⌕</span><h3>Сверьте слова <br>и смысл</h3><p>Откройте совпадения и похожие фрагменты. Qwen поможет сравнить найденные пары.</p></article>
+          <article><span class="home-step-symbol" aria-hidden="true">↗</span><h3>Сохраните решение <br>и доработайте текст</h3><p>Подтвердите или отклоните находку. Оформите цитату или проверьте предложенную правку.</p></article>
+        </div>
+      </section>
+      <section class="home-demo-section home-section" id="home-demo">
+        <div class="home-demo-intro"><div><p class="home-section-label">Загляните в отчёт</p><h2>Посмотрите,<br>что совпало.</h2></div><p>Фрагмент статьи рядом с материалом библиотеки. Учебные тексты специально содержат заимствования, которые можно найти и проверить.</p></div>
+        <div class="home-demo-workbench">
+          <div class="home-demo-toolbar"><span><span class="home-demo-status-dot"></span>Учебная статья · Городские пространства</span><button class="home-demo-run" data-home-demo type="button">Проверить этот пример <span aria-hidden="true">↗</span></button></div>
+          <div id="home-demo-result"></div>
+        </div>
+        <p class="home-demo-caption">Проверка примера использует рабочий поиск Истока. Ваш черновик в редакторе сохраняется.</p>
+      </section>
+      <section class="home-privacy home-section">
+        <div><p class="home-section-label">Ваша библиотека. Ваши решения.</p><h2>Текст остаётся<br>на вашем Mac.</h2></div>
+        <div class="home-privacy-copy"><p>В локальной версии источники, черновики и отчёты хранятся на компьютере. Qwen и поиск по смыслу работают через локальную модель.</p><p>Сейчас Исток сравнивает статью с добавленной библиотекой. Поиск по открытому интернету ещё не подключён.</p><a href="#sources">Открыть библиотеку источников <span aria-hidden="true">↗</span></a></div>
+      </section>
+      <section class="home-final home-section"><p class="home-section-label">Начните со своего текста</p><h2>Проверьте статью<br>перед публикацией.</h2><a class="home-primary" href="#check">Проверить документ <span aria-hidden="true">↗</span></a><p>Сверяйте фрагменты. Сохраняйте источники. Решение за вами.</p></section>
+      <footer class="home-footer"><a class="home-brand" href="#home">исток<span class="home-brand-dot">.</span></a><span>Локальная версия для работы с вашей библиотекой</span><a href="#check">К проверке <span aria-hidden="true">↗</span></a></footer>
+    </div>`;
+  main.querySelectorAll('[data-home-scroll]').forEach(link => {
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      scrollHomeSection(link.dataset.homeScroll);
+    });
+  });
+  main.querySelectorAll('[data-home-demo]').forEach(button => {
+    button.addEventListener('click', () => {
+      scrollHomeSection('home-demo');
+      busy(button, 'Проверяем пример', runHomeDemo);
+    });
+  });
+  renderHomeDemo();
+}
+
+function renderHomeDemo() {
+  const area = document.querySelector('#home-demo-result');
+  if (!area) return;
+  const report = state.homeReport;
+  if (!report) {
+    area.innerHTML = `
+      <div class="home-demo-before">
+        <div><p class="home-demo-column-label">ФРАГМЕНТ СТАТЬИ</p><p>Городские сады помогают жителям выращивать овощи рядом с домом и знакомиться с соседями.</p></div>
+        <div><p class="home-demo-column-label">УЧЕБНЫЙ ИСТОЧНИК</p><h3>Городские сады</h3><p>Городские сады помогают жителям выращивать овощи рядом с домом и знакомиться с соседями.</p></div>
+      </div>
+      <div class="home-demo-result-footer"><span>Нажмите «Проверить этот пример», чтобы получить результат поиска.</span><span aria-hidden="true">↗</span></div>`;
+    return;
+  }
+  const selected = report.matches.find(match => match.id === state.homeMatch) || report.matches[0];
+  area.innerHTML = `
+    <div class="home-demo-matches" role="group" aria-label="Найденные учебные источники">
+      ${report.matches.map((match, index) => `<button type="button" data-home-match="${escapeHTML(match.id)}" aria-pressed="${match.id === selected?.id}">${index + 1}. ${escapeHTML(match.source_title.replace('Учебный пример · ', ''))}</button>`).join('')}
+    </div>
+    ${selected ? `
+      <div class="home-demo-comparison">
+        <div><p class="home-demo-column-label">НАЙДЕННЫЙ ФРАГМЕНТ СТАТЬИ</p><p class="home-demo-excerpt"><mark>${escapeHTML(selected.excerpt)}</mark></p></div>
+        <div><p class="home-demo-column-label">МАТЕРИАЛ БИБЛИОТЕКИ</p><h3>${escapeHTML(selected.source_title.replace('Учебный пример · ', ''))}</h3><p class="home-demo-excerpt">${escapeHTML(selected.source_excerpt)}</p></div>
+      </div>` : '<div class="home-demo-no-matches">В учебном тексте не найдены лексические совпадения.</div>'}
+    <div class="home-demo-result-footer"><span>Рабочий поиск завершён. Учебный отчёт сохранён в истории.</span><a href="#history">Открыть историю <span aria-hidden="true">↗</span></a></div>`;
+  area.querySelectorAll('[data-home-match]').forEach(button => {
+    button.addEventListener('click', () => { state.homeMatch = button.dataset.homeMatch; renderHomeDemo(); });
+  });
+}
+
+async function runHomeDemo() {
+  if (state.homeDemoRunning) return;
+  state.homeDemoRunning = true;
+  try {
+    const demo = await api('/api/demo', {});
+    await refreshSources();
+    const { report } = await api('/api/check', { text: demo.text, source_ids: demo.sources.map(source => source.id) });
+    state.homeReport = report;
+    state.homeMatch = report.matches[0]?.id || null;
+    if (state.view === 'home') renderHomeDemo();
+    else toast('Учебный отчёт готов и сохранён в истории.');
+  } finally {
+    state.homeDemoRunning = false;
+  }
+}
+
 function renderCheck() {
   main.innerHTML = heading(
     'Проверьте свой текст.',
@@ -224,7 +474,8 @@ function renderCheck() {
               <input id="text-file" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текстовый файл">
             </label>
           </div>
-          <textarea class="editor-text" id="check-text" maxlength="200000" aria-label="Текст для проверки"
+          <p class="import-hint" id="check-text-import-hint" role="status" hidden></p>
+          <textarea class="editor-text" id="check-text" aria-label="Текст для проверки"
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
@@ -258,8 +509,10 @@ function renderCheck() {
   textarea.addEventListener('input', () => {
     saveDraft(textarea.value);
     updateCharacterCount();
+    validateTextLength(textarea);
   });
   updateCharacterCount();
+  validateTextLength(textarea);
   updateDraftStatus();
   document.querySelector('#text-file').addEventListener('change', async event => {
     try { await readTextFile(event.target, textarea); } catch (error) { toast(error.message, true); }
@@ -296,6 +549,7 @@ function renderCheck() {
 }
 async function checkText() {
   if (!state.text.trim()) throw new Error('Вставьте текст для проверки.');
+  if (textLengthError(state.text)) throw new Error(textLengthError(state.text));
   if (!state.sources.length) throw new Error('Сначала добавьте хотя бы один источник или откройте готовый пример.');
   const text = state.text;
   const { report } = await api('/api/check', { text });
@@ -414,6 +668,7 @@ function renderReport() {
     saveDraft(report.text);
     document.querySelector('#check-text').value = state.text;
     updateCharacterCount();
+    validateTextLength(document.querySelector('#check-text'));
     toast('Текст сохранённого отчёта открыт в редакторе.');
   });
   bindComparison(selected);
@@ -455,6 +710,29 @@ function candidateActionsHTML(candidate, retrieval) {
     ` : ''}`;
 }
 
+function candidateNeedsReview(error) {
+  return Boolean(error && typeof error === 'object' && error.code === 'unconfirmed_exact');
+}
+
+function candidateErrorHTML(error) {
+  if (!error) return '';
+  const message = typeof error === 'string' ? error : error.message || error.error || 'Не удалось завершить сравнение.';
+  if (!candidateNeedsReview(error)) return `<div class="inline-error">${escapeHTML(message)}</div>`;
+  const judgment = error.details?.final_judgment;
+  return `
+    <section class="candidate-uncertain" role="status">
+      <h3>Нужна проверка редактора</h3>
+      <p>${escapeHTML(message)}</p>
+      <p>Модель сообщила о дословном совпадении. Программная проверка точного совпадения это не подтвердила.</p>
+      ${judgment?.explanation ? `<p class="uncertain-explanation">Объяснение модели · ${escapeHTML(judgment.explanation)}</p>` : ''}
+      ${judgment?.evidence_text && judgment?.evidence_source ? `
+        <div class="comparison-columns">
+          <div><h3>Выдержка из проверяемого текста</h3><blockquote>${escapeHTML(judgment.evidence_text)}</blockquote></div>
+          <div><h3>Выдержка из источника</h3><blockquote>${escapeHTML(judgment.evidence_source)}</blockquote></div>
+        </div>` : ''}
+    </section>`;
+}
+
 function candidateHTML(candidate, retrieval) {
   const judgment = state.candidateJudgments[candidateKey(retrieval, candidate)];
   const rewrite = state.candidateRewrites[candidateKey(retrieval, candidate)];
@@ -467,7 +745,7 @@ function candidateHTML(candidate, retrieval) {
       ${safeLink(candidate.source_url, 'Открыть источник')}
       <div class="action-row candidate-actions">${candidateActionsHTML(candidate, retrieval)}</div>
       ${judgment ? '' : '<p class="field-help">Сначала сравните пару с Qwen. После подтверждённого совпадения можно подготовить правку конкретного фрагмента.</p>'}
-      <div class="candidate-error">${state.candidateErrors[candidateKey(retrieval, candidate)] ? `<div class="inline-error">${escapeHTML(state.candidateErrors[candidateKey(retrieval, candidate)])}</div>` : ''}</div>
+      <div class="candidate-error">${candidateErrorHTML(state.candidateErrors[candidateKey(retrieval, candidate)])}</div>
       <div class="candidate-judgment">${judgment ? judgmentHTML(judgment) : ''}</div>
       <div class="candidate-rewrite">${rewrite ? candidateRewriteHTML(candidate, retrieval) : ''}</div>
     </article>`;
@@ -552,7 +830,7 @@ function renderRetrieval() {
     const { job: cancelled } = await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, {});
     state.retrievalJobs[reportId] = cancelled;
     saveActiveJobs(RETRIEVAL_JOBS_KEY, state.retrievalJobs);
-    renderRetrieval();
+    if (state.view === 'check' && state.report?.id === reportId) renderRetrieval();
   }));
   if (retrieval) {
     bindCandidateActions(retrieval);
@@ -570,6 +848,25 @@ function updateRetrievalJobStatus(reportId) {
   label.textContent = (job.stage || 'Ищем фрагменты') + progress;
 }
 
+async function readJobWithRetry(jobId, onRetry) {
+  let retries = 0;
+  while (true) {
+    try {
+      return await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+    } catch (error) {
+      if (error.status === 404) {
+        error.message = 'Задание больше недоступно. Возможно, приложение было перезапущено. Сохранённые результаты остаются доступны.';
+        throw error;
+      }
+      if (error.status >= 400 && error.status < 500) throw error;
+      onRetry('Потеряна связь, пытаемся восстановить');
+      const delay = Math.min(1000 * 2 ** Math.min(retries, 4), 15000);
+      retries++;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 async function pollRetrieval(reportId, jobId) {
   if (retrievalPolls.has(reportId)) return;
   retrievalPolls.add(reportId);
@@ -577,7 +874,10 @@ async function pollRetrieval(reportId, jobId) {
     while (retrievalRunning(reportId)) {
       updateRetrievalJobStatus(reportId);
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const { job } = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+      const { job } = await readJobWithRetry(jobId, message => {
+        state.retrievalJobs[reportId].stage = message;
+        updateRetrievalJobStatus(reportId);
+      });
       state.retrievalJobs[reportId] = job;
       saveActiveJobs(RETRIEVAL_JOBS_KEY, state.retrievalJobs);
     }
@@ -588,6 +888,8 @@ async function pollRetrieval(reportId, jobId) {
     }
   } catch (error) {
     state.retrievalJobs[reportId] = { status: 'failed', error: error.message };
+    delete state.retrievals[reportId];
+    await loadRetrieval(reportId);
   } finally {
     retrievalPolls.delete(reportId);
     saveActiveJobs(RETRIEVAL_JOBS_KEY, state.retrievalJobs);
@@ -612,7 +914,12 @@ async function startRetrieval(reportId, mode) {
   }
 }
 
+function invalidateCandidateLoads(retrievalId) {
+  state.candidateGenerations[retrievalId] = (state.candidateGenerations[retrievalId] || 0) + 1;
+}
+
 function mergeCandidateOutcomes(retrievalId, entries) {
+  invalidateCandidateLoads(retrievalId);
   for (const item of entries) {
     const key = `${retrievalId}:${item.candidate_id}`;
     if (item.judgment) {
@@ -621,7 +928,9 @@ function mergeCandidateOutcomes(retrievalId, entries) {
       state.candidateJudgments[key] = item.judgment;
       delete state.candidateErrors[key];
     } else if (item.error) {
-      state.candidateErrors[key] = item.error;
+      state.candidateErrors[key] = item.code || item.details
+        ? { message: item.error, code: item.code, details: item.details }
+        : item.error;
       delete state.candidateJudgments[key];
       delete state.candidateRewrites[key];
     }
@@ -631,8 +940,16 @@ function mergeCandidateOutcomes(retrievalId, entries) {
 async function loadCandidateJudgments(retrievalId, force = false) {
   if (!force && state.candidateLoaded.has(retrievalId)) return;
   state.candidateLoaded.add(retrievalId);
+  const generation = state.candidateGenerations[retrievalId] || 0;
+  const requestId = (state.candidateLoadRequests[retrievalId] || 0) + 1;
+  state.candidateLoadRequests[retrievalId] = requestId;
   try {
     const { judgments } = await api(`/api/candidate-judgments/${encodeURIComponent(retrievalId)}`);
+    if (state.candidateLoadRequests[retrievalId] !== requestId) return;
+    if ((state.candidateGenerations[retrievalId] || 0) !== generation) {
+      state.candidateLoaded.delete(retrievalId);
+      return;
+    }
     mergeCandidateOutcomes(retrievalId, judgments);
     const retrieval = state.retrievals[state.report?.id];
     if (state.view === 'check' && retrieval?.id === retrievalId) {
@@ -654,7 +971,7 @@ function updateCandidateCards(retrieval) {
     const judgment = state.candidateJudgments[key];
     const error = state.candidateErrors[key];
     card.querySelector('.candidate-judgment').innerHTML = judgment ? judgmentHTML(judgment) : '';
-    card.querySelector('.candidate-error').innerHTML = error ? `<div class="inline-error">${escapeHTML(error)}</div>` : '';
+    card.querySelector('.candidate-error').innerHTML = candidateErrorHTML(error);
     if (!state.candidateRewrites[key]) card.querySelector('.candidate-rewrite').replaceChildren();
     card.querySelector('.candidate-actions').innerHTML = candidateActionsHTML(candidate, retrieval);
     bindCandidateCardActions(card, candidate, retrieval);
@@ -672,11 +989,13 @@ function renderCandidateCheck(retrieval) {
   const running = candidateCheckRunning(retrieval.id);
   const counts = Object.fromEntries(Object.keys(relationNames).map(relation => [relation, 0]));
   let errors = 0;
+  let uncertain = 0;
   for (const candidate of retrieval.candidates) {
     const key = candidateKey(retrieval, candidate);
     const relation = state.candidateJudgments[key]?.relation;
     if (Object.hasOwn(counts, relation)) counts[relation]++;
-    if (state.candidateErrors[key]) errors++;
+    if (candidateNeedsReview(state.candidateErrors[key])) uncertain++;
+    else if (state.candidateErrors[key]) errors++;
   }
   area.innerHTML = `
     <section class="card candidate-check-controls">
@@ -692,6 +1011,7 @@ function renderCandidateCheck(retrieval) {
       ${job?.status === 'failed' ? `<div class="inline-error">${escapeHTML(job.error || 'Не удалось закончить сравнение.')}</div>` : ''}
       <div class="candidate-verdict-counts">
         ${Object.entries(relationNames).map(([relation, label]) => `<span>${escapeHTML(label)} <strong>${number(counts[relation])}</strong></span>`).join('')}
+        <span class="${uncertain ? 'result-fail' : ''}">Нужна проверка редактора <strong>${number(uncertain)}</strong></span>
         <span class="${errors ? 'result-fail' : ''}">Ошибки запросов <strong>${number(errors)}</strong></span>
       </div>
     </section>`;
@@ -701,7 +1021,7 @@ function renderCandidateCheck(retrieval) {
     const { job: cancelled } = await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, {});
     state.candidateCheckJobs[retrieval.id] = cancelled;
     saveActiveJobs(CANDIDATE_JOBS_KEY, state.candidateCheckJobs);
-    renderCandidateCheck(retrieval);
+    if (state.view === 'check' && state.retrievals[state.report?.id]?.id === retrieval.id) renderCandidateCheck(retrieval);
   }));
 }
 
@@ -724,7 +1044,10 @@ async function pollCandidateCheck(retrievalId, jobId) {
     while (candidateCheckRunning(retrievalId)) {
       updateCandidateCheckProgress(retrievalId);
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const { job } = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+      const { job } = await readJobWithRetry(jobId, message => {
+        state.candidateCheckJobs[retrievalId].stage = message;
+        updateCandidateCheckProgress(retrievalId);
+      });
       state.candidateCheckJobs[retrievalId] = job;
       saveActiveJobs(CANDIDATE_JOBS_KEY, state.candidateCheckJobs);
       polls++;
@@ -736,6 +1059,7 @@ async function pollCandidateCheck(retrievalId, jobId) {
     if (finished.status === 'complete') toast('Сравнение кандидатов завершено. Ответы и ошибки сохранены.');
   } catch (error) {
     state.candidateCheckJobs[retrievalId] = { status: 'failed', error: error.message };
+    await loadCandidateJudgments(retrievalId, true);
   } finally {
     candidateJobPolls.delete(retrievalId);
     saveActiveJobs(CANDIDATE_JOBS_KEY, state.candidateCheckJobs);
@@ -766,7 +1090,11 @@ async function startCandidateCheck(retrieval) {
     state.candidateCheckJobs[retrieval.id] = { status: 'failed', error: error.message };
     saveActiveJobs(CANDIDATE_JOBS_KEY, state.candidateCheckJobs);
     const current = state.retrievals[state.report?.id];
-    if (state.view === 'check' && current?.id === retrieval.id) renderCandidateCheck(retrieval);
+    if (state.view === 'check' && current?.id === retrieval.id) {
+      renderCandidateCheck(retrieval);
+      updateCandidateCards(retrieval);
+      updateReportFreshness();
+    }
   }
 }
 
@@ -784,14 +1112,15 @@ function bindCandidateCardActions(card, candidate, retrieval) {
     button.addEventListener('click', () => busy(button, 'Готовим ответ', async () => {
       if (candidateRequests.has(key)) return;
       candidateRequests.add(key);
+      invalidateCandidateLoads(retrieval.id);
+      updateReportFreshness();
       card.querySelectorAll('[data-candidate-action]').forEach(control => { control.disabled = true; });
       const action = button.dataset.candidateAction;
       try {
         const payload = { retrieval_id: retrieval.id, candidate_id: candidate.id, model: selectedModel() };
         if (action === 'judge') {
           const { judgment } = await api('/api/candidate-judge', payload);
-          state.candidateJudgments[key] = judgment;
-          delete state.candidateErrors[key];
+          mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, judgment }]);
           delete state.candidateRewrites[key];
           if (card.isConnected) {
             card.querySelector('.candidate-judgment').innerHTML = judgmentHTML(judgment);
@@ -815,17 +1144,22 @@ function bindCandidateCardActions(card, candidate, retrieval) {
         }
       } catch (error) {
         if (action === 'judge') {
-          mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, error: error.message }]);
+          mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, error: error.message, code: error.code, details: error.details }]);
           if (card.isConnected) {
             card.querySelector('.candidate-judgment').replaceChildren();
             card.querySelector('.candidate-rewrite').replaceChildren();
-            card.querySelector('.candidate-error').innerHTML = `<div class="inline-error">${escapeHTML(error.message)}</div>`;
+            card.querySelector('.candidate-error').innerHTML = candidateErrorHTML(state.candidateErrors[key]);
           }
           if (state.view === 'check' && state.retrievals[state.report?.id]?.id === retrieval.id) renderCandidateCheck(retrieval);
+        }
+        if (error.code === 'unconfirmed_exact') {
+          toast('Для этой пары нужна проверка редактора.');
+          return;
         }
         throw error;
       } finally {
         candidateRequests.delete(key);
+        updateReportFreshness();
         if (card.isConnected) {
           card.querySelector('.candidate-actions').innerHTML = candidateActionsHTML(candidate, retrieval);
           bindCandidateCardActions(card, candidate, retrieval);
@@ -850,6 +1184,12 @@ function bindCandidateRewrite(card, candidate, retrieval) {
     }
     const rewrite = state.candidateRewrites[candidateKey(retrieval, candidate)];
     const text = chars(state.text);
+    const judgment = state.candidateJudgments[candidateKey(retrieval, candidate)];
+    if (!rewrite || !judgment || !['exact', 'paraphrase'].includes(judgment.relation)
+      || rewrite.judgment_id !== judgment.id || candidateRequests.has(candidateKey(retrieval, candidate))) {
+      toast('Оценка пары изменилась. Получите новую правку перед применением.', true);
+      return;
+    }
     const start = rewrite.replacement_start;
     const end = rewrite.replacement_end;
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start
@@ -875,16 +1215,19 @@ function reviewLabel(matchId) {
 
 function matchReviewHTML(match) {
   const review = state.report?.reviews?.[match.id];
+  const key = `${state.report.id}:${match.id}`;
+  const comment = state.findingDrafts[key] ?? review?.comment ?? '';
   return `
     <div class="finding-review">
       <h3>Решение редактора</h3>
       <p class="field-help">${escapeHTML(reviewLabel(match.id) || 'Сравните фрагменты и сохраните своё решение.')} Доля совпадений отражает исходный результат поиска.</p>
-      <input class="field" id="finding-comment" maxlength="2000" value="${escapeHTML(review?.comment || '')}" aria-label="Комментарий к находке" placeholder="Комментарий · необязательно">
+      <input class="field" id="finding-comment" maxlength="2000" value="${escapeHTML(comment)}" aria-label="Комментарий к находке" placeholder="Комментарий · необязательно">
       <div class="action-row">
         <button class="button small secondary" data-finding-decision="confirmed" type="button">Подтвердить</button>
         <button class="button small secondary" data-finding-decision="dismissed" type="button">Отклонить находку</button>
         ${review && review.decision !== 'pending' ? '<button class="text-button" data-finding-decision="pending" type="button">Вернуть на проверку</button>' : ''}
       </div>
+      <p class="field-help" id="finding-save-status" role="status"></p>
     </div>`;
 }
 
@@ -925,11 +1268,19 @@ function rewriteHTML() {
 function bindComparison(match) {
   if (!match) return;
   const reportId = state.report.id;
+  const draftKey = `${reportId}:${match.id}`;
+  const commentField = document.querySelector('#finding-comment');
+  commentField.addEventListener('input', () => {
+    state.findingDrafts[draftKey] = commentField.value;
+    saveReviewDrafts();
+    document.querySelector('#finding-save-status').textContent = 'Комментарий ещё не сохранён в отчёте.';
+  });
   document.querySelectorAll('[data-finding-decision]').forEach(button => {
     button.addEventListener('click', () => busy(button, 'Сохраняем решение', async () => {
       const reviewSection = button.closest('.finding-review');
       reviewSection.querySelectorAll('button').forEach(control => { control.disabled = true; });
-      const comment = document.querySelector('#finding-comment').value.trim();
+      const submittedComment = commentField.value;
+      const comment = submittedComment.trim();
       let review;
       try {
         ({ review } = await api('/api/report-reviews', {
@@ -943,9 +1294,20 @@ function bindComparison(match) {
           reviewSection.querySelectorAll('button').forEach(control => { control.disabled = false; });
         }
       }
+      const changedWhileSaving = state.findingDrafts[draftKey] !== undefined && state.findingDrafts[draftKey] !== submittedComment;
+      if (!changedWhileSaving) {
+        delete state.findingDrafts[draftKey];
+        saveReviewDrafts();
+      }
       if (state.report?.id !== reportId) return;
       state.report.reviews = { ...state.report.reviews, [match.id]: review };
-      if (currentComparison(reportId, match.id)) renderReport();
+      if (currentComparison(reportId, match.id)) {
+        if (changedWhileSaving) {
+          document.querySelector('#finding-save-status').textContent = 'Решение сохранено. Новые изменения комментария ещё не сохранены.';
+        } else {
+          renderReport();
+        }
+      }
       toast('Решение по находке сохранено.');
     }));
   });
@@ -986,6 +1348,63 @@ function bindRewrite(match) {
     toast('Правка применена. Нажмите «Проверить текст» для нового отчёта.');
   });
 }
+function sourceProvenanceHTML(source) {
+  const provenance = source.provenance;
+  if (!provenance || !Object.keys(provenance).length) return '';
+  return `
+    <div class="source-provenance">
+      ${provenance.publisher ? `<span>${escapeHTML(provenance.publisher)}</span>` : ''}
+      ${provenance.license_url ? safeLink(provenance.license_url, provenance.license_name || 'Лицензия') : ''}
+    </div>
+    ${provenance.attribution ? `
+      <details class="source-attribution">
+        <summary>Авторство и условия использования</summary>
+        <p>${escapeHTML(provenance.attribution)}</p>
+        ${safeLink(provenance.revision_url, 'Версия публикации')}
+        ${safeLink(provenance.history_url, 'История авторства')}
+      </details>` : ''}`;
+}
+
+function renderSourcePacks() {
+  const area = document.querySelector('#source-packs-panel');
+  if (!area) return;
+  if (state.sourcePacks === null) {
+    area.innerHTML = '<p class="field-help">Загружаем открытые подборки источников…</p>';
+    return;
+  }
+  area.innerHTML = state.sourcePacks.length ? state.sourcePacks.map(pack => `
+    <article class="source-pack-card">
+      <div>
+        <h2>${escapeHTML(pack.title)}</h2>
+        <p>${escapeHTML(pack.description || 'Открытые публикации для сравнения с вашим текстом.')}</p>
+        <small>Материалов в подборке ${number(pack.source_count)}${pack.license_name ? ` · ${escapeHTML(pack.license_name)}` : ''}</small>
+      </div>
+      ${pack.source_count > 0 && pack.installed_count >= pack.source_count
+        ? '<span class="source-pack-installed">Уже в библиотеке <span aria-hidden="true">✓</span></span>'
+        : `<button class="button secondary small" data-install-pack="${escapeHTML(pack.id)}" type="button">Добавить подборку <span aria-hidden="true">+</span></button>`}
+    </article>`).join('') : '<p class="field-help">Открытая подборка по экономике готовится. Пока можно добавлять свои материалы.</p>';
+  area.querySelectorAll('[data-install-pack]').forEach(button => {
+    button.addEventListener('click', () => busy(button, 'Добавляем источники', async () => {
+      const result = await api('/api/source-packs/install', { pack_id: button.dataset.installPack });
+      await refreshSources();
+      await loadSourcePacks();
+      renderSourceList();
+      toast(`Добавлено источников ${number(result.installed_count)}. Уже были в библиотеке ${number(result.already_present_count)}.`);
+    }));
+  });
+}
+
+async function loadSourcePacks() {
+  try {
+    const { packs } = await api('/api/source-packs');
+    state.sourcePacks = packs;
+    if (state.view === 'sources') renderSourcePacks();
+  } catch {
+    const area = document.querySelector('#source-packs-panel');
+    if (area) area.innerHTML = '<p class="field-help">Подборка сейчас недоступна. Можно добавлять свои источники вручную.</p>';
+  }
+}
+
 function renderSourceList() {
   const list = document.querySelector('#source-list');
   if (!list) return;
@@ -997,6 +1416,7 @@ function renderSourceList() {
         <h3>${escapeHTML(source.title)}</h3>
         <p>${escapeHTML(source.text.slice(0, 170))}${source.text.length > 170 ? '…' : ''}</p>
         ${safeLink(source.url)}
+        ${sourceProvenanceHTML(source)}
         <small>${number(chars(source.text).length)} знаков · ${escapeHTML(date(source.created_at))}</small>
       </div>
       <button class="button small danger" data-delete-source="${escapeHTML(source.id)}"
@@ -1012,6 +1432,7 @@ function renderSourceList() {
       busy(button, 'Удаляем', async () => {
         await api(`/api/sources/${encodeURIComponent(button.dataset.deleteSource)}`, undefined, 'DELETE');
         await refreshSources();
+        await loadSourcePacks();
         renderSourceList();
         toast('Источник удалён.');
       });
@@ -1025,6 +1446,7 @@ function renderSources() {
     'Добавьте материалы, с которыми нужно сравнивать тексты. Ссылка сохраняется для отчёта, содержимое вставляется вручную.',
     '', 'Материалы для проверки'
   ) + `
+    <section class="card source-packs-section" id="source-packs-panel" aria-live="polite"></section>
     <section class="card form-card">
       <h2>Добавить источник</h2>
       <form id="source-form" class="source-form">
@@ -1045,7 +1467,9 @@ function renderSources() {
               <input id="source-file" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст источника">
             </label>
           </div>
-          <textarea class="field" id="source-text" name="text" required maxlength="200000" placeholder="Вставьте текст публикации…"></textarea>
+          <textarea class="field" id="source-text" name="text" required placeholder="Вставьте текст публикации…"></textarea>
+          <p class="field-help" id="source-text-limit-error" role="alert"></p>
+          <p class="field-help" id="source-text-import-hint" role="status" hidden></p>
         </div>
         <button class="button" type="submit">Добавить в библиотеку <span aria-hidden="true">+</span></button>
         <p class="field-help">Источники сохраняются на вашем Mac и используются в следующих проверках.</p>
@@ -1055,10 +1479,15 @@ function renderSources() {
       <h2>Ваши источники</h2><span class="subtle" id="source-list-count"></span>
     </div>
     <div id="source-list" class="source-list"></div>`;
+  renderSourcePacks();
+  loadSourcePacks();
   renderSourceList();
+  const sourceText = document.querySelector('#source-text');
+  sourceText.addEventListener('input', () => validateTextLength(sourceText));
   document.querySelector('#source-form').addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
+    if (!validateTextLength(form.elements.text)) { form.elements.text.reportValidity(); return; }
     const submitted = {
       title: form.elements.title.value,
       text: form.elements.text.value,
@@ -1069,6 +1498,7 @@ function renderSources() {
       await refreshSources();
       if (form.isConnected && Object.entries(submitted).every(([key, value]) => form.elements[key].value === value)) {
         form.reset();
+        document.querySelector('#source-text-import-hint').hidden = true;
       }
       renderSourceList();
       toast('Источник добавлен в библиотеку.');
@@ -1084,7 +1514,7 @@ function renderSources() {
 }
 
 async function renderEvaluation() {
-  main.innerHTML = heading('Оценка Qwen', 'Проверьте, как Qwen сравнивает пару фрагментов с уже известным источником. Сохраните свои исправления.', '', 'Оценка локальной модели') + `<section class="card evaluation-top"><div><h2>Контрольная проверка</h2><p>Дословные совпадения, пересказы и независимые тексты на одну тему. Источник заранее дан модели.<br>Каждый запуск использует отложенную тестовую выборку. На Mac проверка может занять несколько минут.</p></div><button class="button" id="run-evaluation" type="button" ${!modelAvailable() ? 'disabled' : ''}>Запустить оценку <span aria-hidden="true">↗</span></button></section>${!modelAvailable() ? '<div class="warning">Локальная модель пока недоступна. Подключите Ollama и Qwen через меню модели сверху. Примеры можно просматривать уже сейчас.</div>' : ''}<div id="evaluation-result"></div><div class="section-heading" style="margin-top:28px"><div><h2>Размеченные примеры</h2><p>Учебные тексты написаны специально для прототипа.</p></div><button class="text-button" id="export-training" type="button">↓ Выгрузить обучение</button></div><div id="example-list"><p class="subtle">Загружаем примеры…</p></div>`;
+  main.innerHTML = heading('Оценка Qwen', 'Проверьте, как Qwen сравнивает пару фрагментов с уже известным источником. Сохраните свои исправления.', '', 'Оценка локальной модели') + `<section class="card evaluation-top"><div><h2>Контрольная проверка</h2><p>Дословные совпадения, пересказы и независимые тексты на одну тему. Источник заранее дан модели.<br>Учебные пары помогают искать ошибки и уже использовались при настройке инструкций. На Mac проверка может занять несколько минут.</p></div><button class="button" id="run-evaluation" type="button" ${!modelAvailable() ? 'disabled' : ''}>Запустить оценку <span aria-hidden="true">↗</span></button></section>${!modelAvailable() ? '<div class="warning">Локальная модель пока недоступна. Подключите Ollama и Qwen через меню модели сверху. Примеры можно просматривать уже сейчас.</div>' : ''}<div id="evaluation-result"></div><div class="section-heading" style="margin-top:28px"><div><h2>Размеченные примеры</h2><p>Учебные тексты написаны специально для прототипа.</p></div><button class="text-button" id="export-training" type="button">↓ Выгрузить обучение</button></div><div id="example-list"><p class="subtle">Загружаем примеры…</p></div>`;
   document.querySelector('#run-evaluation').addEventListener('click', event => busy(event.currentTarget, 'Qwen проходит проверку', async () => {
     const { run } = await api('/api/evaluate', { model: selectedModel(), split: 'test' });
     state.run = run;
@@ -1118,13 +1548,14 @@ function renderEvaluationResults() {
   if (!container || !state.run) return;
   const run = state.run;
   const metrics = run.metrics || {};
-  container.innerHTML = `<div class="section-heading" style="margin-top:25px"><div><h2>Последний запуск</h2><p>${escapeHTML(run.model)} · ${escapeHTML(date(run.created_at))}</p></div></div><div class="stats-row"><div class="stat-card"><strong>${metricValue(metrics.accuracy)}</strong><span>верных меток на примерах</span></div><div class="stat-card"><strong>${metricValue(metrics.precision)}</strong><span>точность положительных ответов</span></div><div class="stat-card"><strong>${metricValue(metrics.recall)}</strong><span>полнота при известном источнике</span></div></div><p class="dataset-note">Завершено ${number(metrics.completed)} из ${number(metrics.total)} примеров · ошибок запросов ${number(metrics.errors)}. Точность находок и полнота учитывают завершённые ответы.<br>Учебная выборка помогает находить ошибки. Для оценки качества на реальных документах понадобится расширенный независимый набор.</p>`;
+  container.innerHTML = `<div class="section-heading" style="margin-top:25px"><div><h2>Последний запуск</h2><p>${escapeHTML(run.model)} · ${escapeHTML(date(run.created_at))}</p></div></div><div class="stats-row"><div class="stat-card"><strong>${metricValue(metrics.accuracy)}</strong><span>верных меток на примерах</span></div><div class="stat-card"><strong>${metricValue(metrics.precision)}</strong><span>точность положительных ответов</span></div><div class="stat-card"><strong>${metricValue(metrics.recall)}</strong><span>полнота при известном источнике</span></div></div><p class="dataset-note">Завершено ${number(metrics.completed)} из ${number(metrics.total)} примеров · ошибок запросов ${number(metrics.errors)}. Точность находок и полнота учитывают завершённые ответы.<br>Это диагностический прогон на учебных парах, уже использованных при настройке инструкций. Для оценки качества на реальных документах понадобится независимый набор.</p>`;
 }
 function exampleHTML(example) {
   const result = state.run?.results?.find(item => item.example_id === example.id || item.id === example.id);
   const predicted = result?.predicted ?? result?.relation ?? result?.judgment?.relation;
   const correct = predicted === example.expected;
-  const selected = example.review?.relation || example.expected;
+  const draft = state.exampleDrafts[example.id];
+  const selected = draft?.relation || example.review?.relation || example.expected;
   const resultText = result?.error || `Qwen · ${relationNames[predicted] || predicted || 'Ответ не получен'} ${correct ? '✓' : '· требуется проверка'}`;
   return `
     <article class="card example-card">
@@ -1147,8 +1578,9 @@ function exampleHTML(example) {
           ${Object.entries(relationNames).map(([value, label]) => `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`).join('')}
         </select>
         <input class="field" name="comment" maxlength="2000" aria-label="Комментарий к примеру"
-          value="${escapeHTML(example.review?.comment || '')}" placeholder="Почему вы так считаете?">
+          value="${escapeHTML(draft?.comment ?? example.review?.comment ?? '')}" placeholder="Почему вы так считаете?">
         <button class="button small secondary" type="submit">Сохранить оценку</button>
+        <span class="field-help review-save-status" role="status"></span>
       </form>
     </article>`;
 }
@@ -1162,14 +1594,30 @@ function renderExamples() {
     '◈'
   );
   container.querySelectorAll('[data-review]').forEach(form => {
+    const rememberDraft = () => {
+      state.exampleDrafts[form.dataset.review] = {
+        relation: form.elements.relation.value, comment: form.elements.comment.value,
+      };
+      saveReviewDrafts();
+      form.querySelector('.review-save-status').textContent = 'Есть несохранённые изменения.';
+    };
+    form.elements.comment.addEventListener('input', rememberDraft);
+    form.elements.relation.addEventListener('change', rememberDraft);
     form.addEventListener('submit', event => {
       event.preventDefault();
       busy(form.querySelector('button'), 'Сохраняем', async () => {
+        const submitted = { relation: form.elements.relation.value, comment: form.elements.comment.value };
         const { review } = await api('/api/reviews', {
-          example_id: form.dataset.review,
-          relation: form.elements.relation.value,
-          comment: form.elements.comment.value.trim(),
+          example_id: form.dataset.review, relation: submitted.relation, comment: submitted.comment.trim(),
         });
+        const draft = state.exampleDrafts[form.dataset.review];
+        const changedWhileSaving = draft && (draft.comment !== submitted.comment || draft.relation !== submitted.relation);
+        if (!changedWhileSaving) {
+          delete state.exampleDrafts[form.dataset.review];
+          saveReviewDrafts();
+        }
+        if (form.isConnected) form.querySelector('.review-save-status').textContent = changedWhileSaving
+          ? 'Оценка сохранена. Новые изменения ещё не сохранены.' : 'Оценка сохранена.';
         const example = state.examples.find(item => item.id === form.dataset.review);
         if (example) example.review = review;
         toast('Ваша оценка сохранена.');
@@ -1265,8 +1713,9 @@ function updateModelControls() {
 }
 function renderView() {
   state.viewRevision += 1;
-  const requested = location.hash.replace('#', '') || 'check';
-  state.view = viewNames[requested] ? requested : 'check';
+  const requested = location.hash.replace('#', '') || 'home';
+  state.view = viewNames[requested] ? requested : 'home';
+  document.body.classList.toggle('home-view', state.view === 'home');
   document.querySelectorAll('[data-view]').forEach(link => {
     const active = link.dataset.view === state.view;
     link.classList.toggle('active', active);
@@ -1274,7 +1723,8 @@ function renderView() {
   });
   document.querySelector('#breadcrumb-title').textContent = viewNames[state.view];
   document.title = `${viewNames[state.view]} · Исток`;
-  if (state.view === 'check') renderCheck();
+  if (state.view === 'home') renderHome();
+  else if (state.view === 'check') renderCheck();
   else if (state.view === 'sources') renderSources();
   else if (state.view === 'evaluation') renderEvaluation();
   else renderHistory();

@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--dataset", type=Path, default=pipeline_evaluation.retrieval_evaluation.DATASET_PATH)
     parser.add_argument("--cache", type=Path, default=pipeline_evaluation.CACHE_PATH)
     parser.add_argument("--output", type=Path, help="Сохранить полный результат в JSON")
+    parser.add_argument("--audit-existing", type=Path, help="Проверить позиции выдержек сохранённого прогона без запуска моделей")
     args = parser.parse_args()
 
     def progress(event, done, total):
@@ -33,8 +34,12 @@ def main():
             print(f"Завершено {done}/{total} · {event['example_id']} · ошибок {hybrid['errors']}", file=sys.stderr, flush=True)
 
     try:
-        result = pipeline_evaluation.run(args.split, args.top_k, progress, model=args.model,
-                                         max_cases=args.max_cases, dataset_path=args.dataset, cache_path=args.cache)
+        if args.audit_existing:
+            saved = json.loads(args.audit_existing.read_text(encoding="utf-8"))
+            result = pipeline_evaluation.audit_evidence_spans(saved, args.dataset)
+        else:
+            result = pipeline_evaluation.run(args.split, args.top_k, progress, model=args.model,
+                                             max_cases=args.max_cases, dataset_path=args.dataset, cache_path=args.cache)
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as error:
         parser.exit(1, f"Не удалось провести оценку — {error}\n")
     print(json.dumps({"dataset": result["dataset"], "synthetic": True, "metrics": result["metrics"],

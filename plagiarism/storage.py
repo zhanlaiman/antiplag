@@ -34,6 +34,12 @@ class Store:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS records_kind ON records(kind, created_at);
+                CREATE INDEX IF NOT EXISTS candidate_parent ON records(
+                    json_extract(data, '$.retrieval_id'), created_at DESC
+                ) WHERE kind IN ('candidate-judgment', 'candidate-error');
+                CREATE INDEX IF NOT EXISTS retrieval_parent ON records(
+                    json_extract(data, '$.report_id'), created_at DESC
+                ) WHERE kind = 'retrieval';
                 CREATE TABLE IF NOT EXISTS source_snapshots (
                     hash TEXT PRIMARY KEY, data TEXT NOT NULL
                 );
@@ -48,6 +54,10 @@ class Store:
                     PRIMARY KEY (report_id, match_id)
                 );
             """)
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(sources)")}
+            if "provenance" not in columns:
+                connection.execute("ALTER TABLE sources ADD COLUMN provenance TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def connect(self):
@@ -61,16 +71,29 @@ class Store:
 
     def sources(self):
         with self.connect() as connection:
-            return [dict(row) for row in connection.execute("SELECT * FROM sources ORDER BY created_at DESC, id")]
+            return [self._source_row(row) for row in connection.execute("SELECT * FROM sources ORDER BY created_at DESC, id")]
 
-    def add_source(self, title, text, url="", source_id=None):
-        source = dict(id=source_id or uuid4().hex, title=title, text=text, url=url, created_at=timestamp())
-        return self._add_sources([source])[0]
+    def _source_row(self, row):
+        return {**dict(row), "provenance": json.loads(row["provenance"])}
+
+    def add_source(self, title, text, url="", source_id=None, provenance=None):
+        source = dict(id=source_id or uuid4().hex, title=title, text=text, url=url,
+                      created_at=timestamp(), provenance=provenance or {})
+        return self._add_sources([source])["sources"][0]
 
     def add_demo_sources(self, sources):
         """Seed the stable demo IDs together, preserving previously stored rows."""
+        return self.add_sources(sources)
+
+    def add_sources(self, sources):
+        """Install a validated collection atomically without replacing existing IDs."""
+        return self.install_sources(sources)["sources"]
+
+    def install_sources(self, sources):
+        """Return insertion counts from the same transaction that installs a pack."""
         prepared = [dict(id=item["id"], title=item["title"], text=item["text"],
-                         url=item.get("url", ""), created_at=timestamp()) for item in sources]
+                         url=item.get("url", ""), created_at=timestamp(),
+                         provenance=item.get("provenance", {})) for item in sources]
         return self._add_sources(prepared)
 
     def _add_sources(self, sources):
@@ -81,11 +104,16 @@ class Store:
             new_ids = {source["id"] for source in sources} - existing_ids
             if new_ids and len(existing_ids) + len(new_ids) > MAX_SOURCES:
                 raise ValueError(f"В локальной библиотеке доступно до {MAX_SOURCES} источников.")
-            connection.executemany(
-                "INSERT OR IGNORE INTO sources VALUES (:id, :title, :text, :url, :created_at)", sources
-            )
-            return [dict(connection.execute("SELECT * FROM sources WHERE id = ?", (source["id"],)).fetchone())
+            rows = [{**source, "provenance": json.dumps(source.get("provenance", {}), ensure_ascii=False)}
                     for source in sources]
+            connection.executemany(
+                """INSERT OR IGNORE INTO sources (id, title, text, url, created_at, provenance)
+                   VALUES (:id, :title, :text, :url, :created_at, :provenance)""", rows
+            )
+            saved = [self._source_row(connection.execute("SELECT * FROM sources WHERE id = ?", (source["id"],)).fetchone())
+                     for source in sources]
+            return {"sources": saved, "installed_count": len(new_ids),
+                    "already_present_count": len({source["id"] for source in sources}) - len(new_ids)}
 
     def delete_source(self, source_id):
         with self.connect() as connection:
@@ -152,14 +180,14 @@ class Store:
         with self.connect() as connection:
             row = connection.execute("""SELECT data FROM records
                 WHERE kind = 'retrieval' AND json_extract(data, '$.report_id') = ?
-                ORDER BY created_at DESC LIMIT 1""", (report_id,)).fetchone()
+                ORDER BY rowid DESC LIMIT 1""", (report_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def candidate_judgments(self, retrieval_id):
         with self.connect() as connection:
             rows = connection.execute("""SELECT data FROM records
                 WHERE kind IN ('candidate-judgment', 'candidate-error') AND json_extract(data, '$.retrieval_id') = ?
-                ORDER BY created_at DESC""", (retrieval_id,))
+                ORDER BY rowid DESC""", (retrieval_id,))
             latest = {}
             for row in rows:
                 record = json.loads(row[0])

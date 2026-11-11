@@ -213,6 +213,125 @@ class JudgmentTests(unittest.TestCase):
                         llm.embed(["Первая фраза.", "Вторая фраза."])
 
 
+class ExactEvidenceTests(unittest.TestCase):
+    def test_wrong_source_passage_is_rejected_after_one_feedback_retry(self):
+        text = "Добровольцы записали звон трамвая в депо и под мостом."
+        source = "Краеведы собирают звуки городского транспорта для выставки."
+        answer = chat_response({
+            "relation": "exact", "explanation": "Источник описывает выставку городского транспорта.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        with patch.object(llm, "_request", return_value=answer) as request:
+            with self.assertRaisesRegex(llm.OllamaError, "не подтверждают") as raised:
+                llm.judge(text, source)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(raised.exception.code, "unconfirmed_exact")
+        self.assertEqual(raised.exception.details["attempts"], 2)
+        self.assertFalse(raised.exception.details["final_overlap"]["verified"])
+        self.assertEqual(raised.exception.details["final_judgment"]["evidence_source"], source)
+
+    def test_feedback_retry_can_select_a_correct_exact_pair(self):
+        copied = "Исследователи установили несколько новых датчиков влажности почвы возле городской библиотеки."
+        text = "Вступление про городской эксперимент. " + copied
+        source = "Рассказ о выставке городского транспорта. " + copied
+        wrong = chat_response({
+            "relation": "exact", "explanation": "Оба текста о городе.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        corrected = chat_response({
+            "relation": "exact", "explanation": "Второе предложение совпадает дословно.",
+            "evidence_text_id": "T2", "evidence_source_id": "S2",
+        })
+        with patch.object(llm, "_request", side_effect=[wrong, corrected]) as request:
+            result = llm.judge(text, source)
+        self.assertEqual(result["attempts"], 2)
+        self.assertTrue(result["exact_evidence_verified"])
+        self.assertEqual(result["evidence_text"], copied)
+        self.assertEqual(result["evidence_text_start"], text.index(copied))
+        self.assertEqual(result["consistency_retry"]["judgment"]["evidence_text_id"], "T1")
+        first_prompt = request.call_args_list[0].args[1]["messages"][0]["content"]
+        second_prompt = request.call_args_list[1].args[1]["messages"][0]["content"]
+        self.assertTrue(second_prompt.startswith(first_prompt + "\nYour previous exact result"))
+
+    def test_retry_relation_is_produced_by_model_and_preserves_rejected_answer(self):
+        text = "Трамвайный звонок записали добровольцы в трёх местах."
+        source = "Волонтёры сохранили звук колокольчика на нескольких городских остановках."
+        wrong = chat_response({
+            "relation": "exact", "explanation": "Одинаковая история.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        corrected = chat_response({
+            "relation": "paraphrase", "explanation": "Смысловые детали сходны, формулировки различаются.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        with patch.object(llm, "_request", side_effect=[wrong, corrected]) as request:
+            result = llm.judge(text, source)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(result["relation"], "paraphrase")
+        self.assertEqual(result["consistency_retry"]["judgment"]["relation"], "exact")
+        self.assertIsNone(result["exact_evidence_verified"])
+
+    def test_paraphrase_without_shared_words_has_no_lexical_gate(self):
+        answer = chat_response({
+            "relation": "paraphrase", "explanation": "Возможен переводной пересказ.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        with patch.object(llm, "_request", return_value=answer) as request:
+            result = llm.judge("Добровольцы записали трамвайный звонок.", "Volunteers recorded the tram bell.")
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(result["relation"], "paraphrase")
+        self.assertEqual(result["attempts"], 1)
+
+    def test_four_and_five_word_copied_sentences_are_supported(self):
+        for passage in ("Датчики измеряют влажность почвы.", "Сотрудники проверяют архивные записи ежедневно."):
+            with self.subTest(passage=passage):
+                answer = chat_response({
+                    "relation": "exact", "explanation": "Предложение совпадает.",
+                    "evidence_text_id": "T1", "evidence_source_id": "S1",
+                })
+                with patch.object(llm, "_request", return_value=answer) as request:
+                    result = llm.judge(passage, passage)
+                self.assertEqual(request.call_count, 1)
+                self.assertTrue(result["exact_evidence_verified"])
+                self.assertEqual(result["exact_evidence_overlap"]["longer_span_coverage"], 1.0)
+
+    def test_normalized_overlap_preserves_original_evidence(self):
+        text = "Волонтёры записали звонок трамвая около старого депо."
+        source = "ВОЛОНТЕРЫ записали звoнок трамвая около старого депо!"
+        answer = chat_response({
+            "relation": "exact", "explanation": "Формулировки совпадают после нормализации символов.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        with patch.object(llm, "_request", return_value=answer) as request:
+            result = llm.judge(text, source)
+        self.assertEqual(request.call_count, 1)
+        self.assertTrue(result["exact_evidence_verified"])
+        self.assertEqual(result["evidence_source"], source)
+
+    def test_several_short_function_words_are_insufficient(self):
+        passage = "и — в — а — на"
+        answer = chat_response({
+            "relation": "exact", "explanation": "Одинаковые служебные слова.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        with patch.object(llm, "_request", return_value=answer) as request:
+            with self.assertRaises(llm.OllamaError):
+                llm.judge(passage, passage)
+        self.assertEqual(request.call_count, 2)
+
+    def test_failed_retry_keeps_attempt_count_and_first_answer(self):
+        answer = chat_response({
+            "relation": "exact", "explanation": "Одинаковая тема.",
+            "evidence_text_id": "T1", "evidence_source_id": "S1",
+        })
+        with patch.object(llm, "_request", side_effect=[answer, llm.OllamaError("Нет ответа")]):
+            with self.assertRaisesRegex(llm.OllamaError, "Нет ответа") as raised:
+                llm.judge("Добровольцы записали трамвайный звонок.", "Краеведы открыли выставку городского транспорта.")
+        self.assertEqual(raised.exception.details["attempts"], 2)
+        self.assertEqual(raised.exception.code, "model_error")
+        self.assertEqual(raised.exception.details["consistency_retry"]["judgment"]["relation"], "exact")
+
+
 class EvaluationTests(unittest.TestCase):
     def test_source_groups_do_not_leak_between_splits(self):
         cases = evaluation.examples()
