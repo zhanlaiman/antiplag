@@ -1078,6 +1078,13 @@ test('saved-data web reports distinguish replayed replies and pages from fresh n
   assert.ok(!html.includes('Поисковых запросов выполнено'));
   assert.ok(!html.includes('Попыток загрузки'));
   assert.ok(html.includes('Не установлена'));
+  report.offline_replay.fresh_page_load_attempts = 1;
+  app.expose('savedDataReport', report);
+  app.evaluate('state.report=savedDataReport;renderReport()');
+  const mixed = app.element('report-area').innerHTML;
+  assert.ok(mixed.includes('используется прежняя поисковая выдача'));
+  assert.ok(!mixed.includes('Источники проверены по сохранённым снимкам'));
+  assert.ok(mixed.includes('Проверено страниц 1. Обработано адресов 1'));
 });
 
 test('Internet mode explains missing configuration and never sends a check without it', async () => {

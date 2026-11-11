@@ -1557,11 +1557,12 @@ function setReportAddress(surface, report) {
 function webCoverageHTML(report) {
   const web = report.web || {};
   const replay = report.offline_replay && typeof report.offline_replay === 'object';
+  const savedPages = replay && report.offline_replay.fresh_page_load_attempts === 0;
   return `<section class="card web-coverage">
     <h3>${webCheckComplete(report) ? 'Проверка найденных страниц завершена' : 'Проверка завершена не полностью'}</h3>
-    ${replay ? '<p class="warning">Повтор сохранённых данных. Источники проверены по сохранённым снимкам.</p>' : ''}
+    ${replay ? `<p class="warning">Повтор сохранённых данных: используется прежняя поисковая выдача.${savedPages ? ' Источники проверены по сохранённым снимкам.' : ''}</p>` : ''}
     <p>${replay ? 'Использовано сохранённых поисковых ответов' : 'Поисковых запросов выполнено'} ${number(web.queries_completed)} из ${number(web.queries_planned)}.
-      ${replay ? 'Проверено снимков страниц' : 'Проверено страниц'} ${number(web.sources_checked)}. ${replay ? 'Обработано адресов' : 'Попыток загрузки'} ${number(web.urls_attempted)}.</p>
+      ${savedPages ? 'Проверено снимков страниц' : 'Проверено страниц'} ${number(web.sources_checked)}. ${replay ? 'Обработано адресов' : 'Попыток загрузки'} ${number(web.urls_attempted)}.</p>
     <p class="field-help">Уникальность — доля слов без найденных дословных совпадений в загруженных страницах. Поисковые сниппеты не используются как доказательство. Оценка Qwen в этот процент не входит.</p>
     ${web.status !== 'complete' && Number.isFinite(report.stats?.uniqueness_upper_bound_percent) ? '<p class="field-help">По найденным совпадениям указана верхняя граница уникальности. Проверка остальных страниц неполная, окончательный процент не установлен.</p>' : ''}
     ${web.errors?.length ? `<details><summary>Не удалось проверить · ${number(web.errors.length)}</summary><ul>${web.errors.map(error => `<li>${escapeHTML(typeof error === 'string' ? error : error.message || 'Источник недоступен')} ${typeof error === 'object' ? safeLink(error.url) : ''}</li>`).join('')}</ul></details>` : ''}
