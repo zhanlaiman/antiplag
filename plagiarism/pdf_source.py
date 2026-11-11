@@ -163,13 +163,17 @@ def _parse(data, memory_limit):
             total += len(text)
             if total > MAX_TEXT_CHARACTERS:
                 raise PDFError("pdf_resource_limit")
-            # A scanned page among text pages must not silently disappear.
-            resources = page.get("/Resources")
-            resources = resources.get_object() if resources is not None else {}
-            objects = resources.get("/XObject")
-            objects = objects.get_object() if objects is not None else {}
-            if not text.strip() and any(item.get_object().get("/Subtype") == "/Image" for item in objects.values()):
-                raise PDFError("pdf_no_text")
+            # A page number over a scanned image is not its text layer.
+            if not text.strip() or re.fullmatch(
+                r"\s*[-–—]?\s*(?:(?:page|стр(?:аница|\.)?)\s*)?\d+(?:\s*(?:/|of|из)\s*\d+)?\s*[-–—]?\s*",
+                text, re.IGNORECASE,
+            ):
+                resources = page.get("/Resources")
+                resources = resources.get_object() if resources is not None else {}
+                objects = resources.get("/XObject")
+                objects = objects.get_object() if objects is not None else {}
+                if any(item.get_object().get("/Subtype") == "/Image" for item in objects.values()):
+                    raise PDFError("pdf_no_text")
             parts.append(text)
         text = "\n\n".join(parts).strip()
         if len(text) < 35 or "\0" in text or len(re.findall(r"[^\W_]{2,}", text)) < 6:

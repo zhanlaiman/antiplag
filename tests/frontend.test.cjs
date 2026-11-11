@@ -1239,3 +1239,59 @@ test('the homepage checks its own draft and shows real source results without re
   assert.equal(app.storage.get('istok.draft.v1'), 'Личный учебный черновик редактора');
   assert.equal(app.evaluate('state.text'), 'Личный учебный черновик редактора');
 });
+
+test('a saved report link restores its proof and never sends a new search', async () => {
+  const report = webReport('Проверяемый документ');
+  report.stats.total_words = 12;
+  report.stats.matched_words = 3;
+  for (const [surface, draft] of [['home', ''], ['check', ''], ['check', 'Черновик с новыми изменениями']]) {
+    const calls = [];
+    const draftKey = surface === 'home' ? 'istok.home-draft.v1' : 'istok.draft.v1';
+    const app = fixture({
+      view: surface + '/' + report.id, stored: { [draftKey]: draft },
+      fetch(url, body) {
+        calls.push({ url, body });
+        if (url === '/api/reports/' + report.id) return json({ report });
+      },
+    });
+    await settle();
+    const html = app.element(surface === 'home' ? 'home-report-result' : 'report-area').innerHTML;
+    assert.ok(html.includes('25%') && html.includes('3 из 12') && html.includes('страниц прочитано'));
+    assert.ok(html.includes('https://example.test/article') && html.includes('data-highlight'));
+    assert.equal(app.element(surface === 'home' ? 'home-text' : 'check-text').value, draft || report.text);
+    assert.equal(calls.filter(call => call.url === '/api/web-check-jobs').length, 0);
+  }
+});
+
+test('a late saved report response cannot replace a different opened report', async () => {
+  const first = webReport('Более ранний отчёт');
+  const second = { ...webReport('Позднее открытый отчёт'), id: '9'.repeat(32) };
+  const wait = deferred();
+  const app = fixture({ view: 'check/' + first.id, fetch(url) {
+    if (url === '/api/reports/' + first.id) return wait.promise;
+    if (url === '/api/reports/' + second.id) return json({ report: second });
+  }});
+  await settle();
+  await app.navigate('check/' + second.id);
+  await settle();
+  wait.resolve(json({ report: first }));
+  await settle();
+  assert.equal(app.evaluate('state.report.id'), second.id);
+  assert.equal(app.element('check-text').value, second.text);
+});
+
+test('an explicit zero read count overrides a stale percentage on both report screens', async () => {
+  const report = webReport('Старый отчёт');
+  report.web.sources_checked = 0;
+  report.stats.uniqueness_percent = 100;
+  report.stats.total_words = 2;
+  report.stats.matched_words = 2;
+  for (const surface of ['home', 'check']) {
+    const app = fixture({ view: surface + '/' + report.id, fetch(url) {
+      if (url === '/api/reports/' + report.id) return json({ report });
+    } });
+    await settle();
+    const html = app.element(surface === 'home' ? 'home-report-result' : 'report-area').innerHTML;
+    assert.ok(html.includes('Не установлена') && !html.includes('100%'));
+  }
+});

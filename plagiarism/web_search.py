@@ -4,6 +4,7 @@ No language model is called. Search snippets never become matching evidence.
 """
 
 from datetime import datetime, timezone
+from collections import Counter
 from contextlib import contextmanager
 from hashlib import sha256
 import json
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_QUERIES = 6
 MAX_URLS = 12
 QUERY_STRATEGY = "uniform-quoted-v1"
+DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
@@ -35,25 +37,77 @@ class WebSearchError(RuntimeError):
         self.code, self.details = code, details
 
 
-def plan_queries(text, limit=MAX_QUERIES):
+def _distinctive_windows(text, tokens, width, count):
+    """Rank phrases within sentences using only frequencies in the submitted text."""
+    words = [token.value for token in tokens]
+    counts = Counter(words)
+    pairs = Counter(zip(words, words[1:]))
+    # Very short words and serial numbers by themselves carry little topic information.
+    weights = [min(len(word), 12) / counts[word] if len(word) > 3 and not word.isdecimal()
+               else 0 for word in words]
+    pair_weights = [1 / pairs[pair] for pair in zip(words, words[1:])]
+    segments, paragraph, first = [], 0, 0
+    for i in range(1, len(tokens)):
+        gap = text[tokens[i - 1].end:tokens[i].start]
+        if re.search(r"[.!?…\r\n]", gap):
+            segments.append((paragraph, first, i))
+            paragraph += int("\n" in gap or "\r" in gap)
+            first = i
+    segments.append((paragraph, first, len(tokens)))
+    candidates = []
+    for paragraph, start, end in segments:
+        size = min(width, end - start)
+        if size < MIN_WORDS:
+            continue
+        for i in range(start, end - size + 1):
+            weight = (sum(weights[i:i + size]) + 3 * sum(pair_weights[i:i + size - 1])) / size
+            candidates.append((-weight, i, i + size, paragraph))
+    if not candidates:
+        # A list of one-word lines still admits the original token windows.
+        return None
+    candidates.sort()
+    chosen, covered, paragraphs, phrases = [], set(), set(), set()
+    for distinct_paragraph in (True, False):
+        for _, start, end, paragraph in candidates:
+            if (distinct_paragraph and paragraph in paragraphs) or not covered.isdisjoint(range(start, end)):
+                continue
+            phrase = ' '.join(word[:40] for word in words[start:end])
+            if phrase in phrases:
+                continue
+            chosen.append((start, end))
+            covered.update(range(start, end))
+            paragraphs.add(paragraph)
+            phrases.add(phrase)
+            if len(chosen) == count:
+                return sorted(chosen)
+    return sorted(chosen)
+
+
+def plan_queries(text, limit=MAX_QUERIES, strategy=QUERY_STRATEGY):
     if not isinstance(text, str) or not 35 <= len(text) <= MAX_TEXT_CHARS:
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY):
+        raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
-    starts = [round(number * (len(tokens) - width) / max(count - 1, 1)) for number in range(count)]
+    windows = _distinctive_windows(text, tokens, width, count) if strategy == DISTINCTIVE_STRATEGY else None
+    if windows is None:
+        starts = [round(number * (len(tokens) - width) / max(count - 1, 1)) for number in range(count)]
+        windows = [(start, start + width) for start in starts]
     queries, seen = [], set()
-    for start in starts:
-        window = tokens[start:start + width]
+    for start, end in windows:
+        window = tokens[start:end]
         words = [token.value for token in window]
         # Very long encoded identifiers must not consume a provider's query budget.
         query = '"' + ' '.join(word[:40] for word in words) + '"'
         if len(query) > 390:
             query = query[:389].rsplit(' ', 1)[0] + '"'
+            window = window[:len(query[1:-1].split())]
         if query in seen:
             continue
         seen.add(query)
@@ -210,14 +264,16 @@ def _word_coverage(text, matches):
             "matched_word_percent": round(100 * covered / len(tokens), 1) if tokens else 0}
 
 
-def run(text, request_id=None, progress=None, searcher=None, fetcher=None):
+def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
     This is a first lexical web search, not a guarantee over every internet page.
     If a planned query or attempted page fails, no final uniqueness is claimed.
     """
     started = time.monotonic()
-    queries = plan_queries(text)
+    if query_strategy is None:
+        query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", QUERY_STRATEGY)
+    queries = plan_queries(text, strategy=query_strategy)
     request_id = request_id or uuid4().hex
     if searcher is None:
         provider = selected_provider()
@@ -334,7 +390,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None):
 
     result.update(text=text, sources=sources, scope="web_search", web={
         "provider": provider, "status": "complete" if complete else "partial",
-        "query_strategy": QUERY_STRATEGY, "matcher_version": MATCHER_VERSION,
+        "query_strategy": query_strategy, "matcher_version": MATCHER_VERSION,
         "queries_planned": len(queries), "queries_attempted": queries_attempted, "queries_completed": queries_completed,
         "queries_unattempted": queries_unattempted, "query_stop_code": stopped_code,
         "query_spans": [{"start": item["start"], "end": item["end"]} for item in queries],

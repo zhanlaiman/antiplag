@@ -807,7 +807,7 @@ async function submitModelJob(entry) {
   }
 }
 
-async function observeModelJob(entry) {
+async function observeModelJob(entry, restored = false) {
   if (modelJobObservers.has(entry.request_id)) return modelJobObservers.get(entry.request_id);
   const observing = (async () => {
     try {
@@ -844,6 +844,8 @@ async function observeModelJob(entry) {
     }
     if (entry.job.status === 'complete') {
       if (entry.path === '/api/web-check' && entry.job.result?.report) {
+        const linked = /^#(?:home|check)\/([a-f0-9]{32})$/.exec(location.hash);
+        if (restored && linked && linked[1] !== entry.job.result.report.id) return entry.job.result;
         if (entry.context?.surface === 'home' && state.homeText === entry.body.text) {
           state.homeReport = entry.job.result.report;
           if (state.view === 'home') renderHomeResult();
@@ -951,15 +953,29 @@ function renderHomeResult() {
   const report = state.homeReport;
   area.hidden = !report || report.scope !== 'web_search';
   if (area.hidden) return;
+  setReportAddress('home', report);
+  const selected = report.matches.find(match => match.id === state.homeMatch) || report.matches[0];
   area.innerHTML = `<section class="home-result-card">
-    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webUniqueness(report)}</h2><p>${webCheckComplete(report) ? 'уникальность по найденным страницам' : 'проверка неполная · показана только доступная оценка'}</p></div><a href="#check" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
+    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webUniqueness(report)}</h2><p>${webCheckComplete(report) ? 'уникальность по найденным страницам' : 'проверка неполная · окончательный процент не установлен'}</p></div><a href="#check/${escapeHTML(report.id)}" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
     <p id="home-report-stale" class="warning" hidden>Это отчёт для предыдущего текста. Новая правка в поле сохранена отдельно.</p>
-    ${report.matches.length ? `<div class="home-result-sources">${report.matches.map(match => `<article><h3>${escapeHTML(match.source_title)}</h3>${safeLink(match.source_url, 'Страница-источник')}<blockquote>${escapeHTML(match.excerpt)}</blockquote><p class="field-help">Совпавший фрагмент страницы</p><blockquote>${escapeHTML(match.source_excerpt)}</blockquote></article>`).join('')}</div>` : '<p>На найденных доступных страницах дословных совпадений не обнаружено.</p>'}
+    ${webStatsHTML(report)}
+    ${selected ? `<div class="card"><h3>Совпадения в вашем тексте</h3><div class="annotated-text">${annotatedText(report, selected.id)}</div>
+      <p class="field-help">Нажмите на выделенный фрагмент, чтобы сверить его с источником.</p></div>
+      <div class="comparison-columns home-source-comparison" id="home-fragments" tabindex="-1">
+        <div><h3>Ваш фрагмент</h3><blockquote>${escapeHTML(selected.excerpt)}</blockquote></div>
+        <div><h3>${escapeHTML(selected.source_title)}</h3><blockquote>${escapeHTML(selected.source_excerpt)}</blockquote>${safeLink(selected.source_url, 'Открыть источник')}</div>
+      </div>` : `<p>${hasWebSources(report) ? 'На прочитанных страницах дословных совпадений не обнаружено.' : 'Поиск не дал страниц, по которым можно проверить текст.'}</p>`}
     ${webCoverageHTML(report)}
   </section>`;
+  bindMatchSelection(area, id => {
+    state.homeMatch = id;
+    renderHomeResult();
+    showComparison('#home-fragments');
+  });
   document.querySelector('#home-open-full-report').addEventListener('click', () => {
+    if (!state.text) saveDraft(report.text);
     state.report = report;
-    state.selectedMatch = report.matches[0]?.id || null;
+    state.selectedMatch = selected?.id || null;
     state.rewrite = null;
     state.judgment = null;
   });
@@ -1440,7 +1456,7 @@ function acceptCheckReport(report, text) {
   renderReport();
   document.querySelector('#report-area')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-function annotatedText(report) {
+function annotatedText(report, selectedId = state.selectedMatch) {
   const text = chars(report.text);
   const boundaries = new Set([0, text.length]);
   for (const match of report.matches) { boundaries.add(match.start); boundaries.add(match.end); }
@@ -1450,7 +1466,7 @@ function annotatedText(report) {
     const start = ordered[index], end = ordered[index + 1];
     const covering = report.matches.filter(match => match.start < end && match.end > start);
     const value = escapeHTML(text.slice(start, end).join(''));
-    const selected = covering.find(match => match.id === state.selectedMatch);
+    const selected = covering.find(match => match.id === selectedId);
     const match = selected || covering[0];
     output.push(match ? `<mark tabindex="0" role="button" aria-label="Показать совпадение с ${escapeHTML(match.source_title)}" data-highlight="${escapeHTML(match.id)}" class="${selected ? 'selected' : ''} ${match.kind === 'similar' ? 'fuzzy' : ''}">${value}</mark>` : value);
   }
@@ -1474,9 +1490,14 @@ function matchCardHTML(match, index) {
     </div>`;
 }
 
+function webSourceCount(report) {
+  const counts = [report.web?.sources_checked, report.source_snapshots_count, report.stats?.checked_source_count];
+  if (counts.includes(0)) return 0;
+  return counts.find(value => Number.isInteger(value) && value > 0);
+}
+
 function hasWebSources(report) {
-  const count = report.source_snapshots_count ?? report.web?.sources_checked ?? report.stats?.checked_source_count;
-  return Number.isInteger(count) && count > 0;
+  return webSourceCount(report) > 0;
 }
 
 function webCheckComplete(report) {
@@ -1491,6 +1512,46 @@ function webUniqueness(report) {
   const upper = report.stats?.uniqueness_upper_bound_percent;
   return hasWebSources(report) && Number.isFinite(upper) && upper >= 0 && upper <= 100
     ? `Не выше ${upper.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%` : 'Не установлена';
+}
+
+function webStatsHTML(report) {
+  const stats = report.stats || {};
+  const checked = webSourceCount(report);
+  const validWords = hasWebSources(report) && Number.isInteger(stats.total_words) && stats.total_words > 0
+    && Number.isInteger(stats.matched_words) && stats.matched_words >= 0 && stats.matched_words <= stats.total_words;
+  const percent = validWords ? (100 * stats.matched_words / stats.total_words).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + '%' : '—';
+  return `<div class="stats-row web-stats">
+    <div class="stat-card"><strong>${percent}</strong><span>слов с подтверждёнными дословными совпадениями${validWords ? ` · ${number(stats.matched_words)} из ${number(stats.total_words)}` : ''}</span></div>
+    <div class="stat-card"><strong>${Number.isInteger(checked) ? number(checked) : '—'}</strong><span>страниц прочитано</span></div>
+    <div class="stat-card"><strong class="coverage-status">${webCheckComplete(report) ? 'Завершена' : 'Неполная'}</strong><span>проверка найденных страниц</span></div></div>`;
+}
+
+function showComparison(selector) {
+  const details = document.querySelector(selector);
+  if (!details) return;
+  details.focus({ preventScroll: true });
+  details.scrollIntoView({ block: 'start', behavior: 'instant' });
+}
+
+function bindMatchSelection(area, select) {
+  area.querySelectorAll('[data-match], [data-highlight]').forEach(element => {
+    const handle = () => select(element.dataset.match || element.dataset.highlight);
+    element.addEventListener('click', handle);
+    if (element.tagName === 'MARK') {
+      element.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handle();
+        }
+      });
+    }
+  });
+}
+
+function setReportAddress(surface, report) {
+  if (state.view === surface && /^[a-f0-9]{32}$/.test(report.id) && location.hash !== `#${surface}/${report.id}`) {
+    window.history?.replaceState(null, '', `#${surface}/${report.id}`);
+  }
 }
 
 function webCoverageHTML(report) {
@@ -1514,6 +1575,7 @@ function renderReport() {
     return;
   }
   const report = state.report;
+  setReportAddress('check', report);
   const stats = report.stats;
   const matches = report.matches;
   const webReport = report.scope === 'web_search';
@@ -1531,14 +1593,12 @@ function renderReport() {
         <button class="text-button" id="download-report" type="button">↓ Данные JSON</button>
       </div>
     </div>
+    ${webReport ? `<p class="web-score-label"><strong>${webUniqueness(report)}</strong> · ${webCheckComplete(report) ? 'уникальность по найденным страницам' : 'проверка неполная · окончательный процент не установлен'}</p>${webStatsHTML(report)}` : `
     <div class="stats-row">
-      <div class="stat-card ${webReport ? 'web-uniqueness' : ''}">
-        <strong>${webReport ? webUniqueness(report) : `${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`}</strong>
-        <span>${webReport ? report.web?.status === 'complete' ? 'уникальность по найденным страницам' : 'проверка неполная · окончательный процент не установлен' : 'текста с лексическими совпадениями'}</span>
-      </div>
+      <div class="stat-card"><strong>${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%</strong><span>текста с лексическими совпадениями</span></div>
       <div class="stat-card"><strong>${number(matches.length)}</strong><span>найдено фрагментов</span></div>
       <div class="stat-card"><strong>${number(stats.source_count)}</strong><span>источников с совпадениями</span></div>
-    </div>
+    </div>`}
     ${webReport ? webCoverageHTML(report) : ''}
     ${(report.issues || []).map(issue => `<div class="warning">${escapeHTML(typeof issue === 'string' ? issue : issue.message || JSON.stringify(issue))}</div>`).join('')}
     ${matches.length ? `
@@ -1552,28 +1612,18 @@ function renderReport() {
         </div>
         <div class="match-list">${matches.map(matchCardHTML).join('')}</div>
       </div>` : empty(
-        webReport ? 'На доступных страницах совпадений не найдено' : 'Лексических совпадений в библиотеке не найдено',
+        webReport ? (hasWebSources(report) ? 'На прочитанных страницах совпадений не найдено' : 'Не удалось прочитать страницы для сравнения') : 'Лексических совпадений в библиотеке не найдено',
         webReport ? 'Это результат ограниченного поиска. Недоступные страницы, пересказы и переводы могут остаться незамеченными.' : 'Глубокие пересказы могут остаться незамеченными. Для сравнения с конкретным источником используйте Qwen.',
         '⌕'
       )}
-    <div id="comparison-area">${selected ? comparisonHTML(selected) : ''}</div>
+    <div id="comparison-area" tabindex="-1">${selected ? comparisonHTML(selected) : ''}</div>
     <section class="retrieval-section" id="retrieval-area"></section>`;
-  area.querySelectorAll('[data-match], [data-highlight]').forEach(element => {
-    const select = () => {
-      state.selectedMatch = element.dataset.match || element.dataset.highlight;
-      state.rewrite = null;
-      state.judgment = null;
-      renderReport();
-    };
-    element.addEventListener('click', select);
-    if (element.tagName === 'MARK') {
-      element.addEventListener('keydown', event => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          select();
-        }
-      });
-    }
+  bindMatchSelection(area, id => {
+    state.selectedMatch = id;
+    state.rewrite = null;
+    state.judgment = null;
+    renderReport();
+    showComparison('#comparison-area');
   });
   document.querySelector('#download-report').addEventListener('click', () => {
     download(`istok-report-${report.id}.json`, JSON.stringify(report, null, 2), 'application/json');
@@ -2747,6 +2797,42 @@ function updateModelActionControls() {
   }
   updateQuotaUI();
 }
+async function restoreLinkedReport(surface, id, revision) {
+  try {
+    const { report } = await api(`/api/reports/${id}`);
+    if (state.viewRevision !== revision || location.hash !== `#${surface}/${id}` || report.id !== id) return;
+    state.rewrite = null;
+    state.judgment = null;
+    if (surface === 'home' && report.scope === 'web_search') {
+      if (!state.homeText) {
+        const field = document.querySelector('#home-text');
+        if (field) field.value = report.text;
+        state.homeText = report.text;
+        try { storageSet(HOME_DRAFT_KEY, report.text); } catch { /* The report is still readable. */ }
+      }
+      state.homeReport = report;
+      state.homeMatch = report.matches[0]?.id || null;
+      renderHomeResult();
+    } else if (surface === 'check') {
+      state.report = report;
+      state.selectedMatch = report.matches[0]?.id || null;
+      if (!state.text) {
+        saveDraft(report.text);
+        const field = document.querySelector('#check-text');
+        if (field) {
+          field.value = report.text;
+          updateCharacterCount();
+          validateTextLength(field);
+        }
+      }
+      renderReport();
+      document.querySelector('#report-area')?.scrollIntoView({ block: 'start' });
+    }
+  } catch (error) {
+    if (state.viewRevision === revision && !authError(error)) toast('Не удалось открыть сохранённый отчёт. Проверьте историю в своём аккаунте.', true);
+  }
+}
+
 function renderView() {
   window.IstokMotion?.teardown();
   state.viewRevision += 1;
@@ -2761,8 +2847,12 @@ function renderView() {
     renderAuthScreen();
     return;
   }
-  const requested = location.hash.replace('#', '') || 'home';
+  const savedReport = /^#(home|check)\/([a-f0-9]{32})$/.exec(location.hash);
+  const requested = savedReport ? savedReport[1] : location.hash.slice(1) || 'home';
   state.view = viewNames[requested] ? requested : 'home';
+  const field = requested === 'home' ? 'homeReport' : 'report';
+  const restoreId = savedReport && state[field]?.id !== savedReport[2] ? savedReport[2] : null;
+  if (restoreId) state[field] = null;
   if (isSaas() && state.view === 'evaluation') state.view = 'check';
   document.body.classList.toggle('home-view', state.view === 'home');
   document.querySelectorAll('[data-view]').forEach(link => {
@@ -2777,6 +2867,7 @@ function renderView() {
   else if (state.view === 'sources') renderSources();
   else if (state.view === 'evaluation') renderEvaluation();
   else renderHistory();
+  if (restoreId) restoreLinkedReport(requested, restoreId, state.viewRevision);
   updateProcessingLabels();
   updateModelActionControls();
   renderModelJobs();
@@ -2822,7 +2913,7 @@ async function bootstrap() {
   renderModelJobs();
   if (!privateAccess()) return;
   for (const entry of Object.values(state.modelJobs)) {
-    if (entry.status !== 'rejected') observeModelJob(entry).catch(() => {});
+    if (entry.status !== 'rejected') observeModelJob(entry, true).catch(() => {});
   }
   for (const [reportId, job] of Object.entries(state.retrievalJobs)) {
     pollRetrieval(reportId, job.id);

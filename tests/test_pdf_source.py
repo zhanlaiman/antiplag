@@ -13,7 +13,7 @@ ASCII = "The author compared four green leaves and carefully recorded the shape 
 UNICODE = "Редактор сравнил четыре зелёных листа и подробно записал форму каждой жилки."
 
 
-def owned_pdf(text=ASCII, pages=1, image_only=False, compressed=None):
+def owned_pdf(text=ASCII, pages=1, image_only=False, compressed=None, final_scan_with_folio=False):
     """Tiny, authored PDF fixtures, including an explicit Unicode CMap."""
     objects = [b"", b""]
 
@@ -39,13 +39,16 @@ def owned_pdf(text=ASCII, pages=1, image_only=False, compressed=None):
                 + "\nendbfchar endcmap CMapName currentdict /CMap defineresource pop end end")
         add(stream(cmap.encode()))
         encoded = ("<" + "".join(f"{codes[char]:04X}" for char in text) + ">").encode()
-    image = add(stream(b"\x00\x00\x00", b"/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 ")) if image_only else None
+    image = add(stream(b"\x00\x00\x00", b"/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 ")) if image_only or final_scan_with_folio else None
     page_ids = []
-    for _ in range(pages):
-        data = b"q 10 0 0 10 72 700 cm /Im0 Do Q" if image_only else b"BT /F1 12 Tf 72 720 Td " + encoded + b" Tj ET"
+    for number in range(pages):
+        scan = image_only or (final_scan_with_folio and number == pages - 1)
+        data = b"q 10 0 0 10 72 700 cm /Im0 Do Q" if scan else b"BT /F1 12 Tf 72 720 Td " + encoded + b" Tj ET"
+        if scan and final_scan_with_folio:
+            data += b" BT /F1 12 Tf 72 40 Td (Page 2 of 2) Tj ET"
         content = add(stream(zlib.compress(compressed) if compressed is not None else data,
                              b"/Filter /FlateDecode " if compressed is not None else b""))
-        images = b" /XObject << /Im0 " + str(image).encode() + b" 0 R >>" if image else b""
+        images = b" /XObject << /Im0 " + str(image).encode() + b" 0 R >>" if scan else b""
         page_ids.append(add(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 "
                             + str(font).encode() + b" 0 R >>" + images + b" >> /Contents " + str(content).encode() + b" 0 R >>"))
     objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
@@ -140,6 +143,7 @@ class RealOptionalPDFWorkerTests(unittest.TestCase):
 
     def test_image_only_page_page_cap_and_decompression_bomb_are_not_empty_success(self):
         cases = ((owned_pdf(image_only=True), "pdf_no_text"), (owned_pdf(pages=41), "pdf_page_limit"),
+                 (owned_pdf(pages=2, final_scan_with_folio=True), "pdf_no_text"),
                  (owned_pdf(compressed=b"x" * (pdf_source.MAX_STREAM_BYTES + 1)), "pdf_resource_limit"))
         for data, code in cases:
             with self.subTest(code=code), self.assertRaises(pdf_source.PDFError) as caught:

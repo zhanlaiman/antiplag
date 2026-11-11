@@ -930,7 +930,7 @@ main {
 .annotated-text mark {
   background:#e4edda;
   color:inherit;
-  padding:2px 0;
+  padding:.42em 0;
   border-radius:2px;
   cursor:pointer
 }
@@ -3810,3 +3810,8 @@ select {
   .home-v2-title [data-reveal] { transition:none !important; }
   .home-orbit,.home-process-ribbon > div { animation:none !important; }
 }
+
+.web-stats .coverage-status { font-size: clamp(1.1rem, 3vw, 1.75rem); }
+.home-source-comparison { margin-block: 18px; }
+.web-score-label { margin-block: 12px; }
+#comparison-area, #home-fragments { scroll-margin-block-start: 1rem; }
