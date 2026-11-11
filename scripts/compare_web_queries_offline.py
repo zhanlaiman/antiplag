@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from plagiarism.matching import MATCHER_VERSION, MIN_WORDS, _tokens, analyze
-from plagiarism.web_search import DISTINCTIVE_STRATEGY, MAX_QUERIES, MAX_URLS, QUERY_STRATEGY, plan_queries
+from plagiarism.web_search import DEFAULT_QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, MAX_QUERIES, MAX_URLS, QUERY_STRATEGY, plan_queries
 
 
 DEV = ROOT / "data/private/web-evaluation/materials/dev-30"
@@ -119,10 +119,10 @@ def make_long_probe(pages):
     return case, text, [source]
 
 
-def diagnose(case, text, pages, source_tokens):
+def diagnose(case, text, pages, source_tokens, strategies=STRATEGIES):
     # Generate each plan using the text alone, before reading evidence or sources.
     plans, planning_ms = {}, {}
-    for strategy in STRATEGIES:
+    for strategy in strategies:
         started = perf_counter()
         plans[strategy] = plan_queries(text, strategy=strategy)
         planning_ms[strategy] = round((perf_counter() - started) * 1000, 3)
@@ -158,7 +158,7 @@ def diagnose(case, text, pages, source_tokens):
             "live_queries": 0, "live_fetches": 0}
 
 
-def measure(base):
+def measure(base, strategies=STRATEGIES):
     key_path = base / "key.json"
     cases = json.loads(key_path.read_text())["cases"]
     if ([c["id"] for c in cases] != [f"D{i:02d}" for i in range(1, 31)]
@@ -181,12 +181,12 @@ def measure(base):
             peer = "D17" if case["id"] == "D16" else "D16"
             # Same event, same fixed limit. The other 11 snapshots are unchanged.
             selected = common[:-1] + [{"id": peer, "title": peer, "text": texts[peer]}]
-        results.append(diagnose(case, texts[case["id"]], selected, tokens))
+        results.append(diagnose(case, texts[case["id"]], selected, tokens, strategies))
     probe, text, selected = make_long_probe(pages)
-    reconstruction = diagnose(probe, text, selected, tokens)
+    reconstruction = diagnose(probe, text, selected, tokens, strategies)
     return {"schema_version": 1, "dev_key_sha256": sha256(key_path.read_bytes()).hexdigest(),
             "source_text_sha256": {s["id"]: s["provenance"]["text_sha256"] for s in pages.values()},
-            "matcher": MATCHER_VERSION, "production_strategy": QUERY_STRATEGY, "strategies": STRATEGIES,
+            "matcher": MATCHER_VERSION, "production_strategy": DEFAULT_QUERY_STRATEGY, "strategies": strategies,
             "query_cap": MAX_QUERIES, "fetch_cap": MAX_URLS, "gold_reviewed": sum(c["reviewed"] for c in cases),
             "cases": results, "reconstruction": reconstruction}, text
 
@@ -220,29 +220,30 @@ def render_table(bundle):
     def hits(row, s):
         return sum(e["plans"][s]["shared_consecutive_words"] >= MIN_WORDS for e in row["evidence"])
 
-    wins = [r["id"] for r in rows if hits(r, strategies[1]) > hits(r, strategies[0])]
-    losses = [r["id"] for r in rows if hits(r, strategies[1]) < hits(r, strategies[0])]
+    wins = [r["id"] for r in rows if hits(r, strategies[-1]) > hits(r, strategies[0])]
+    losses = [r["id"] for r in rows if hits(r, strategies[-1]) < hits(r, strategies[0])]
     planned = " → ".join(str(sum(r["planned_queries"][s] for r in rows)) for s in strategies)
     latency = " → ".join(f"{sum(r['plan_ms'][s] for r in rows):.0f}" for s in strategies)
     return "\n".join([
         "# Выбор поисковых фраз на 30 настроечных документах",
         "",
-        f"Слева равномерные окна `{strategies[0]}`, справа `{strategies[1]}`. "
+        f"Порядок стратегий в таблице — {', '.join(strategies)}. "
         "У каждого способа тот же предел в шесть фраз и двенадцать страниц на документ. "
-        "Вариант ранжирует окна по редкости сочетаний внутри переданного текста. Сначала он выбирает разные абзацы, "
-        "затем допускает дополнительные неперекрывающиеся окна. Поисковые фразы строятся только по входному тексту.",
+        "Характерный поиск ранжирует окна по редкости сочетаний в документе. "
+        "Гибрид делит запросы между равномерными окнами и характерными фразами. "
+        "При одном запросе он выбирает характерную фразу. Поисковые фразы строятся только по входному тексту.",
         "",
         f"Размечено {len(evidence)} участков в {len(rows)} документах, из них {len(literal)} допускают дословную подсветку. "
         f"Документов с разметкой, подтверждённой человеком, {bundle['gold_reviewed']}. "
         "Закрытые материалы исключены. Эти числа относятся только к диагностике на данном наборе.",
         "",
-        "| Наблюдение | Равномерные → характерные |",
+        "| Наблюдение | " + " → ".join(strategies) + " |",
         "| --- | --- |",
         f"| Запланировано фраз | {planned} |",
         f"| Фраза включает хотя бы одно слово из заданного участка, все {len(evidence)} участков | {total_pairs(evidence, 'position_words', 1)} |",
         f"| Внутри заданных границ совпали подряд хотя бы шесть слов, дословные участки | {total_pairs(literal, 'shared_consecutive_words', MIN_WORDS)} из {len(literal)} |",
         f"| В обеих выдержках встретилась целая поисковая фраза, дословные участки | {total_pairs(literal, 'whole_query_in_both_spans', 1)} из {len(literal)} |",
-        "| Живые поисковые запросы и сетевые загрузки | 0 → 0 |",
+        "| Живые поисковые запросы и сетевые загрузки | " + " → ".join("0" for _ in strategies) + " |",
         "| Возврат правильного URL и загрузка сайта в живом поиске | Нет измерения |",
         f"| Время построения всех планов на этом устройстве, мс | {latency} |",
         "",
@@ -255,7 +256,7 @@ def render_table(bundle):
         "поскольку выбор фраз в этой проверке не меняет страницы. Это время локального сопоставления.",
         "",
         f"По числу участков с шестью общими словами улучшились {', '.join(wins) or '—'}. "
-        f"Ухудшились {', '.join(losses) or '—'}. В рабочем сайте по умолчанию остаются равномерные окна.",
+        f"Ухудшились {', '.join(losses) or '—'}. Стратегия сайта по умолчанию `{bundle['production_strategy']}`.",
         "",
         "## По каждому документу",
         "",
@@ -303,8 +304,10 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--table", type=Path, help="Таблица для сравнения по каждому документу.")
     parser.add_argument("--probe-text", type=Path, help="Сохранить слепой текст реконструкции 40/710.")
+    parser.add_argument("--include-hybrid", action="store_true", help="Добавить сочетание обоих способов.")
     args = parser.parse_args()
-    bundle, probe = measure(args.dev.resolve())
+    strategies = (*STRATEGIES, HYBRID_STRATEGY) if args.include_hybrid else STRATEGIES
+    bundle, probe = measure(args.dev.resolve(), strategies)
     args.output.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n")
     if args.table:
         args.table.write_text(render_table(bundle))

@@ -127,7 +127,7 @@ class WebSearchTests(unittest.TestCase):
 
     def test_unicode_query_positions_and_bounded_query_count_are_real_input_offsets(self):
         text = '😀 ' + ' '.join('растение' + str(number) for number in range(1000))
-        queries = web_search.plan_queries(text)
+        queries = web_search.plan_queries(text, strategy=web_search.QUERY_STRATEGY)
         self.assertEqual(len(queries), 6)
         self.assertEqual(queries[0]['start'], 2)
         self.assertIn('растение0', text[queries[0]['start']:queries[0]['end']])
@@ -174,7 +174,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(report['web']['attempted_urls'], pages.calls)
         self.assertLessEqual(len(report['web']['discovered_urls']), 30)
         self.assertLessEqual(len(report['web']['attempted_urls']), 12)
-        self.assertEqual(report['web']['query_strategy'], 'uniform-quoted-v1')
+        self.assertEqual(report['web']['query_strategy'], web_search.DEFAULT_QUERY_STRATEGY)
         self.assertEqual(report['web']['matcher_version'], 'lexical-v2-kind-aware-dedup')
         self.assertEqual(report['web']['default_fetch_limits']['max_response_bytes'], 1024 * 1024)
         self.assertTrue(any(error['code'] == 'url_limit_reached' for error in report['web']['errors']))

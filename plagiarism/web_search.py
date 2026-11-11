@@ -28,6 +28,8 @@ MAX_QUERIES = 6
 MAX_URLS = 12
 QUERY_STRATEGY = "uniform-quoted-v1"
 DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
+HYBRID_STRATEGY = "hybrid-paragraph-v1"
+DEFAULT_QUERY_STRATEGY = HYBRID_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
@@ -83,18 +85,43 @@ def _distinctive_windows(text, tokens, width, count):
     return sorted(chosen)
 
 
-def plan_queries(text, limit=MAX_QUERIES, strategy=QUERY_STRATEGY):
+def _hybrid_queries(text, count):
+    """Split the same request allowance between two text-only planners."""
+    if count == 1:
+        return plan_queries(text, limit=1, strategy=DISTINCTIVE_STRATEGY)
+    uniform = plan_queries(text, limit=(count + 1) // 2, strategy=QUERY_STRATEGY)
+    distinctive = plan_queries(text, limit=count // 2, strategy=DISTINCTIVE_STRATEGY)
+    candidates = []
+    for i in range(max(len(uniform), len(distinctive))):
+        candidates.extend(group[i] for group in (uniform, distinctive) if i < len(group))
+    # Repeated wording can make both planners choose the same phrase.
+    candidates.extend(plan_queries(text, limit=count, strategy=DISTINCTIVE_STRATEGY))
+    candidates.extend(plan_queries(text, limit=count, strategy=QUERY_STRATEGY))
+    result, seen = [], set()
+    for candidate in candidates:
+        if candidate["query"] in seen:
+            continue
+        seen.add(candidate["query"])
+        result.append(candidate)
+        if len(result) == count:
+            break
+    return result
+
+
+def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
     if not isinstance(text, str) or not 35 <= len(text) <= MAX_TEXT_CHARS:
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
+    if strategy == HYBRID_STRATEGY:
+        return _hybrid_queries(text, count)
     windows = _distinctive_windows(text, tokens, width, count) if strategy == DISTINCTIVE_STRATEGY else None
     if windows is None:
         starts = [round(number * (len(tokens) - width) / max(count - 1, 1)) for number in range(count)]
@@ -272,7 +299,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     """
     started = time.monotonic()
     if query_strategy is None:
-        query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", QUERY_STRATEGY)
+        query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
     request_id = request_id or uuid4().hex
     if searcher is None:
