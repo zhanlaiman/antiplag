@@ -32,6 +32,7 @@ DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
 HYBRID_STRATEGY = "hybrid-paragraph-v1"
 CITATION_STRATEGY = "hybrid-citation-v2"
 COVERAGE_STRATEGY = "hybrid-paragraph-v3"
+DENSE_STRATEGY = "hybrid-citation-v4-dense"
 DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
@@ -48,7 +49,7 @@ class WebSearchError(RuntimeError):
         self.code, self.details = code, details
 
 
-def _distinctive_windows(text, tokens, width, count):
+def _distinctive_windows(text, tokens, width, count, ranked=False):
     """Rank phrases within sentences using only frequencies in the submitted text."""
     words = [token.value for token in tokens]
     counts = Counter(words)
@@ -77,6 +78,9 @@ def _distinctive_windows(text, tokens, width, count):
         # A list of one-word lines still admits the original token windows.
         return None
     candidates.sort()
+    weights_by_window = {(start, end): weight for weight, start, end, _ in candidates}
+    def selected_windows(chosen):
+        return sorted(chosen, key=lambda window: (weights_by_window[window], *window)) if ranked else sorted(chosen)
     chosen, covered, paragraphs, phrases = [], set(), set(), set()
     for distinct_paragraph in (True, False):
         for _, start, end, paragraph in candidates:
@@ -90,8 +94,8 @@ def _distinctive_windows(text, tokens, width, count):
             paragraphs.add(paragraph)
             phrases.add(phrase)
             if len(chosen) == count:
-                return sorted(chosen)
-    return sorted(chosen)
+                return selected_windows(chosen)
+    return selected_windows(chosen)
 
 
 def _citation_queries(text):
@@ -150,16 +154,45 @@ def _hybrid_queries(text, count, priority=(), diverse=False):
     return result
 
 
+def _dense_queries(text, limit):
+    """Keep the previous plan and fill unused slots with distinct phrases."""
+    planned = plan_queries(text, limit=limit, strategy=CITATION_STRATEGY)
+    if len(planned) == limit:
+        return planned
+    tokens = _tokens(text)
+    width = min(10, len(tokens))
+    windows = _distinctive_windows(text, tokens, width, MAX_QUERIES, ranked=True)
+    if windows is None:
+        starts = [round(i * (len(tokens) - width) / (MAX_QUERIES - 1)) for i in range(MAX_QUERIES)]
+        windows = [(start, start + width) for start in starts]
+    seen = {item["query"] for item in planned}
+    for start, end in windows:
+        window = tokens[start:end]
+        query = '"' + ' '.join(token.value[:40] for token in window) + '"'
+        if len(query) > 390:
+            query = query[:389].rsplit(' ', 1)[0] + '"'
+            window = window[:len(query[1:-1].split())]
+        if query in seen:
+            continue
+        planned.append({"query": query, "start": window[0].start, "end": window[-1].end})
+        seen.add(query)
+        if len(planned) == limit:
+            break
+    return planned
+
+
 def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
     if not isinstance(text, str) or not 35 <= len(text) <= MAX_TEXT_CHARS:
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
+    if strategy == DENSE_STRATEGY:
+        return _dense_queries(text, limit)
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
     if strategy == COVERAGE_STRATEGY:
@@ -462,7 +495,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                                 "origin": "web_fetch", "fetched_at": fetched.get("fetched_at"),
                                 "text_sha256": sha256(fetched["text"].encode()).hexdigest(),
                                 "license_status": "not_verified", "training_consent": False}})
-            if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY) and url not in linked_urls and len(ordered) < MAX_URLS and not fully_covered:
+            if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and len(ordered) < MAX_URLS and not fully_covered:
                 page_matches = analyze(text, [sources[-1]])["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)
