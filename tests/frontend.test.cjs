@@ -1064,6 +1064,22 @@ function webReport(text = 'Учебный текст', partial = false) {
       errors: partial ? [{ message: 'Учебная страница недоступна', url: 'https://example.test/unavailable' }] : [] } };
 }
 
+test('saved-data web reports distinguish replayed replies and pages from fresh network activity', async () => {
+  const app = fixture();
+  await settle();
+  const report = webReport('Учебный текст', true);
+  report.offline_replay = { network_queries: 0, fresh_page_load_attempts: 0 };
+  app.expose('savedDataReport', report);
+  app.evaluate('state.report=savedDataReport;renderReport()');
+  const html = app.element('report-area').innerHTML;
+  assert.ok(html.includes('Повтор сохранённых данных'));
+  assert.ok(html.includes('Использовано сохранённых поисковых ответов 1 из 2'));
+  assert.ok(html.includes('Проверено снимков страниц 1. Обработано адресов 1'));
+  assert.ok(!html.includes('Поисковых запросов выполнено'));
+  assert.ok(!html.includes('Попыток загрузки'));
+  assert.ok(html.includes('Не установлена'));
+});
+
 test('Internet mode explains missing configuration and never sends a check without it', async () => {
   const posts = [];
   const app = fixture({ fetch(url, body) { if (body) posts.push({ url, body }); } });
