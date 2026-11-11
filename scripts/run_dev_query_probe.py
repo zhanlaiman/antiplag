@@ -76,6 +76,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ids", nargs="+", required=True)
     parser.add_argument("--strategy", required=True)
+    parser.add_argument("--url-strategy", help="Optional experimental page-selection policy")
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--max-new-queries", type=int, required=True)
     args = parser.parse_args()
@@ -106,7 +107,7 @@ def main():
     out = ROOT / "data/private/web-evaluation" / args.run_name
     out.mkdir(mode=0o700, exist_ok=True)
     manifest = out / "run.json"
-    configuration = {"case_ids": args.ids, "query_strategy": args.strategy,
+    configuration = {"case_ids": args.ids, "query_strategy": args.strategy, "url_strategy": args.url_strategy,
                      "input_key_sha256": sha256(key.read_bytes()).hexdigest(), "planned_queries": planned}
     if manifest.exists():
         run = json.loads(manifest.read_text())
@@ -139,7 +140,7 @@ def main():
                 dump(path, record)
                 raise
     original_run = web_search.run
-    web_search.run = partial(original_run, searcher=RecordingSearch(), query_strategy=args.strategy)
+    web_search.run = partial(original_run, searcher=RecordingSearch(), query_strategy=args.strategy, url_strategy=args.url_strategy)
     service = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     service.saas, service.store, service.jobs = None, Store(), Jobs()
     Thread(target=service.serve_forever, daemon=True).start()

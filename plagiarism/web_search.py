@@ -529,16 +529,34 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                                 "origin": "web_fetch", "fetched_at": fetched.get("fetched_at"),
                                 "text_sha256": sha256(fetched["text"].encode()).hexdigest(),
                                 "license_status": "not_verified", "training_consent": False}})
-            if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and len(ordered) < MAX_URLS and not fully_covered:
+            if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and not fully_covered:
                 page_matches = analyze(text, [sources[-1]])["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)
                 fully_covered = coverage["matched_words"] == coverage["total_words"]
                 related = _related_link(fetched, text, seen | final_urls)
                 if related and not fully_covered and not _word_coverage(text, page_matches)["matched_words"]:
+                    if len(ordered) >= MAX_URLS:
+                        # A full initial queue must not disable a relevant
+                        # source link. Replace an unread search result while
+                        # retaining the same twelve-load ceiling.
+                        replaceable = [i for i in range(index + 1, len(ordered)) if ordered[i] not in linked_urls]
+                        if not replaceable:
+                            continue
+                        displaced = ordered.pop(replaceable[-1])
+                        skipped_urls.append(displaced)
+                        outside_limit += 1
+                        limit_error = next((e for e in errors if e["code"] == "url_limit_reached"), None)
+                        if limit_error is None:
+                            errors.append({"stage": "limit", "code": "url_limit_reached", "count": outside_limit,
+                                           "message": "Часть найденных ссылок не проверена из-за лимита загрузок."})
+                        else:
+                            limit_error["count"] = outside_limit
+                        ordered.insert(index + 1, related)
+                    else:
+                        ordered.append(related)
                     seen.add(related)
                     urls.append(related)
-                    ordered.append(related)
                     linked_urls.add(related)
                     link_discoveries.append({"parent_url": final, "url": related, "basis": "input_anchor_overlap"})
         except (RuntimeError, OSError, ValueError, KeyError) as error:
@@ -568,7 +586,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "urls_found": len(urls) + len(rejected_urls), "urls_supported": len(urls),
         "urls_discovered": discovered + len(link_discoveries),
         "search_urls_discovered": discovered, "linked_urls_discovered": len(link_discoveries),
-        "link_discoveries": link_discoveries, "discovered_urls": urls[:30], "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
+        "link_discoveries": link_discoveries,
+        "discovered_urls": list(dict.fromkeys(urls[:30] + [link["url"] for link in link_discoveries])),
+        "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
         "urls_outside_limit": outside_limit, "urls_rejected": rejected_urls, "errors": errors,
         "elapsed_seconds": round(time.monotonic() - started, 3), "score_basis": "exact_word_coverage",

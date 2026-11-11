@@ -208,6 +208,50 @@ class RelatedPageTests(unittest.TestCase):
         report = run("Исследователь изучил старинные чертежи большой обсерватории перед поездкой.", searcher=Search(),
                      fetcher=pages, query_strategy=CITATION_STRATEGY)
         self.assertEqual(len(pages.calls), 12)
+        self.assertEqual(len(report["web"]["link_discoveries"]), 1)
+        self.assertEqual(pages.calls[1], "https://source.test/extra")
+        self.assertNotIn("https://source.test/page11", pages.calls)
+        self.assertIn("https://source.test/page11", report["web"]["skipped_urls"])
+        self.assertEqual(report["web"]["urls_outside_limit"], 1)
+        self.assertEqual(next(e["count"] for e in report["web"]["errors"] if e["code"] == "url_limit_reached"), 1)
+
+    def test_full_queue_link_can_recover_evidence_without_thirteenth_load(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        text = "Исследователь внимательно изучил старинные чертежи большой обсерватории перед поездкой."
+        parent, related = "https://source.test/parent", "https://source.test/reference"
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": parent}] + [{"url": f"https://noise{i}.test/page"} for i in range(29)]
+        class Pages:
+            def __init__(self): self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                return {"url": url, "text": text if url == related else "Здесь перечислены часы работы здания и контакты администрации.",
+                        "links": [{"url": related, "text": "Старинные чертежи обсерватории"}] if url == parent else []}
+        pages = Pages()
+        report = run(text, searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertEqual(len(pages.calls), 12)
+        self.assertEqual(pages.calls[1], related)
+        self.assertEqual(report["stats"]["matched_words"], len(_tokens(text)))
+        self.assertIn(related, report["web"]["discovered_urls"])
+        self.assertEqual(len(report["web"]["skipped_urls"]), 19)
+        self.assertEqual(report["web"]["urls_outside_limit"], 19)
+
+    def test_last_loaded_page_cannot_add_a_thirteenth_related_load(self):
+        from plagiarism.web_search import CITATION_STRATEGY
+        class Search:
+            def search(self, query, request_id):
+                return [{"url": f"https://source.test/page{i}"} for i in range(12)]
+        class Pages:
+            def __init__(self): self.calls = []
+            def fetch(self, url):
+                self.calls.append(url)
+                return {"url": url, "text": "Здесь находятся сведения о площади здания и часах работы.",
+                        "links": [{"url": "https://source.test/extra", "text": "Чертежи обсерватории"}] if url.endswith("11") else []}
+        pages = Pages()
+        report = run("Исследователь изучил старинные чертежи большой обсерватории перед поездкой.",
+                     searcher=Search(), fetcher=pages, query_strategy=CITATION_STRATEGY)
+        self.assertEqual(len(pages.calls), 12)
         self.assertEqual(report["web"]["link_discoveries"], [])
 
     def test_full_document_match_prevents_unnecessary_related_page_loads(self):
