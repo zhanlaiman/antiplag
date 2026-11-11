@@ -7,9 +7,11 @@ import re
 import socket
 import threading
 from difflib import SequenceMatcher
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from plagiarism import cloud_transport
 from plagiarism.matching import normalize
 
 
@@ -50,13 +52,33 @@ class OllamaError(RuntimeError):
 
 
 def selected_model(model=None):
-    name = model if model is not None else os.environ.get("ISTOK_MODEL", DEFAULT_MODEL)
+    name = model if model is not None else os.environ.get("ISTOK_MODEL")
+    if name is None:
+        if os.environ.get("ISTOK_MODEL_PROVIDER") == "modal":
+            try:
+                name = cloud_transport.load_manifest()["default_model"]
+            except cloud_transport.CloudTransportError as exc:
+                raise OllamaError(str(exc), code=exc.code, details=exc.details) from exc
+        else:
+            name = DEFAULT_MODEL
     if not isinstance(name, str) or not name.strip() or len(name) > 200:
         raise ValueError("Укажите корректное имя локальной модели.")
     return name.strip()
 
 
+def _local_inference_disabled():
+    runtime = Path(os.environ.get("ISTOK_RUNTIME_DIR", Path(__file__).resolve().parent.parent / ".runtime"))
+    return (runtime / "local-inference-disabled").exists()
+
+
 def _request(path, payload=None, timeout=180):
+    if os.environ.get("ISTOK_MODEL_PROVIDER") == "modal":
+        try:
+            return cloud_transport.request(path, payload, timeout=timeout)
+        except cloud_transport.CloudTransportError as exc:
+            raise OllamaError(str(exc), code=exc.code, details=exc.details) from exc
+    if _local_inference_disabled():
+        raise OllamaError("Локальные модели отключены для этого проекта.", code="local_inference_disabled")
     base_url = os.environ.get("ISTOK_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(base_url + path, data=data, headers={"Content-Type": "application/json"})
@@ -87,8 +109,15 @@ def _request(path, payload=None, timeout=180):
 
 
 def status():
+    if os.environ.get("ISTOK_MODEL_PROVIDER") == "modal":
+        return cloud_transport.status()
     model = selected_model()
     embedding_model = get_embedding_model()
+    if _local_inference_disabled():
+        return {"provider": "local", "available": False, "models": [], "model": model,
+                "embedding_models": [], "embedding_model": embedding_model, "embedding_available": False,
+                "local_inference_disabled": True, "code": "local_inference_disabled",
+                "error": "Локальные модели отключены для этого проекта."}
     try:
         response = _request("/api/tags", timeout=2)
         models = []

@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { webcrypto } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 const application = fs.readFileSync(path.join(root, 'web/app.js'), 'utf8');
@@ -85,9 +86,10 @@ class FixtureElement {
   dispatchEvent(event) { return this.emit(event.type); }
 }
 
-function fixture({ stored = {}, fetch: customFetch } = {}) {
+function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
   const storage = new Map(Object.entries(stored));
   const delays = [];
+  const intervals = [];
   const windowListeners = new Map();
   const document = {
     elements: new Map(), body: { classList: { toggle() {} } },
@@ -97,16 +99,16 @@ function fixture({ stored = {}, fetch: customFetch } = {}) {
   };
   const initial = new FixtureElement(document);
   initial.innerHTML = documentHTML;
-  const location = { hash: '#check' };
+  const location = { hash: `#${view}` };
   const context = vm.createContext({
-    document, location, console, TextDecoder, Uint8Array, Event, URL,
+    document, location, console, TextDecoder, Uint8Array, Event, URL, crypto: webcrypto,
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     localStorage: {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => { storage.set(key, value); },
     },
     window: { addEventListener: (name, callback) => windowListeners.set(name, callback), matchMedia: () => ({ matches: false }) },
-    setInterval() {},
+    setInterval(callback) { intervals.push(callback); },
     setTimeout(callback, milliseconds) { delays.push(milliseconds); queueMicrotask(callback); return 1; },
     clearTimeout() {},
     fetch: async (url, options = {}) => {
@@ -119,6 +121,8 @@ function fixture({ stored = {}, fetch: customFetch } = {}) {
         '/api/status': { model: { model: 'qwen3:4b', available: true, models: ['qwen3:4b'] }, counts: { sources: 0, reports: 0 } },
         '/api/sources': { sources: [] },
         '/api/source-packs': { packs: [] },
+        '/api/examples': { examples: [] },
+        '/api/evaluations': { runs: [] },
       };
       assert.ok(Object.hasOwn(defaults, url), `Unexpected API request ${url}`);
       return json(defaults[url]);
@@ -127,7 +131,7 @@ function fixture({ stored = {}, fetch: customFetch } = {}) {
   // Execute every statement, including startup and normal listener registration.
   vm.runInContext(application, context, { filename: 'web/app.js' });
   return {
-    document, storage, delays,
+    document, storage, delays, intervals,
     evaluate: expression => vm.runInContext(expression, context),
     expose: (name, value) => { context[name] = value; },
     element: id => document.getElementById(id),
@@ -297,4 +301,284 @@ test('persisted job observer survives a transient connection failure and clears 
   assert.equal(app.evaluate("state.retrievals['report-a'].id"), 'retrieval-a');
   assert.deepEqual(JSON.parse(app.storage.get('istok.retrieval-jobs.v1')), {});
   assert.ok(app.delays.includes(1000), 'Retry must use bounded backoff instead of discarding the job');
+});
+
+const modalStatus = () => ({
+  model: { provider: 'modal', configured: true, can_submit: true, available: true,
+    model: 'fixture-qwen', models: ['fixture-qwen', 'fixture-qwen-other'],
+    local_inference_disabled: true, synthetic_only: true },
+  embedding: { provider: 'modal', available: false, model: 'fixture-embedding' },
+  counts: { sources: 0, reports: 0 },
+});
+
+test('Modal configuration stays distinct from GPU readiness and uses its own saved model choice', async () => {
+  const calls = [];
+  const app = fixture({
+    stored: { 'istok.model.v1': 'qwen3:4b', 'istok.model.modal.v1': 'fixture-qwen-other' },
+    fetch(url, body) {
+      calls.push({ url, body });
+      if (url === '/api/status') return json(modalStatus());
+    },
+  });
+  await settle();
+  assert.equal(app.evaluate('selectedModel()'), 'fixture-qwen-other');
+  assert.equal(app.evaluate('modelAvailable()'), true);
+  assert.ok(app.element('model-label').textContent.includes('сервер настроен'));
+  assert.ok(app.element('model-dot').classes.has('muted'), 'Configured is not a green GPU-ready signal');
+  assert.ok(app.element('model-description').textContent.includes('без запроса к GPU'));
+  await app.element('model-settings').emit('click');
+  await app.element('refresh-model').emit('click');
+  app.intervals[0]();
+  await settle();
+  assert.ok(calls.every(call => call.body === undefined), 'Opening settings and status refresh must never submit compute');
+  app.element('model-select').value = 'fixture-qwen';
+  await app.element('model-select').emit('change');
+  assert.equal(app.storage.get('istok.model.modal.v1'), 'fixture-qwen');
+  assert.equal(app.storage.get('istok.model.v1'), 'qwen3:4b');
+});
+
+test('registered Modal compare persists its exact request before POST and observes the job', async () => {
+  let submitted;
+  let polls = 0;
+  const app = fixture({ fetch(url, body) {
+    if (url === '/api/status') return json(modalStatus());
+    if (url === '/api/model-jobs') {
+      submitted = body;
+      const saved = JSON.parse(app.storage.get('istok.model-jobs.v1'))[body.request_id];
+      assert.equal(saved.path, '/api/compare');
+      assert.deepEqual(saved.body, body.body);
+      assert.match(body.request_id, /^[a-f0-9]{32}$/);
+      return json({ job: { id: body.request_id, status: 'queued', stage: 'В очереди' } });
+    }
+    if (submitted && url === `/api/jobs/${submitted.request_id}`) {
+      polls++;
+      return json({ job: { id: submitted.request_id, status: polls === 1 ? 'running' : 'complete',
+        stage: 'Запускаем серверную модель', result: { judgment: { relation: 'same_topic', explanation: 'Учебный ответ' } } } });
+    }
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебный текст для теста';
+  await app.element('check-text').emit('input');
+  app.element('compare-source').value = 'fixture-source';
+  await app.element('compare-button').emit('click');
+  assert.equal(submitted.body.text, 'Учебный текст для теста');
+  assert.equal(polls, 2);
+  assert.ok(app.element('direct-judgment').innerHTML.includes('Учебный ответ'));
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Ответ готов и сохранён'));
+});
+
+test('reload observes a saved rewrite without POST, editing the draft or automatically applying it', async () => {
+  const id = 'a'.repeat(32);
+  const calls = [];
+  const entry = { request_id: id, path: '/api/rewrite', status: 'running',
+    body: { report_id: 'fixture-report', match_id: 'fixture-match', mode: 'paraphrase', model: 'fixture-qwen' } };
+  const app = fixture({
+    stored: { 'istok.draft.v1': 'Новый учебный черновик', 'istok.model-jobs.v1': JSON.stringify({ [id]: entry }) },
+    fetch(url, body) {
+      calls.push({ url, body });
+      if (url === '/api/status') return json(modalStatus());
+      if (url === `/api/jobs/${id}`) return json({ job: { id, status: 'complete',
+        result: { rewrite: { text: 'Сохранённая учебная правка', original_text: 'Исходный учебный фрагмент' } } } });
+    },
+  });
+  await settle();
+  assert.ok(calls.every(call => call.body === undefined));
+  assert.equal(app.element('check-text').value, 'Новый учебный черновик');
+  assert.equal(app.storage.get('istok.draft.v1'), 'Новый учебный черновик');
+  assert.equal(app.evaluate('state.rewrite'), null);
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Сохранённая учебная правка'));
+  assert.equal(app.element('apply-rewrite'), null);
+});
+
+test('lost submission is never automatically repeated and an explicit retry preserves the request ID', async () => {
+  let firstRequest;
+  const posts = [];
+  const app = fixture({ fetch(url, body) {
+    if (url === '/api/status') return json(modalStatus());
+    if (url === '/api/model-jobs') {
+      posts.push(body);
+      if (!firstRequest) { firstRequest = body; throw new TypeError('Учебный обрыв связи'); }
+      return json({ job: { id: body.request_id, status: 'complete', result: { judgment: { relation: 'unrelated', explanation: 'Учебный ответ после восстановления' } } } });
+    }
+    if (firstRequest && url === `/api/jobs/${firstRequest.request_id}`) return json({ job: {
+      id: firstRequest.request_id, status: 'complete', result: { judgment: { relation: 'unrelated', explanation: 'Учебный ответ после восстановления' } },
+    } });
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебный текст';
+  await app.element('check-text').emit('input');
+  app.element('compare-source').value = 'fixture-source';
+  await app.element('compare-button').emit('click');
+  await settle();
+  assert.equal(posts.length, 1);
+  assert.ok(JSON.parse(app.storage.get('istok.model-jobs.v1'))[firstRequest.request_id]);
+  await app.element(`model-job-retry-${firstRequest.request_id}`).emit('click');
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts[0], posts[1]);
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Учебный ответ после восстановления'));
+});
+
+test('restored candidate judgment uses the latest saved error instead of the old positive job result', async () => {
+  const id = 'b'.repeat(32);
+  const entry = { request_id: id, path: '/api/candidate-judge', status: 'running',
+    body: { retrieval_id: 'fixture-retrieval', candidate_id: 'candidate-1', model: 'fixture-qwen' } };
+  const app = fixture({ stored: { 'istok.model-jobs.v1': JSON.stringify({ [id]: entry }) }, fetch(url) {
+    if (url === '/api/status') return json(modalStatus());
+    if (url === `/api/jobs/${id}`) return json({ job: { id, status: 'complete',
+      result: { judgment: { id: 'old-positive', relation: 'paraphrase', explanation: 'OLD POSITIVE MUST NOT RETURN' } } } });
+    if (url === '/api/candidate-judgments/fixture-retrieval') return json({ judgments: [
+      { candidate_id: 'candidate-1', error: 'Новая учебная ошибка', code: 'model_error' },
+    ] });
+  } });
+  await settle();
+  assert.equal(app.evaluate("state.candidateJudgments['fixture-retrieval:candidate-1']"), undefined);
+  assert.equal(app.evaluate("state.candidateErrors['fixture-retrieval:candidate-1'].message"), 'Новая учебная ошибка');
+  assert.ok(!app.element('model-jobs-panel').innerHTML.includes('OLD POSITIVE MUST NOT RETURN'));
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Новая учебная ошибка'));
+});
+
+test('an unknown restored request requires a user click before it can be submitted again', async () => {
+  const id = 'c'.repeat(32);
+  const entry = { request_id: id, path: '/api/evaluate', status: 'submitting', body: { model: 'fixture-qwen', split: 'test' } };
+  const calls = [];
+  const app = fixture({ stored: { 'istok.model-jobs.v1': JSON.stringify({ [id]: entry }) }, fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/status') return json(modalStatus());
+    if (url === `/api/jobs/${id}`) return json({ error: 'Нет учебного задания' }, 404);
+  } });
+  await settle();
+  assert.ok(calls.every(call => call.body === undefined));
+  assert.ok(app.element(`model-job-retry-${id}`));
+  assert.equal(app.evaluate(`state.modelJobs['${id}'].status`), 'missing');
+});
+
+test('a restored uncertain failure keeps its evidence and remains distinct from a connection failure', async () => {
+  const id = 'd'.repeat(32);
+  const entry = { request_id: id, path: '/api/judge', status: 'running',
+    body: { report_id: 'fixture-report', match_id: 'fixture-match', model: 'fixture-qwen' } };
+  const app = fixture({ stored: { 'istok.model-jobs.v1': JSON.stringify({ [id]: entry }) }, fetch(url) {
+    if (url === '/api/status') return json(modalStatus());
+    if (url === `/api/jobs/${id}`) return json({ job: { id, status: 'failed',
+      code: 'unconfirmed_exact', error: 'Учебное совпадение не подтверждено',
+      details: { final_judgment: { explanation: 'Учебное пояснение', evidence_text: 'Фрагмент A', evidence_source: 'Фрагмент B' } },
+    } });
+  } });
+  await settle();
+  const html = app.element('model-jobs-panel').innerHTML;
+  assert.ok(html.includes('Нужна проверка редактора'));
+  assert.ok(html.includes('Фрагмент A') && html.includes('Фрагмент B'));
+  assert.ok(JSON.parse(app.storage.get('istok.model-jobs.v1'))[id]);
+});
+
+test('a restored running model job can be cancelled without submitting new compute', async () => {
+  const id = 'e'.repeat(32);
+  const waiting = deferred();
+  let polls = 0;
+  const calls = [];
+  const entry = { request_id: id, path: '/api/evaluate', status: 'running', body: { model: 'fixture-qwen', split: 'test' } };
+  const app = fixture({ stored: { 'istok.model-jobs.v1': JSON.stringify({ [id]: entry }) }, fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/status') return json(modalStatus());
+    if (url === `/api/jobs/${id}`) {
+      polls++;
+      return polls === 1 ? json({ job: { id, status: 'running', stage: 'Запускаем серверную модель' } }) : waiting.promise;
+    }
+    if (url === `/api/jobs/${id}/cancel`) return json({ job: { id, status: 'cancelling', stage: 'Останавливаем после текущего ответа' } });
+  } });
+  await settle();
+  await app.element(`model-job-cancel-${id}`).emit('click');
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Останавливаем после текущего ответа'));
+  waiting.resolve(json({ job: { id, status: 'cancelled' } }));
+  await settle();
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Задание остановлено'));
+  assert.ok(calls.every(call => call.body === undefined || call.url.endsWith('/cancel')));
+});
+
+test('registered comparison retains the legacy local API path when Modal is not selected', async () => {
+  const calls = [];
+  const app = fixture({ fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/compare') return json({ judgment: { relation: 'same_topic', explanation: 'Учебный локальный ответ' } });
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебный текст';
+  await app.element('check-text').emit('input');
+  app.element('compare-source').value = 'fixture-source';
+  await app.element('compare-button').emit('click');
+  assert.ok(calls.some(call => call.url === '/api/compare'));
+  assert.ok(!calls.some(call => call.url === '/api/model-jobs'));
+  assert.ok(app.element('direct-judgment').innerHTML.includes('Учебный локальный ответ'));
+});
+
+test('late availability updates the evaluation warning without recreating the current form or drafts', async () => {
+  const status = deferred();
+  let configured = true;
+  let reads = 0;
+  const app = fixture({ view: 'evaluation', fetch(url) {
+    if (url === '/api/status') {
+      reads++;
+      if (reads === 1) return status.promise;
+      const value = modalStatus();
+      value.model.can_submit = configured;
+      return json(value);
+    }
+  } });
+  await settle();
+  const examples = app.element('example-list');
+  const warning = app.element('evaluation-model-unavailable');
+  const button = app.element('run-evaluation');
+  assert.equal(warning.hidden, false);
+  assert.equal(button.disabled, true);
+  app.evaluate("state.exampleDrafts['fixture-example']={relation:'same_topic',comment:'Несохранённая учебная правка'}");
+  status.resolve(json(modalStatus()));
+  await settle();
+  assert.equal(warning.hidden, true);
+  assert.equal(button.disabled, false);
+  assert.equal(app.element('example-list'), examples);
+  assert.equal(app.element('run-evaluation'), button);
+  assert.equal(app.evaluate("state.exampleDrafts['fixture-example'].comment"), 'Несохранённая учебная правка');
+  configured = false;
+  app.intervals[0]();
+  await settle();
+  assert.equal(warning.hidden, false);
+  assert.equal(button.disabled, true);
+  assert.equal(app.element('example-list'), examples);
+});
+
+test('a restored evaluation blocks the same model and payload until terminal status without another POST', async () => {
+  const id = 'f'.repeat(32);
+  const terminal = deferred();
+  const calls = [];
+  let polls = 0;
+  // Key order deliberately differs from the registered evaluation handler.
+  const entry = { request_id: id, path: '/api/evaluate', status: 'running', body: { split: 'test', model: 'fixture-qwen' } };
+  const app = fixture({ view: 'evaluation', stored: { 'istok.model-jobs.v1': JSON.stringify({ [id]: entry }) }, fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/status') return json(modalStatus());
+    if (url === `/api/jobs/${id}`) {
+      polls++;
+      return polls === 1 ? json({ job: { id, status: 'running', stage: 'Сравниваем' } }) : terminal.promise;
+    }
+  } });
+  await settle();
+  const button = app.element('run-evaluation');
+  assert.equal(app.element('evaluation-model-unavailable').hidden, true);
+  assert.equal(button.disabled, true);
+  assert.equal(app.element('evaluation-job-note').hidden, false);
+  app.element('model-select').value = 'fixture-qwen-other';
+  await app.element('model-select').emit('change');
+  assert.equal(button.disabled, false, 'A different model is a different requested evaluation');
+  app.element('model-select').value = 'fixture-qwen';
+  await app.element('model-select').emit('change');
+  assert.equal(button.disabled, true);
+  // The shared helper also prevents duplicate compute if invoked directly.
+  const joining = app.evaluate("modelRequest('/api/evaluate',{model:'fixture-qwen',split:'test'})");
+  await settle();
+  assert.ok(calls.every(call => call.body === undefined));
+  terminal.resolve(json({ job: { id, status: 'complete', result: { run: { model: 'fixture-qwen', metrics: {}, results: [] } } } }));
+  await joining;
+  await settle();
+  assert.equal(button.disabled, false);
+  assert.equal(app.element('evaluation-job-note').hidden, true);
+  assert.ok(calls.every(call => call.body === undefined));
 });

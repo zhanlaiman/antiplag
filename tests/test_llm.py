@@ -1,5 +1,6 @@
 import json
 import io
+import os
 from pathlib import Path
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +18,112 @@ def chat_response(result):
     return {"message": {"content": json.dumps(result, ensure_ascii=False)}, "done": True}
 
 
-class JudgmentTests(unittest.TestCase):
+class IsolatedLocalProviderTestCase(unittest.TestCase):
+    def setUp(self):
+        self.runtime_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.runtime_directory.cleanup)
+        environment = patch.dict(os.environ, {
+            "ISTOK_MODEL_PROVIDER": "local", "ISTOK_RUNTIME_DIR": self.runtime_directory.name,
+            "ISTOK_MODEL": "qwen3:4b", "ISTOK_EMBED_MODEL": "bge-m3",
+            "ISTOK_OLLAMA_URL": "http://127.0.0.1:11434",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
+
+class ProviderHooksTests(IsolatedLocalProviderTestCase):
+    def test_modal_request_delegates_without_local_http_even_when_local_is_disabled(self):
+        (Path(self.runtime_directory.name) / "local-inference-disabled").touch()
+        payload = {"model": "bge-m3", "input": ["Тестовый фрагмент."]}
+        response = {"embeddings": [[1.0, 0.0]]}
+        with patch.dict(os.environ, {"ISTOK_MODEL_PROVIDER": "modal"}):
+            with patch.object(llm.cloud_transport, "request", return_value=response) as cloud_request:
+                with patch.object(llm, "urlopen") as local_http:
+                    self.assertIs(llm._request("/api/embed", payload, timeout=17), response)
+        cloud_request.assert_called_once_with("/api/embed", payload, timeout=17)
+        local_http.assert_not_called()
+
+    def test_modal_request_preserves_transport_error_code_and_details(self):
+        details = {"call_id": "fc-test", "cancellation": "requested"}
+        error = llm.cloud_transport.CloudTransportError("Запрос остановлен.", code="cloud_timeout", details=details)
+        with patch.dict(os.environ, {"ISTOK_MODEL_PROVIDER": "modal"}):
+            with patch.object(llm.cloud_transport, "request", side_effect=error):
+                with self.assertRaisesRegex(llm.OllamaError, "Запрос остановлен") as raised:
+                    llm._request("/api/chat", {"model": "qwen3.5:9b"})
+        self.assertEqual(raised.exception.code, "cloud_timeout")
+        self.assertIs(raised.exception.details, details)
+
+    def test_modal_status_delegates_before_model_selection_or_compute(self):
+        configured = {"provider": "modal", "available": False, "can_submit": False,
+                      "code": "cloud_not_configured"}
+        with patch.dict(os.environ, {"ISTOK_MODEL_PROVIDER": "modal"}):
+            with patch.object(llm.cloud_transport, "status", return_value=configured) as status:
+                with patch.object(llm, "selected_model") as selected:
+                    with patch.object(llm, "_request") as request:
+                        self.assertIs(llm.status(), configured)
+        status.assert_called_once_with()
+        selected.assert_not_called()
+        request.assert_not_called()
+
+    def test_modal_default_model_comes_from_manifest_only_without_overrides(self):
+        with patch.dict(os.environ, {"ISTOK_MODEL_PROVIDER": "modal"}):
+            os.environ.pop("ISTOK_MODEL", None)
+            with patch.object(llm.cloud_transport, "load_manifest", return_value={"default_model": "qwen3.5:9b"}) as manifest:
+                self.assertEqual(llm.selected_model(), "qwen3.5:9b")
+            manifest.assert_called_once_with()
+            with patch.object(llm.cloud_transport, "load_manifest") as manifest:
+                self.assertEqual(llm.selected_model("qwen3:4b"), "qwen3:4b")
+                os.environ["ISTOK_MODEL"] = "qwen3:32b-q4_K_M"
+                self.assertEqual(llm.selected_model(), "qwen3:32b-q4_K_M")
+            manifest.assert_not_called()
+
+    def test_modal_model_selection_preserves_manifest_error(self):
+        details = {"reason": "invalid_manifest"}
+        error = llm.cloud_transport.CloudTransportError("Конфигурация недоступна.",
+                                                       code="cloud_not_configured", details=details)
+        with patch.dict(os.environ, {"ISTOK_MODEL_PROVIDER": "modal"}):
+            os.environ.pop("ISTOK_MODEL", None)
+            with patch.object(llm.cloud_transport, "load_manifest", side_effect=error):
+                with self.assertRaises(llm.OllamaError) as raised:
+                    llm.selected_model()
+        self.assertEqual(raised.exception.code, "cloud_not_configured")
+        self.assertIs(raised.exception.details, details)
+
+    def test_disabled_local_provider_refuses_all_requests_before_http(self):
+        (Path(self.runtime_directory.name) / "local-inference-disabled").touch()
+        with patch.object(llm, "urlopen") as local_http:
+            with patch.object(llm.cloud_transport, "request") as cloud_request:
+                for path, payload in (("/api/tags", None), ("/api/embed", {"model": "bge-m3"}),
+                                      ("/api/chat", {"model": "qwen3:4b"})):
+                    with self.subTest(path=path):
+                        with self.assertRaises(llm.OllamaError) as raised:
+                            llm._request(path, payload)
+                        self.assertEqual(raised.exception.code, "local_inference_disabled")
+        local_http.assert_not_called()
+        cloud_request.assert_not_called()
+
+    def test_disabled_local_status_does_not_query_http(self):
+        (Path(self.runtime_directory.name) / "local-inference-disabled").touch()
+        with patch.object(llm, "_request") as request:
+            status = llm.status()
+        request.assert_not_called()
+        self.assertFalse(status["available"])
+        self.assertFalse(status["embedding_available"])
+        self.assertTrue(status["local_inference_disabled"])
+        self.assertEqual(status["code"], "local_inference_disabled")
+
+    def test_enabled_local_runtime_keeps_http_compatibility(self):
+        response = io.BytesIO(b'{"models": []}')
+        with patch.object(llm, "urlopen", return_value=response) as local_http:
+            with patch.object(llm.cloud_transport, "request") as cloud_request:
+                self.assertEqual(llm._request("/api/tags", timeout=2), {"models": []})
+        request = local_http.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/tags")
+        self.assertEqual(local_http.call_args.kwargs, {"timeout": 2})
+        cloud_request.assert_not_called()
+
+
+class JudgmentTests(IsolatedLocalProviderTestCase):
     def test_rejects_invented_evidence(self):
         response = chat_response({
             "relation": "paraphrase", "explanation": "Похожие детали.",
@@ -213,7 +319,7 @@ class JudgmentTests(unittest.TestCase):
                         llm.embed(["Первая фраза.", "Вторая фраза."])
 
 
-class ExactEvidenceTests(unittest.TestCase):
+class ExactEvidenceTests(IsolatedLocalProviderTestCase):
     def test_wrong_source_passage_is_rejected_after_one_feedback_retry(self):
         copied = "Исследователи установили несколько новых датчиков влажности почвы возле городской библиотеки."
         text = "Добровольцы записали звон трамвая в депо и под мостом. " + copied
@@ -379,7 +485,7 @@ class ExactEvidenceTests(unittest.TestCase):
         self.assertEqual(raised.exception.details["consistency_retry"]["judgment"]["relation"], "exact")
 
 
-class EvaluationTests(unittest.TestCase):
+class EvaluationTests(IsolatedLocalProviderTestCase):
     def test_source_groups_do_not_leak_between_splits(self):
         cases = evaluation.examples()
         train_sources = {item["source_id"] for item in cases if item["split"] == "train"}

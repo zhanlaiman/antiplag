@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the local app and reuse an existing Ollama server when available."""
+"""Start the local app, respecting the persistent Ollama autostart opt-out."""
 
 import json
 import os
@@ -28,7 +28,12 @@ def main():
     runtime.mkdir(exist_ok=True)
     child = None
     log = None
-    executable = shutil.which("ollama")
+    cloud_configured = (runtime / "cloud-models.json").is_file()
+    provider = os.environ.get("ISTOK_MODEL_PROVIDER", "modal" if cloud_configured else "local")
+    local_inference_disabled = (runtime / "local-inference-disabled").exists() or provider == "modal"
+    if local_inference_disabled:
+        print("Автозапуск локальной Ollama отключён. Запускается только сайт.", flush=True)
+    executable = None if local_inference_disabled else shutil.which("ollama")
     if executable and not ollama_running():
         env = {**os.environ, "OLLAMA_MODELS": str(runtime / "models"),
                "OLLAMA_HOST": "127.0.0.1:11434", "OLLAMA_NO_CLOUD": "1",
@@ -40,7 +45,16 @@ def main():
                 break
             time.sleep(0.5)
     print("Откройте http://127.0.0.1:8766", flush=True)
-    app = subprocess.Popen([sys.executable, str(ROOT / "server.py"), "--port", "8766"], cwd=ROOT)
+    python = sys.executable
+    app_options = {"cwd": ROOT}
+    if provider == "modal":
+        environment = {**os.environ, "ISTOK_MODEL_PROVIDER": "modal"}
+        environment.setdefault("MODAL_CONFIG_PATH", str(runtime / "modal-config.toml"))
+        cloud_python = runtime / "modal-venv" / "bin" / "python"
+        if cloud_python.is_file():
+            python = str(cloud_python)
+        app_options["env"] = environment
+    app = subprocess.Popen([python, str(ROOT / "server.py"), "--port", "8766"], **app_options)
     try:
         return app.wait()
     except KeyboardInterrupt:

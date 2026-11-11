@@ -21,18 +21,28 @@
         <a class="nav-link" href="#history" data-view="history"><span class="nav-icon" aria-hidden="true">↶</span>История</a>
       </nav>
       <div class="sidebar-bottom">
-        <div class="local-note"><span class="status-dot"></span><span>На вашем Mac</span></div>
+        <div class="local-note"><span class="status-dot"></span><span>Личная библиотека</span></div>
         <p>Тексты и отчёты сохраняются<br>в локальной библиотеке.</p>
         <div class="profile"><span class="avatar">Я</span><div><strong>Личное пространство</strong><small>Локальный прототип</small></div></div>
       </div>
     </aside>
     <div class="main-shell">
       <header class="topbar"><div class="breadcrumb">Личное пространство <span>/</span> <strong id="breadcrumb-title">Проверка текста</strong></div><button class="model-pill" id="model-settings" type="button"><span class="status-dot muted" id="model-dot"></span><span id="model-label">Подключение Qwen</span><span aria-hidden="true">⌄</span></button></header>
+      <section id="model-jobs-panel" class="model-jobs-panel" aria-label="Серверные задания" hidden></section>
       <main id="main-content" tabindex="-1"></main>
-      <footer class="app-footer"><span>Исток · локальная версия</span><span>Каждое совпадение ведёт к источнику</span></footer>
+      <footer class="app-footer"><span>Исток · ваша библиотека</span><span>Каждое совпадение ведёт к источнику</span></footer>
     </div>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <dialog id="model-dialog"><form method="dialog" class="dialog-head"><h2>Локальная модель</h2><button class="icon-button" aria-label="Закрыть">×</button></form><div class="dialog-body"><p id="model-description"></p><label class="field-label" for="model-select">Модель для сравнения и правок</label><select id="model-select"></select><p class="field-help">Точный поиск работает самостоятельно. Для оценки пересказа и предложений правок используется Ollama на этом Mac.</p><button class="button secondary" id="refresh-model" type="button">Проверить подключение</button></div></dialog>
+  <dialog id="model-dialog">
+    <form method="dialog" class="dialog-head"><h2 id="model-dialog-title">Настройки модели</h2><button class="icon-button" aria-label="Закрыть">×</button></form>
+    <div class="dialog-body">
+      <p id="model-description"></p>
+      <label class="field-label" for="model-select">Модель для сравнения и правок</label><select id="model-select"></select>
+      <p class="field-help" id="model-processing-note">Точный поиск работает по вашей библиотеке.</p>
+      <p class="warning" id="model-trial-note" hidden></p>
+      <button class="button secondary" id="refresh-model" type="button">Обновить настройки</button>
+    </div>
+  </dialog>
 </body>
 </html>

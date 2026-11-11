@@ -2,6 +2,9 @@
 
 const DRAFT_KEY = 'istok.draft.v1';
 const MODEL_KEY = 'istok.model.v1';
+const MODAL_MODEL_KEY = 'istok.model.modal.v1';
+const MODEL_JOBS_KEY = 'istok.model-jobs.v1';
+const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate'];
 const RETRIEVAL_JOBS_KEY = 'istok.retrieval-jobs.v1';
 const CANDIDATE_JOBS_KEY = 'istok.candidate-jobs.v1';
 const REVIEW_DRAFTS_KEY = 'istok.review-drafts.v1';
@@ -10,6 +13,8 @@ const retrievalPolls = new Set();
 const candidateRequests = new Set();
 const candidateJobPolls = new Set();
 const fileReadTokens = new WeakMap();
+const modelJobObservers = new Map();
+const modelRequestGenerations = new Map();
 
 function restoreDraft() {
   try {
@@ -33,11 +38,37 @@ function saveDraft(text) {
   updateReportFreshness();
 }
 
-function restoreModel() {
+function restoreModel(provider = 'ollama') {
   try {
-    return localStorage.getItem(MODEL_KEY) || '';
+    return localStorage.getItem(provider === 'modal' ? MODAL_MODEL_KEY : MODEL_KEY) || '';
   } catch {
     return '';
+  }
+}
+
+function restoreModelJobs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MODEL_JOBS_KEY) || '{}');
+    return Object.fromEntries(Object.entries(saved).filter(([id, entry]) => (
+      /^[a-f0-9]{32}$/.test(id) && entry?.request_id === id
+      && MODEL_JOB_PATHS.includes(entry.path) && entry.body && typeof entry.body === 'object'
+      && !Array.isArray(entry.body)
+    )).map(([id, entry]) => [id, { ...entry, stage: 'Восстанавливаем состояние задания' }]));
+  } catch {
+    return {};
+  }
+}
+
+function saveModelJobs() {
+  try {
+    const saved = Object.fromEntries(Object.entries(state.modelJobs).map(([id, entry]) => [id, {
+      request_id: id, path: entry.path, body: entry.body, context: entry.context,
+      created_at: entry.created_at, status: entry.status,
+    }]));
+    localStorage.setItem(MODEL_JOBS_KEY, JSON.stringify(saved));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -110,7 +141,8 @@ function updateReportFreshness() {
   document.querySelectorAll('[data-apply-candidate]').forEach(button => {
     const card = button.closest('[data-candidate]');
     const key = card ? `${card.dataset.retrieval}:${card.dataset.candidate}` : '';
-    button.disabled = stale || Boolean(retrieval && candidateCheckRunning(retrieval.id)) || candidateRequests.has(key);
+    button.disabled = stale || Boolean(retrieval && candidateCheckRunning(retrieval.id)) || candidateRequests.has(key)
+      || Boolean(card && candidateHasModelJob(card.dataset.retrieval, card.dataset.candidate));
 
   });
 }
@@ -118,6 +150,7 @@ function updateReportFreshness() {
 
 const state = {
   view: 'check', viewRevision: 0, text: restoreDraft(), sources: [], status: null, model: restoreModel(), report: null,
+  modelProvider: 'ollama', modelJobs: restoreModelJobs(),
   selectedMatch: null, rewrite: null, judgment: null, examples: [], run: null,
   retrievals: {}, retrievalJobs: restoreActiveJobs(RETRIEVAL_JOBS_KEY), candidateJudgments: {}, candidateRewrites: {},
   candidateErrors: {}, candidateLoaded: new Set(), candidateGenerations: {}, candidateLoadRequests: {},
@@ -138,6 +171,10 @@ function installedModels() {
 
 }
 
+function modelProvider() {
+  return state.status?.model?.provider || 'ollama';
+}
+
 function selectedModel() {
   if (state.model) return state.model;
   const models = installedModels();
@@ -146,7 +183,37 @@ function selectedModel() {
 }
 
 function modelAvailable() {
+  if (modelProvider() === 'modal') {
+    return Boolean(state.status?.model?.configured && state.status.model.can_submit
+      && installedModels().includes(selectedModel()));
+  }
+  if (state.status?.model?.local_inference_disabled || modelProvider() === 'disabled') return false;
   return installedModels().includes(selectedModel());
+}
+
+function processingDisclosure() {
+  if (modelProvider() === 'modal') {
+    const trial = state.status?.model?.synthetic_only
+      ? ' Тестовый облачный режим. Используйте учебный пример или открытые источники.' : '';
+    return 'Для смыслового поиска и сравнения тексты и фрагменты библиотеки передаются серверным моделям Modal. На Mac модели не запускаются.' + trial;
+  }
+  if (state.status?.model?.local_inference_disabled || modelProvider() === 'disabled') {
+    return 'Локальные модели отключены. Точный поиск по библиотеке работает без модели.';
+  }
+  return 'Точный поиск работает по вашей библиотеке. Способ обработки смысловых фрагментов указан в настройках модели.';
+}
+
+function updateProcessingLabels() {
+  document.querySelectorAll('[data-processing-disclosure]').forEach(element => {
+    element.textContent = processingDisclosure();
+  });
+  const note = document.querySelector('#model-processing-note');
+  if (note) note.textContent = processingDisclosure();
+  const trial = document.querySelector('#model-trial-note');
+  if (trial) {
+    trial.hidden = !state.status?.model?.synthetic_only;
+    trial.textContent = 'Тестовый облачный режим. Используйте учебный пример или открытые источники.';
+  }
 }
 
 function currentComparison(reportId, matchId) {
@@ -172,6 +239,215 @@ async function api(path, data, method) {
   }
   return result;
 }
+
+function modelJobTitle(entry) {
+  if (entry.path === '/api/evaluate') return 'Оценка на учебных примерах';
+  if (entry.path.includes('rewrite')) return entry.body.mode === 'quote' ? 'Оформление цитаты' : 'Предложение правки';
+  return 'Сравнение фрагментов';
+}
+
+function modelJobActive(entry) {
+  return ['submitting', 'delivery_unknown', 'missing', ...ACTIVE_JOB_STATUSES].includes(entry.job?.status || entry.status);
+}
+
+function canonicalModelBody(value) {
+  if (Array.isArray(value)) return value.map(canonicalModelBody);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalModelBody(value[key])]));
+  }
+  return value;
+}
+
+function pendingModelRequest(path, body) {
+  const signature = JSON.stringify(canonicalModelBody(body));
+  return Object.values(state.modelJobs).find(entry => entry.path === path && modelJobActive(entry)
+    && JSON.stringify(canonicalModelBody(entry.body)) === signature);
+}
+
+function candidateHasModelJob(retrievalId, candidateId) {
+  return Object.values(state.modelJobs).some(entry => entry.body.retrieval_id === retrievalId
+    && entry.body.candidate_id === candidateId && modelJobActive(entry));
+}
+
+function modelJobResultHTML(entry) {
+  const result = entry.job?.result;
+  if (!result) return '';
+  const key = `${entry.body.retrieval_id}:${entry.body.candidate_id}`;
+  if (entry.path === '/api/candidate-judge') {
+    if (!entry.latestLoaded) return '<p>Ответ задания сохранён. Актуальную оценку пары пока не удалось загрузить. Откройте отчёт и обновите её перед правкой.</p>';
+    if (state.candidateErrors[key]) return candidateErrorHTML(state.candidateErrors[key]);
+    const latest = state.candidateJudgments[key];
+    return latest ? judgmentHTML(latest) : '<p>Ответ сохранён. Актуальная оценка будет загружена из отчёта.</p>';
+  }
+  if (result.rewrite) {
+    const rewrite = result.rewrite;
+    const original = rewrite.original_text || entry.context?.original_text;
+    if (entry.path === '/api/candidate-rewrite') {
+      const judgment = state.candidateJudgments[key];
+      if (!entry.latestLoaded || !judgment || judgment.id !== rewrite.judgment_id || !['exact', 'paraphrase'].includes(judgment.relation)) {
+        return '<p>Оценка пары изменилась или ещё не загружена. Откройте отчёт и проверьте актуальный ответ перед новой правкой.</p>';
+      }
+    }
+    return `<p class="field-help">Сохранённое предложение. Текст в редакторе не изменён.</p>
+      ${original ? `<h3>Исходный фрагмент</h3><blockquote>${escapeHTML(original)}</blockquote>` : ''}
+      <h3>Предложенная правка</h3><blockquote>${escapeHTML(rewrite.text)}</blockquote>`;
+  }
+  if (result.judgment) return judgmentHTML(result.judgment);
+  if (result.run) return `<p>Оценка модели ${escapeHTML(result.run.model)} сохранена. Откройте экран «Оценка Qwen», чтобы посмотреть результаты.</p>`;
+  return '';
+}
+
+function renderModelJobs() {
+  const panel = document.querySelector('#model-jobs-panel');
+  if (!panel) return;
+  const entries = Object.values(state.modelJobs);
+  panel.hidden = !entries.length;
+  panel.innerHTML = entries.map(entry => {
+    const job = entry.job;
+    const status = job?.status || entry.status;
+    const active = ['submitting', ...ACTIVE_JOB_STATUSES].includes(status);
+    const missing = status === 'missing' || status === 'delivery_unknown';
+    const progress = job?.progress?.total ? ` · ${number(job.progress.current)} из ${number(job.progress.total)}` : '';
+    const stage = entry.watchMessage || job?.stage || entry.stage || 'В очереди';
+    const uncertain = job?.code === 'unconfirmed_exact';
+    const outcome = uncertain ? 'Нужна проверка редактора'
+      : status === 'complete' ? 'Ответ готов и сохранён'
+      : status === 'cancelled' ? 'Задание остановлено'
+      : status === 'failed' ? 'Задание завершилось с ошибкой' : stage;
+    return `<article class="model-job-notice">
+      <div class="model-job-heading"><strong>${escapeHTML(modelJobTitle(entry))}</strong><span>${escapeHTML(entry.body.model || '')}${entry.created_at ? ` · ${escapeHTML(date(entry.created_at))}` : ''}</span></div>
+      ${entry.context?.source_title ? `<p class="field-help">${escapeHTML(entry.context.source_title)}</p>` : ''}
+      <p role="status">${active ? '<span class="spinner" aria-hidden="true"></span>' : ''}${escapeHTML(outcome)}${progress}</p>
+      ${active ? '<p class="field-help">Можно перейти на другой экран или закрыть вкладку. Состояние задания сохранено.</p>' : ''}
+      ${job?.error ? uncertain
+        ? candidateErrorHTML({ message: job.error, code: job.code, details: job.details })
+        : `<div class="inline-error">${escapeHTML(job.error)}</div>` : ''}
+      ${missing ? `<p class="inline-error">${escapeHTML(entry.watchMessage || 'Не удалось подтвердить отправку задания. Автоматического повторного запуска нет.')}</p>` : ''}
+      ${status === 'complete' ? `<details><summary>Посмотреть сохранённый результат</summary>${modelJobResultHTML(entry)}</details>` : ''}
+      <div class="action-row">
+        ${active && job?.id ? `<button class="text-button" id="model-job-cancel-${entry.request_id}" type="button" ${status === 'cancelling' ? 'disabled' : ''}>${status === 'cancelling' ? 'Останавливаем после текущего ответа' : 'Остановить'}</button>` : ''}
+        ${missing ? `<button class="button small secondary" id="model-job-retry-${entry.request_id}" type="button">Повторить отправку этого задания</button>` : ''}
+        ${!active ? `<button class="text-button" id="model-job-dismiss-${entry.request_id}" type="button">Убрать уведомление</button>` : ''}
+      </div>
+    </article>`;
+  }).join('');
+  for (const entry of entries) {
+    document.getElementById(`model-job-cancel-${entry.request_id}`)?.addEventListener('click', event => busy(event.currentTarget, 'Останавливаем', async () => {
+      const { job } = await api(`/api/jobs/${entry.request_id}/cancel`, {});
+      entry.job = job;
+      entry.status = job.status;
+      saveModelJobs();
+      renderModelJobs();
+    }));
+    document.getElementById(`model-job-retry-${entry.request_id}`)?.addEventListener('click', event => busy(event.currentTarget, 'Отправляем', async () => {
+      await submitModelJob(entry);
+      await observeModelJob(entry);
+    }));
+    document.getElementById(`model-job-dismiss-${entry.request_id}`)?.addEventListener('click', () => {
+      delete state.modelJobs[entry.request_id];
+      saveModelJobs();
+      renderModelJobs();
+    });
+  }
+  updateModelActionControls();
+}
+
+async function submitModelJob(entry) {
+  entry.status = 'submitting';
+  entry.watchMessage = '';
+  if (!saveModelJobs()) {
+    entry.status = 'missing';
+    entry.watchMessage = 'Не удалось сохранить задание в браузере. Запрос не отправлен.';
+    renderModelJobs();
+    throw new Error(entry.watchMessage);
+  }
+  renderModelJobs();
+  try {
+    const { job } = await api('/api/model-jobs', {
+      request_id: entry.request_id, path: entry.path, body: entry.body,
+    });
+    if (job.id !== entry.request_id) throw new Error('Сервер вернул неожиданный идентификатор задания.');
+    entry.job = job;
+    entry.status = job.status;
+    saveModelJobs();
+    renderModelJobs();
+  } catch (error) {
+    entry.status = 'delivery_unknown';
+    entry.watchMessage = `Отправка не подтверждена. ${error.message}`;
+    saveModelJobs();
+    renderModelJobs();
+    throw error;
+  }
+}
+
+async function observeModelJob(entry) {
+  if (modelJobObservers.has(entry.request_id)) return modelJobObservers.get(entry.request_id);
+  const observing = (async () => {
+    try {
+      while (true) {
+        const { job } = await readJobWithRetry(entry.request_id, message => {
+          entry.watchMessage = message;
+          renderModelJobs();
+        });
+        entry.job = job;
+        entry.status = job.status;
+        entry.watchMessage = '';
+        saveModelJobs();
+        renderModelJobs();
+        if (!ACTIVE_JOB_STATUSES.includes(job.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } catch (error) {
+      entry.status = 'missing';
+      entry.job = null;
+      entry.watchMessage = error.message;
+      saveModelJobs();
+      renderModelJobs();
+      throw error;
+    }
+    if (entry.body.retrieval_id) {
+      entry.latestLoaded = Boolean(await loadCandidateJudgments(entry.body.retrieval_id, true));
+      renderModelJobs();
+    }
+    if (entry.job.status === 'complete') return entry.job.result;
+    const error = new Error(entry.job.error || 'Задание остановлено. Сохранённые результаты остаются доступны.');
+    error.code = entry.job.code;
+    error.details = entry.job.details;
+    throw error;
+  })();
+  modelJobObservers.set(entry.request_id, observing);
+  try { return await observing; }
+  finally { modelJobObservers.delete(entry.request_id); }
+}
+
+async function modelRequest(path, body, context = {}) {
+  if (modelProvider() !== 'modal') return api(path, body);
+  if (body.mode !== 'quote' && !modelAvailable()) {
+    throw new Error('Отправка модельных заданий сейчас отключена. Проверьте настройки сервера.');
+  }
+  const pending = pendingModelRequest(path, body);
+  if (pending) {
+    if (['missing', 'delivery_unknown'].includes(pending.status)) {
+      throw new Error('Отправка этого задания не подтверждена. Используйте кнопку повторной отправки в уведомлении.');
+    }
+    return observeModelJob(pending);
+  }
+  const actionKey = JSON.stringify([path, body.report_id, body.match_id, body.retrieval_id, body.candidate_id, body.source_id]);
+  const generation = (modelRequestGenerations.get(actionKey) || 0) + 1;
+  modelRequestGenerations.set(actionKey, generation);
+  const requestId = crypto.randomUUID().replaceAll('-', '');
+  const entry = { request_id: requestId, path, body, context, created_at: new Date().toISOString(), status: 'submitting' };
+  state.modelJobs[requestId] = entry;
+  await submitModelJob(entry);
+  const result = await observeModelJob(entry);
+  if (modelRequestGenerations.get(actionKey) !== generation) {
+    const error = new Error('Сохранён ответ более раннего задания.');
+    error.code = 'stale_result';
+    throw error;
+  }
+  return result;
+}
+
 let toastTimer;
 function toast(message, error = false) {
   const element = document.querySelector('#toast');
@@ -183,11 +459,19 @@ function toast(message, error = false) {
 }
 async function busy(button, label, action) {
   const original = button.innerHTML;
+  button.dataset.busy = 'true';
   button.disabled = true;
   button.innerHTML = `<span class="spinner" aria-hidden="true"></span>${escapeHTML(label)}`;
   try { await action(); }
-  catch (error) { toast(error.message, true); }
-  finally { if (button.isConnected) { button.disabled = false; button.innerHTML = original; } }
+  catch (error) { if (error.code !== 'stale_result') toast(error.message, true); }
+  finally {
+    if (button.isConnected) {
+      delete button.dataset.busy;
+      button.disabled = false;
+      button.innerHTML = original;
+      updateModelActionControls();
+    }
+  }
 }
 function safeLink(url, label) {
   try {
@@ -206,8 +490,9 @@ function scopeAside() {
   return `
     <div class="side-stack">
       <section class="card side-card">
-        <h2>Область проверки <span class="scope-badge">Локально</span></h2>
+        <h2>Область проверки <span class="scope-badge">Библиотека</span></h2>
         <p>Сравниваем текст с материалами, которые вы добавили в библиотеку источников.</p>
+        <p class="field-help" data-processing-disclosure>${escapeHTML(processingDisclosure())}</p>
         <div class="source-summary">
           <span>Источников в библиотеке</span><strong id="library-count">${state.sources.length}</strong>
         </div>
@@ -392,11 +677,11 @@ function renderHome() {
         <p class="home-demo-caption">Проверка примера использует рабочий поиск Истока. Ваш черновик в редакторе сохраняется.</p>
       </section>
       <section class="home-privacy home-section">
-        <div><p class="home-section-label">Ваша библиотека. Ваши решения.</p><h2>Текст остаётся<br>на вашем Mac.</h2></div>
-        <div class="home-privacy-copy"><p>В локальной версии источники, черновики и отчёты хранятся на компьютере. Qwen и поиск по смыслу работают через локальную модель.</p><p>Сейчас Исток сравнивает статью с добавленной библиотекой. Поиск по открытому интернету ещё не подключён.</p><a href="#sources">Открыть библиотеку источников <span aria-hidden="true">↗</span></a></div>
+        <div><p class="home-section-label">Ваша библиотека. Ваши решения.</p><h2>Понятно, где<br>обрабатывается текст.</h2></div>
+        <div class="home-privacy-copy"><p>Точный поиск сверяет текст с вашей библиотекой. Источники, черновики и отчёты сохраняются в этом рабочем пространстве.</p><p data-processing-disclosure>${escapeHTML(processingDisclosure())}</p><p>Поиск по открытому интернету ещё не подключён.</p><a href="#sources">Открыть библиотеку источников <span aria-hidden="true">↗</span></a></div>
       </section>
       <section class="home-final home-section"><p class="home-section-label">Начните со своего текста</p><h2>Проверьте статью<br>перед публикацией.</h2><a class="home-primary" href="#check">Проверить документ <span aria-hidden="true">↗</span></a><p>Сверяйте фрагменты. Сохраняйте источники. Решение за вами.</p></section>
-      <footer class="home-footer"><a class="home-brand" href="#home">исток<span class="home-brand-dot">.</span></a><span>Локальная версия для работы с вашей библиотекой</span><a href="#check">К проверке <span aria-hidden="true">↗</span></a></footer>
+      <footer class="home-footer"><a class="home-brand" href="#home">исток<span class="home-brand-dot">.</span></a><span>Проверка по вашей библиотеке источников</span><a href="#check">К проверке <span aria-hidden="true">↗</span></a></footer>
     </div>`;
   main.querySelectorAll('[data-home-scroll]').forEach(link => {
     link.addEventListener('click', event => {
@@ -510,6 +795,7 @@ function renderCheck() {
     saveDraft(textarea.value);
     updateCharacterCount();
     validateTextLength(textarea);
+    updateModelActionControls();
   });
   updateCharacterCount();
   validateTextLength(textarea);
@@ -532,6 +818,7 @@ function renderCheck() {
   document.querySelector('#check-button').addEventListener('click', event => busy(event.currentTarget, 'Проверяем текст', checkText));
   document.querySelector('#compare-source').addEventListener('change', () => {
     document.querySelector('#direct-judgment').replaceChildren();
+    updateModelActionControls();
   });
   document.querySelector('#compare-button').addEventListener('click', event => busy(event.currentTarget, 'Qwen сравнивает', async () => {
     if (!state.text.trim()) throw new Error('Вставьте текст для сравнения.');
@@ -540,12 +827,13 @@ function renderCheck() {
     const text = state.text;
     const revision = state.viewRevision;
     const resultArea = document.querySelector('#direct-judgment');
-    const { judgment } = await api('/api/compare', { text, source_id: sourceId, model: selectedModel() });
+    const { judgment } = await modelRequest('/api/compare', { text, source_id: sourceId, model: selectedModel() });
     if (!resultArea.isConnected || state.viewRevision !== revision || state.text !== text
       || document.querySelector('#compare-source')?.value !== sourceId) return;
     resultArea.innerHTML = judgmentHTML(judgment);
   }));
   renderReport();
+  updateModelActionControls();
 }
 async function checkText() {
   if (!state.text.trim()) throw new Error('Вставьте текст для проверки.');
@@ -615,7 +903,7 @@ function renderReport() {
       <button class="text-button" id="restore-report-text" type="button">Открыть текст отчёта в редакторе</button>
     </div>
     <div class="section-heading">
-      <div><h2>Фрагменты для сверки</h2><p>По локальной библиотеке · ${escapeHTML(date(report.created_at))}</p></div>
+      <div><h2>Фрагменты для сверки</h2><p>По библиотеке источников · ${escapeHTML(date(report.created_at))}</p></div>
       <button class="text-button" id="download-report" type="button">↓ Сохранить отчёт</button>
     </div>
     <div class="stats-row">
@@ -675,6 +963,7 @@ function renderReport() {
   updateReportFreshness();
   renderRetrieval();
   loadRetrieval(report.id);
+  updateModelActionControls();
 }
 
 async function loadRetrieval(reportId) {
@@ -701,7 +990,7 @@ function candidateKey(retrieval, candidate) {
 function candidateActionsHTML(candidate, retrieval) {
   const judgment = state.candidateJudgments[candidateKey(retrieval, candidate)];
   const positive = judgment?.id && ['exact', 'paraphrase'].includes(judgment.relation);
-  const running = candidateCheckRunning(retrieval.id);
+  const running = candidateCheckRunning(retrieval.id) || candidateHasModelJob(retrieval.id, candidate.id);
   return `
     <button class="button small secondary" data-candidate-action="judge" type="button" ${modelAvailable() && !running ? '' : 'disabled'}>Сравнить с Qwen</button>
     ${positive ? `
@@ -951,14 +1240,17 @@ async function loadCandidateJudgments(retrievalId, force = false) {
       return;
     }
     mergeCandidateOutcomes(retrievalId, judgments);
+    renderModelJobs();
     const retrieval = state.retrievals[state.report?.id];
     if (state.view === 'check' && retrieval?.id === retrievalId) {
       updateCandidateCards(retrieval);
       renderCandidateCheck(retrieval);
     }
+    return true;
   } catch (error) {
     state.candidateLoaded.delete(retrievalId);
     toast(error.message, true);
+    return false;
   }
 }
 
@@ -1075,7 +1367,7 @@ async function pollCandidateCheck(retrievalId, jobId) {
 async function startCandidateCheck(retrieval) {
   if (candidateCheckRunning(retrieval.id)) return;
   const model = selectedModel();
-  if (!modelAvailable()) { toast('Выберите доступную локальную модель.', true); return; }
+  if (!modelAvailable()) { toast('Модель сейчас недоступна. Проверьте настройки сервера.', true); return; }
   state.candidateCheckJobs[retrieval.id] = { status: 'queued', stage: 'Подготавливаем сравнение' };
   renderCandidateCheck(retrieval);
   updateCandidateCards(retrieval);
@@ -1116,16 +1408,22 @@ function bindCandidateCardActions(card, candidate, retrieval) {
       updateReportFreshness();
       card.querySelectorAll('[data-candidate-action]').forEach(control => { control.disabled = true; });
       const action = button.dataset.candidateAction;
+      const remote = modelProvider() === 'modal';
       try {
         const payload = { retrieval_id: retrieval.id, candidate_id: candidate.id, model: selectedModel() };
         if (action === 'judge') {
-          const { judgment } = await api('/api/candidate-judge', payload);
-          mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, judgment }]);
+          const { judgment } = await modelRequest('/api/candidate-judge', payload, { report_id: retrieval.report_id });
+          if (remote) {
+            if (!await loadCandidateJudgments(retrieval.id, true)) throw new Error('Не удалось загрузить актуальную оценку пары. Ответ задания сохранён.');
+          } else {
+            mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, judgment }]);
+          }
           delete state.candidateRewrites[key];
           if (card.isConnected) {
-            card.querySelector('.candidate-judgment').innerHTML = judgmentHTML(judgment);
+            const latest = state.candidateJudgments[key];
+            card.querySelector('.candidate-judgment').innerHTML = latest ? judgmentHTML(latest) : '';
             card.querySelector('.candidate-rewrite').replaceChildren();
-            card.querySelector('.candidate-error').replaceChildren();
+            card.querySelector('.candidate-error').innerHTML = candidateErrorHTML(state.candidateErrors[key]);
           }
           if (state.view === 'check' && state.retrievals[state.report?.id]?.id === retrieval.id) renderCandidateCheck(retrieval);
         } else {
@@ -1133,9 +1431,16 @@ function bindCandidateCardActions(card, candidate, retrieval) {
           if (!judgment?.id || !['exact', 'paraphrase'].includes(judgment.relation)) {
             throw new Error('Сначала подтвердите совпадение сравнением с Qwen.');
           }
-          const { rewrite } = await api('/api/candidate-rewrite', {
+          const { rewrite } = await modelRequest('/api/candidate-rewrite', {
             ...payload, judgment_id: judgment.id, mode: action,
-          });
+          }, { report_id: retrieval.report_id });
+          if (remote) {
+            const loaded = await loadCandidateJudgments(retrieval.id, true);
+            const latest = state.candidateJudgments[key];
+            if (!loaded || !latest || latest.id !== rewrite.judgment_id || !['exact', 'paraphrase'].includes(latest.relation)) {
+              throw new Error('Оценка пары изменилась. Сохранённая правка не будет применена.');
+            }
+          }
           state.candidateRewrites[key] = rewrite;
           if (card.isConnected && state.report?.id === retrieval.report_id) {
             card.querySelector('.candidate-rewrite').innerHTML = candidateRewriteHTML(candidate, retrieval);
@@ -1144,9 +1449,13 @@ function bindCandidateCardActions(card, candidate, retrieval) {
         }
       } catch (error) {
         if (action === 'judge') {
-          mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, error: error.message, code: error.code, details: error.details }]);
+          const latestLoaded = remote && await loadCandidateJudgments(retrieval.id, true);
+          if (!latestLoaded) {
+            mergeCandidateOutcomes(retrieval.id, [{ candidate_id: candidate.id, error: error.message, code: error.code, details: error.details }]);
+          }
           if (card.isConnected) {
-            card.querySelector('.candidate-judgment').replaceChildren();
+            const latest = state.candidateJudgments[key];
+            card.querySelector('.candidate-judgment').innerHTML = latest ? judgmentHTML(latest) : '';
             card.querySelector('.candidate-rewrite').replaceChildren();
             card.querySelector('.candidate-error').innerHTML = candidateErrorHTML(state.candidateErrors[key]);
           }
@@ -1178,7 +1487,8 @@ function bindCandidateRewrite(card, candidate, retrieval) {
   });
   card.querySelector('[data-apply-candidate]').addEventListener('click', () => {
     if (state.report?.id !== retrieval.report_id || state.text !== state.report.text
-      || state.retrievals[retrieval.report_id]?.id !== retrieval.id || candidateCheckRunning(retrieval.id)) {
+      || state.retrievals[retrieval.report_id]?.id !== retrieval.id || candidateCheckRunning(retrieval.id)
+      || candidateHasModelJob(retrieval.id, candidate.id)) {
       toast('Текст изменён. Повторите проверку перед применением правки.', true);
       return;
     }
@@ -1252,7 +1562,7 @@ function comparisonHTML(match) {
         <button class="button small secondary" id="paraphrase-button" type="button" ${available ? '' : 'disabled'}>Предложить пересказ</button>
         <button class="text-button" id="judge-button" type="button" ${available ? '' : 'disabled'}>Оценить с Qwen ↗</button>
       </div>
-      ${available ? '' : '<p class="field-help">Для пересказа и оценки подключите Qwen в меню модели сверху.</p>'}
+      <p class="field-help" id="comparison-model-unavailable" ${available ? 'hidden' : ''}>Модель сейчас недоступна. Настройки сервера находятся в меню сверху.</p>
       ${matchReviewHTML(match)}
       <div id="judgment-area">${state.judgment ? judgmentHTML(state.judgment) : ''}</div>
       <div id="rewrite-area">${state.rewrite ? rewriteHTML() : ''}</div>
@@ -1314,7 +1624,9 @@ function bindComparison(match) {
   for (const [id, mode] of [['quote-button', 'quote'], ['paraphrase-button', 'paraphrase']]) {
     document.querySelector(`#${id}`).addEventListener('click', event => busy(event.currentTarget, 'Готовим правку', async () => {
       const resultArea = document.querySelector('#rewrite-area');
-      const { rewrite } = await api('/api/rewrite', { report_id: reportId, match_id: match.id, mode, model: selectedModel() });
+      const { rewrite } = await modelRequest('/api/rewrite', {
+        report_id: reportId, match_id: match.id, mode, model: selectedModel(),
+      }, { original_text: match.excerpt, source_title: match.source_title });
       if (!resultArea.isConnected || !currentComparison(reportId, match.id)) return;
       state.rewrite = rewrite;
       document.querySelector('#rewrite-area').innerHTML = rewriteHTML();
@@ -1323,7 +1635,7 @@ function bindComparison(match) {
   }
   document.querySelector('#judge-button').addEventListener('click', event => busy(event.currentTarget, 'Qwen сравнивает', async () => {
     const resultArea = document.querySelector('#judgment-area');
-    const { judgment } = await api('/api/judge', { report_id: reportId, match_id: match.id, model: selectedModel() });
+    const { judgment } = await modelRequest('/api/judge', { report_id: reportId, match_id: match.id, model: selectedModel() });
     if (!resultArea.isConnected || !currentComparison(reportId, match.id)) return;
     state.judgment = judgment;
     document.querySelector('#judgment-area').innerHTML = judgmentHTML(judgment);
@@ -1514,9 +1826,24 @@ function renderSources() {
 }
 
 async function renderEvaluation() {
-  main.innerHTML = heading('Оценка Qwen', 'Проверьте, как Qwen сравнивает пару фрагментов с уже известным источником. Сохраните свои исправления.', '', 'Оценка локальной модели') + `<section class="card evaluation-top"><div><h2>Контрольная проверка</h2><p>Дословные совпадения, пересказы и независимые тексты на одну тему. Источник заранее дан модели.<br>Учебные пары помогают искать ошибки и уже использовались при настройке инструкций. На Mac проверка может занять несколько минут.</p></div><button class="button" id="run-evaluation" type="button" ${!modelAvailable() ? 'disabled' : ''}>Запустить оценку <span aria-hidden="true">↗</span></button></section>${!modelAvailable() ? '<div class="warning">Локальная модель пока недоступна. Подключите Ollama и Qwen через меню модели сверху. Примеры можно просматривать уже сейчас.</div>' : ''}<div id="evaluation-result"></div><div class="section-heading" style="margin-top:28px"><div><h2>Размеченные примеры</h2><p>Учебные тексты написаны специально для прототипа.</p></div><button class="text-button" id="export-training" type="button">↓ Выгрузить обучение</button></div><div id="example-list"><p class="subtle">Загружаем примеры…</p></div>`;
+  main.innerHTML = heading('Оценка Qwen',
+    'Проверьте, как Qwen сравнивает пару фрагментов с уже известным источником. Сохраните свои исправления.', '', 'Оценка модели') + `
+    <section class="card evaluation-top">
+      <div><h2>Контрольная проверка</h2>
+        <p>Дословные совпадения, пересказы и независимые тексты на одну тему. Источник заранее дан модели.
+          Учебные пары помогают искать ошибки и уже использовались при настройке инструкций.</p>
+        <p class="field-help" data-processing-disclosure>${escapeHTML(processingDisclosure())}</p>
+      </div>
+      <button class="button" id="run-evaluation" type="button" ${!modelAvailable() ? 'disabled' : ''}>Запустить оценку <span aria-hidden="true">↗</span></button>
+    </section>
+    <div class="warning" id="evaluation-model-unavailable" ${modelAvailable() ? 'hidden' : ''}>Модель сейчас недоступна. Настройки можно посмотреть в меню сверху. Учебные примеры доступны для просмотра.</div>
+    <p class="field-help" id="evaluation-job-note" hidden></p>
+    <div id="evaluation-result"></div>
+    <div class="section-heading" style="margin-top:28px"><div><h2>Размеченные примеры</h2><p>Учебные тексты написаны специально для прототипа.</p></div><button class="text-button" id="export-training" type="button">↓ Выгрузить обучение</button></div>
+    <div id="example-list"><p class="subtle">Загружаем примеры…</p></div>`;
+  updateModelActionControls();
   document.querySelector('#run-evaluation').addEventListener('click', event => busy(event.currentTarget, 'Qwen проходит проверку', async () => {
-    const { run } = await api('/api/evaluate', { model: selectedModel(), split: 'test' });
+    const { run } = await modelRequest('/api/evaluate', { model: selectedModel(), split: 'test' });
     state.run = run;
     if (state.view === 'evaluation') {
       renderEvaluationResults();
@@ -1672,43 +1999,91 @@ async function refreshSources() {
 }
 async function refreshStatus() {
   state.status = await api('/api/status');
+  const provider = modelProvider();
+  if (state.modelProvider !== provider) {
+    state.modelProvider = provider;
+    state.model = restoreModel(provider);
+  }
+  if (provider === 'modal' && !installedModels().includes(state.model)) {
+    const models = installedModels();
+    state.model = models.includes(state.status.model.model) ? state.status.model.model : models[0] || '';
+  }
   updateModelControls();
 }
 
 function updateModelControls() {
-  const model = state.status.model;
+  const model = state.status?.model || {};
   const available = modelAvailable();
-  document.querySelector('#model-dot').classList.toggle('muted', !available);
-  document.querySelector('#model-label').textContent = available ? selectedModel() : 'Qwen не подключена';
-  document.querySelector('#model-description').textContent = available ? 'Ollama доступна. Выберите модель для оценки пересказов и предложений правок.' : (model.error || 'Запустите Ollama и загрузите Qwen. Проверка точных совпадений доступна уже сейчас.');
+  const remote = modelProvider() === 'modal';
+  document.querySelector('#model-dot').classList.toggle('muted', remote || !available);
+  document.querySelector('#model-label').textContent = remote
+    ? `${selectedModel() || 'Qwen'} · ${model.configured ? 'сервер настроен' : 'сервер не настроен'}`
+    : available ? selectedModel() : model.local_inference_disabled || modelProvider() === 'disabled' ? 'Локальные модели отключены' : 'Модель не подключена';
+  const description = remote
+    ? `${model.configured ? 'Сервер Modal настроен. Настройки прочитаны без запроса к GPU.' : 'Сервер Modal ещё не настроен.'} ${model.can_submit ? 'Первый запрос может потребовать запуска серверной модели.' : 'Отправка модельных заданий сейчас отключена.'}${model.last_success_at ? ` Последний успешный запрос ${date(model.last_success_at)}.` : ''}${model.error ? ` ${model.error}` : ''}`
+    : model.local_inference_disabled || modelProvider() === 'disabled'
+      ? 'Локальные модели отключены. Автоматического запуска или скачивания не будет.'
+      : available ? 'Подключена локальная модель. Точный поиск работает самостоятельно.' : (model.error || 'Модель сейчас недоступна. Точный поиск по библиотеке продолжает работать.');
+  document.querySelector('#model-description').textContent = description;
+  document.querySelector('#model-dialog-title').textContent = remote ? 'Серверная модель' : 'Настройки модели';
+  updateProcessingLabels();
   const select = document.querySelector('#model-select');
   select.replaceChildren();
   const models = installedModels();
-  if (state.model && !installedModels().includes(state.model)) {
-    select.add(new Option(`${state.model} · не установлена`, state.model));
+  if (state.model && !models.includes(state.model)) {
+    select.add(new Option(`${state.model} · недоступна`, state.model));
   }
   for (const item of models) {
     const name = typeof item === 'string' ? item : item.name;
     select.add(new Option(name, name));
   }
-  if (!models.length) select.add(new Option('Установленных моделей пока нет', ''));
+  if (!models.length) select.add(new Option(remote ? 'Серверных моделей пока нет' : 'Доступных моделей пока нет', ''));
   select.value = selectedModel() || '';
   select.disabled = !models.length;
+  updateModelActionControls();
+}
+
+function updateModelActionControls() {
+  const available = modelAvailable();
+  for (const id of ['evaluation-model-unavailable', 'comparison-model-unavailable']) {
+    const note = document.getElementById(id);
+    if (note) note.hidden = available;
+  }
   const batchButton = document.querySelector('#check-all-candidates');
   const currentRetrieval = state.retrievals[state.report?.id];
   if (batchButton) batchButton.disabled = !available || !currentRetrieval?.candidates.length || candidateCheckRunning(currentRetrieval.id);
   const hybrid = document.querySelector('#retrieve-hybrid');
-  if (hybrid) hybrid.disabled = !state.status.embedding?.available || retrievalRunning(state.report?.id);
+  if (hybrid) hybrid.disabled = !state.status?.embedding?.available || retrievalRunning(state.report?.id);
   const embeddingNotice = document.querySelector('#embedding-unavailable');
-  if (embeddingNotice) embeddingNotice.hidden = Boolean(state.status.embedding?.available);
-  document.querySelectorAll('[data-candidate-action="judge"], [data-candidate-action="paraphrase"]').forEach(button => {
+  if (embeddingNotice) embeddingNotice.hidden = Boolean(state.status?.embedding?.available);
+  document.querySelectorAll('[data-candidate-action]').forEach(button => {
     const card = button.closest('[data-candidate]');
     const key = `${card.dataset.retrieval}:${card.dataset.candidate}`;
-    if (!candidateRequests.has(key)) button.disabled = !available || candidateCheckRunning(card.dataset.retrieval);
+    if (!candidateRequests.has(key)) button.disabled = (button.dataset.candidateAction !== 'quote' && !available) || candidateCheckRunning(card.dataset.retrieval)
+      || candidateHasModelJob(card.dataset.retrieval, card.dataset.candidate);
   });
-  for (const id of ['compare-button', 'paraphrase-button', 'judge-button', 'run-evaluation']) {
+  const model = selectedModel();
+  const target = { report_id: state.report?.id, match_id: state.selectedMatch, model };
+  const controls = [
+    ['compare-button', '/api/compare', { text: state.text, source_id: document.querySelector('#compare-source')?.value || '', model }],
+    ['paraphrase-button', '/api/rewrite', { ...target, mode: 'paraphrase' }],
+    ['quote-button', '/api/rewrite', { ...target, mode: 'quote' }],
+    ['judge-button', '/api/judge', target],
+    ['run-evaluation', '/api/evaluate', { model, split: 'test' }],
+  ];
+  for (const [id, path, body] of controls) {
     const button = document.getElementById(id);
-    if (button && !button.querySelector('.spinner')) button.disabled = !available;
+    const pending = modelProvider() === 'modal' && pendingModelRequest(path, body);
+    if (button) button.disabled = Boolean(button.dataset.busy) || (id !== 'quote-button' && !available) || Boolean(pending);
+    if (id === 'run-evaluation') {
+      const note = document.querySelector('#evaluation-job-note');
+      if (note) {
+        note.hidden = !pending;
+        note.textContent = pending && ['missing', 'delivery_unknown'].includes(pending.status)
+          ? 'Отправка этой оценки не подтверждена. Используйте повторную отправку в уведомлении о задании.'
+          : 'Оценка этой модели уже запущена. Состояние и сохранённые ответы показаны в задании сверху.';
+      }
+    }
   }
 }
 function renderView() {
@@ -1728,12 +2103,14 @@ function renderView() {
   else if (state.view === 'sources') renderSources();
   else if (state.view === 'evaluation') renderEvaluation();
   else renderHistory();
+  updateProcessingLabels();
+  updateModelActionControls();
 }
 document.querySelector('#model-settings').addEventListener('click', () => document.querySelector('#model-dialog').showModal());
 document.querySelector('#model-select').addEventListener('change', event => {
   state.model = event.target.value;
   try {
-    localStorage.setItem(MODEL_KEY, state.model);
+    localStorage.setItem(modelProvider() === 'modal' ? MODAL_MODEL_KEY : MODEL_KEY, state.model);
   } catch {
     // The selected model still applies to this open tab.
   }
@@ -1741,11 +2118,16 @@ document.querySelector('#model-select').addEventListener('change', event => {
 });
 document.querySelector('#refresh-model').addEventListener('click', event => busy(event.currentTarget, 'Проверяем', async () => {
   await refreshStatus();
-  toast(modelAvailable() ? 'Локальная модель доступна.' : 'Ollama или модель пока недоступны.', !modelAvailable());
+  toast(modelProvider() === 'modal' ? 'Настройки сервера обновлены. Запрос к GPU не выполнялся.'
+    : modelAvailable() ? 'Настройки модели обновлены.' : 'Модель сейчас недоступна.', !modelAvailable());
 }));
 window.addEventListener('hashchange', renderView);
 (async function init() {
   renderView();
+  renderModelJobs();
+  for (const entry of Object.values(state.modelJobs)) {
+    observeModelJob(entry).catch(() => {});
+  }
   for (const [reportId, job] of Object.entries(state.retrievalJobs)) {
     pollRetrieval(reportId, job.id);
   }
@@ -1759,7 +2141,7 @@ window.addEventListener('hashchange', renderView);
 
 setInterval(() => {
   refreshStatus().catch(error => {
-    state.status = { model: { models: [], error: error.message } };
+    state.status = { ...state.status, model: { ...state.status?.model, available: false, can_submit: false, models: [], error: error.message } };
     updateModelControls();
   });
 }, 15000);

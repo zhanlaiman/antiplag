@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 import server as application
 from plagiarism import evaluation, storage
@@ -63,6 +64,74 @@ class ServerTests(unittest.TestCase):
         status, body = self.request("POST", "/api/check", {"text": text, **options})
         self.assertEqual(status, 200, body)
         return body["report"]
+
+    def model_job(self, path, body, request_id=None):
+        identifier = request_id or uuid4().hex
+        status, result = self.request("POST", "/api/model-jobs", {"request_id": identifier, "path": path, "body": body})
+        self.assertEqual(status, 200, result)
+        for _ in range(200):
+            status, result = self.request("GET", f"/api/jobs/{identifier}")
+            self.assertEqual(status, 200, result)
+            if result["job"]["status"] in {"complete", "failed", "cancelled"}:
+                return result["job"]
+            time.sleep(0.01)
+        self.fail("Background model job did not finish")
+
+    def test_model_job_returns_legacy_envelope_and_same_id_does_not_repeat_compute(self):
+        source = self.add_source()
+        payload = {"source_id": source["id"], "text": SOURCE_TEXT}
+        identifier = uuid4().hex
+        with patch.object(application.llm, "judge", return_value={"relation": "exact", "evidence_text": SOURCE_TEXT}) as judge:
+            first = self.model_job("/api/compare", payload, identifier)
+            second = self.model_job("/api/compare", payload, identifier)
+            self.assertEqual(first["result"], second["result"])
+            self.assertEqual(judge.call_count, 1)
+            status, body = self.request("POST", "/api/model-jobs", {
+                "request_id": identifier, "path": "/api/compare", "body": payload | {"text": "Другой текст"}})
+            self.assertEqual(status, 400, body)
+        self.assertEqual(first["result"]["judgment"]["evidence_text"], SOURCE_TEXT)
+        restarted = Jobs()
+        try:
+            saved = restarted.get(identifier, Store(self.httpd.store.path))
+            self.assertEqual(saved["result"], first["result"])
+        finally:
+            restarted.close()
+
+    def test_model_job_preserves_snapshot_quote_and_failure_details(self):
+        source = self.add_source()
+        report = self.check()
+        self.request("DELETE", f"/api/sources/{source['id']}")
+        job = self.model_job("/api/rewrite", {"report_id": report["id"], "match_id": report["matches"][0]["id"], "mode": "quote"})
+        self.assertEqual(job["status"], "complete", job)
+        self.assertIn(report["matches"][0]["source_excerpt"], job["result"]["rewrite"]["text"])
+        error = application.llm.OllamaError("Проверьте выбранные предложения", code="unconfirmed_exact", details={"evidence": "😀"})
+        with patch.object(application.llm, "judge", side_effect=error):
+            job = self.model_job("/api/judge", {"report_id": report["id"], "match_id": report["matches"][0]["id"]})
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["code"], "unconfirmed_exact")
+        self.assertEqual(job["details"], {"evidence": "😀"})
+        self.assertEqual(self.httpd.store.get("model-job", job["id"])["code"], "unconfirmed_exact")
+
+    def test_model_jobs_reject_unknown_routes_ids_and_saved_evidence(self):
+        for payload in ({"request_id": "bad", "path": "/api/judge", "body": {}},
+                        {"request_id": uuid4().hex, "path": "/api/sources", "body": {}},
+                        {"request_id": uuid4().hex, "path": "/api/judge", "body": []}):
+            status, body = self.request("POST", "/api/model-jobs", payload)
+            self.assertEqual(status, 400, body)
+        with patch.object(application.llm, "judge") as judge:
+            job = self.model_job("/api/judge", {"report_id": "missing", "match_id": "missing"})
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["code"], "record_not_found")
+            judge.assert_not_called()
+
+    def test_model_job_evaluate_retains_existing_saved_run_response(self):
+        synthetic_run = {"model": "test:model", "metrics": {"total": 1}, "results": []}
+        with patch.object(application.evaluation, "run", return_value=synthetic_run) as evaluate:
+            job = self.model_job("/api/evaluate", {"split": "test", "model": "test:model"})
+            self.assertEqual(evaluate.call_args.args, ("test:model", "test"))
+            self.assertTrue(callable(evaluate.call_args.kwargs["on_result"]))
+        self.assertEqual(job["result"]["run"]["metrics"], {"total": 1})
+        self.assertIsNotNone(self.httpd.store.get("evaluation", job["result"]["run"]["id"]))
 
     def test_report_and_quote_survive_deletion_of_original_source(self):
         source = self.add_source()

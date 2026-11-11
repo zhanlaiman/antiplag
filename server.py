@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,8 @@ ROOT = Path(__file__).resolve().parent
 MODEL_LOCK = Lock()
 MAX_BODY = 2_000_000
 RELATIONS = {"exact", "paraphrase", "same_topic", "unrelated"}
+MODEL_ROUTES = {"/api/compare", "/api/judge", "/api/rewrite", "/api/evaluate",
+                "/api/candidate-judge", "/api/candidate-rewrite"}
 
 
 def field(body, key, maximum=MAX_TEXT_CHARS, required=True):
@@ -157,10 +160,16 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.store
         if method == "GET" and path == "/api/status":
             model_status = llm.status()
-            embedding_model = os.environ.get("ISTOK_EMBED_MODEL", retrieval.EMBEDDING_MODEL)
+            embedding_model = model_status.get("embedding_model", os.environ.get("ISTOK_EMBED_MODEL", retrieval.EMBEDDING_MODEL))
             embedding_models = model_status.get("embedding_models", [])
             embedding = {"model": embedding_model, "models": embedding_models,
                          "available": embedding_model in embedding_models or embedding_model + ":latest" in embedding_models}
+            if model_status.get("provider") == "modal":
+                embedding.update(provider="modal", configured=model_status.get("configured", False),
+                                 can_submit=model_status.get("can_submit", False),
+                                 last_success_at=model_status.get("last_success_at"),
+                                 synthetic_only=model_status.get("synthetic_only", True),
+                                 local_inference_disabled=model_status.get("local_inference_disabled", False))
             return {"model": model_status, "embedding": embedding, "counts": store.counts(), "scope": "local_library"}
         if method == "GET" and path == "/api/sources":
             return {"sources": store.sources()}
@@ -204,16 +213,34 @@ class Handler(BaseHTTPRequestHandler):
             result = analyze(text, sources)
             report = store.save("report", {**result, "text": text, "sources": sources, "scope": "local_library"})
             return {"report": public_report(report, store.match_reviews(report["id"]))}
-        if method == "POST" and path == "/api/compare":
-            text = field(body, "text", llm.MAX_PASSAGE_LENGTH)
-            source_id = field(body, "source_id", 100)
-            source = next((item for item in store.sources() if item["id"] == source_id), None)
-            if not source:
-                raise KeyError("source")
-            with MODEL_LOCK:
-                judgment = llm.judge(text, source["text"], self.model(body))
-            store.save("comparison", {"text": text, "source": source, "judgment": judgment})
-            return {"judgment": judgment}
+        if method == "POST" and path in MODEL_ROUTES:
+            return self.model_operation(store, path, body)
+        if method == "POST" and path == "/api/model-jobs":
+            request_id = body.get("request_id")
+            operation_path = body.get("path")
+            operation_body = body.get("body")
+            if (not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id)
+                    or not isinstance(operation_path, str) or operation_path not in MODEL_ROUTES
+                    or not isinstance(operation_body, dict)):
+                raise ValueError("Некорректный запрос фоновой проверки.")
+            # Detach the queued input from the HTTP handler's mutable request object.
+            operation_body = json.loads(json.dumps(operation_body, ensure_ascii=False, allow_nan=False))
+            candidate_attempt = None
+            if operation_path == "/api/candidate-judge":
+                record, candidate = self.candidate_pair(store, operation_body)
+                candidate_attempt = {"retrieval_id": record["id"], "candidate_id": candidate["id"],
+                                     "model": self.model(operation_body)}
+
+            def operation(progress):
+                if operation_path != "/api/evaluate":
+                    progress("Подготавливаем серверную модель и выполняем проверку", 0, 1, phase="starting")
+                result = self.model_operation(store, operation_path, operation_body, progress=progress)
+                if operation_path != "/api/evaluate":
+                    progress("Сохраняем результат", 1, 1, phase="saving")
+                return result
+
+            return {"job": self.server.jobs.submit_model(request_id, operation_path, operation_body, operation, store,
+                                                         candidate_attempt=candidate_attempt)}
         if method == "GET" and path == "/api/reports":
             return {"reports": store.report_summaries()}
         if method == "GET" and path.startswith("/api/reports/"):
@@ -248,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
 
             return {"job": self.server.jobs.submit((report_id, mode, top_k), operation)}
         if method == "GET" and path.startswith("/api/jobs/"):
-            return {"job": self.server.jobs.get(path.rsplit("/", 1)[1])}
+            return {"job": self.server.jobs.get(path.rsplit("/", 1)[1], store)}
         if method == "POST" and path.startswith("/api/jobs/") and path.endswith("/cancel"):
             return {"job": self.server.jobs.cancel(path.split("/")[-2])}
         if method == "GET" and path.startswith("/api/retrievals/"):
@@ -299,14 +326,43 @@ class Handler(BaseHTTPRequestHandler):
                 return store.save("candidate-check", result)
 
             return {"job": self.server.jobs.submit((record["id"], "candidate-check", model), operation, kind="candidate-check")}
-        if method == "POST" and path in {"/api/candidate-judge", "/api/candidate-rewrite"}:
-            record = store.get("retrieval", field(body, "retrieval_id", 100))
-            candidate_id = field(body, "candidate_id", 100)
-            if not record:
-                raise KeyError("retrieval")
-            candidate = next((item for item in record["candidates"] if item["id"] == candidate_id), None)
-            if not candidate:
-                raise KeyError("candidate")
+        if method == "GET" and path == "/api/examples":
+            reviews = {item["example_id"]: item for item in store.reviews()}
+            return {"examples": [{**item, "review": reviews.get(item["id"])} for item in evaluation.examples()]}
+        if method == "GET" and path == "/api/evaluations":
+            return {"runs": store.records("evaluation")}
+        if method == "POST" and path == "/api/reviews":
+            example_id = field(body, "example_id", 100)
+            if example_id not in {item["id"] for item in evaluation.examples()}:
+                raise KeyError("example")
+            relation = body.get("relation")
+            if relation not in RELATIONS:
+                raise ValueError("Неизвестная оценка.")
+            return {"review": store.review(example_id, relation, field(body, "comment", 4000, False))}
+        if method == "POST" and path == "/api/export":
+            if body.get("split", "train") != "train":
+                raise ValueError("Для обучения экспортируется только обучающая выборка.")
+            reviews = {item["example_id"]: item for item in store.reviews()}
+            records = [{**item, "expected": reviews[item["id"]]["relation"], "review": reviews[item["id"]]}
+                       for item in evaluation.examples() if item["split"] == "train" and item["id"] in reviews]
+            return {"records": records}
+        raise KeyError(path)
+
+    def model_operation(self, store, path, body, progress=None):
+        """Shared guards and evidence validation for immediate and queued requests."""
+        if path == "/api/compare":
+            text = field(body, "text", llm.MAX_PASSAGE_LENGTH)
+            source_id = field(body, "source_id", 100)
+            source = next((item for item in store.sources() if item["id"] == source_id), None)
+            if not source:
+                raise KeyError("source")
+            with MODEL_LOCK:
+                judgment = llm.judge(text, source["text"], self.model(body))
+            store.save("comparison", {"text": text, "source": source, "judgment": judgment})
+            return {"judgment": judgment}
+        if path in {"/api/candidate-judge", "/api/candidate-rewrite"}:
+            record, candidate = self.candidate_pair(store, body)
+            candidate_id = candidate["id"]
             if path == "/api/candidate-judge":
                 return {"judgment": judge_candidate(store, record, candidate, self.model(body))}
             mode = body.get("mode", "paraphrase")
@@ -335,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
                            replacement_start=candidate["query_start"] + target_start,
                            replacement_end=candidate["query_start"] + target_end)
             return {"rewrite": rewrite}
-        if method == "POST" and path in {"/api/judge", "/api/rewrite"}:
+        if path in {"/api/judge", "/api/rewrite"}:
             report = store.get("report", field(body, "report_id", 100))
             if not report:
                 raise KeyError("report")
@@ -356,34 +412,37 @@ class Handler(BaseHTTPRequestHandler):
             with MODEL_LOCK:
                 rewrite = llm.rewrite(match["excerpt"], match["source_excerpt"], match["source_title"], match["source_url"], mode, model)
             return {"rewrite": rewrite}
-        if method == "GET" and path == "/api/examples":
-            reviews = {item["example_id"]: item for item in store.reviews()}
-            return {"examples": [{**item, "review": reviews.get(item["id"])} for item in evaluation.examples()]}
-        if method == "GET" and path == "/api/evaluations":
-            return {"runs": store.records("evaluation")}
-        if method == "POST" and path == "/api/evaluate":
+        if path == "/api/evaluate":
             split = body.get("split", "test")
             if split not in {"train", "test"}:
                 raise ValueError("Неизвестная выборка.")
+            if progress:
+                total = sum(item["split"] == split for item in evaluation.examples())
+                progress("Подготавливаем серверную модель и учебные пары", 0, total, phase="starting")
+
+                def on_result(item, done, total):
+                    progress("Сравниваем учебные пары", done, total, phase="comparing")
+
             with MODEL_LOCK:
-                run = evaluation.run(self.model(body), split)
+                if progress:
+                    run = evaluation.run(self.model(body), split, on_result=on_result)
+                else:
+                    run = evaluation.run(self.model(body), split)
+            if progress:
+                total = run.get("metrics", {}).get("total", total)
+                progress("Сохраняем результаты учебных пар", len(run.get("results", [])), total, phase="saving")
             return {"run": store.save("evaluation", run)}
-        if method == "POST" and path == "/api/reviews":
-            example_id = field(body, "example_id", 100)
-            if example_id not in {item["id"] for item in evaluation.examples()}:
-                raise KeyError("example")
-            relation = body.get("relation")
-            if relation not in RELATIONS:
-                raise ValueError("Неизвестная оценка.")
-            return {"review": store.review(example_id, relation, field(body, "comment", 4000, False))}
-        if method == "POST" and path == "/api/export":
-            if body.get("split", "train") != "train":
-                raise ValueError("Для обучения экспортируется только обучающая выборка.")
-            reviews = {item["example_id"]: item for item in store.reviews()}
-            records = [{**item, "expected": reviews[item["id"]]["relation"], "review": reviews[item["id"]]}
-                       for item in evaluation.examples() if item["split"] == "train" and item["id"] in reviews]
-            return {"records": records}
         raise KeyError(path)
+
+    def candidate_pair(self, store, body):
+        record = store.get("retrieval", field(body, "retrieval_id", 100))
+        candidate_id = field(body, "candidate_id", 100)
+        if not record:
+            raise KeyError("retrieval")
+        candidate = next((item for item in record["candidates"] if item["id"] == candidate_id), None)
+        if not candidate:
+            raise KeyError("candidate")
+        return record, candidate
 
     def validate_latest_judgment(self, store, retrieval_id, candidate_id, judgment_id):
         latest = next((item for item in store.candidate_judgments(retrieval_id)

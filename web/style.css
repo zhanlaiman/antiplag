@@ -30,6 +30,57 @@
   --font:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif
 }
 
+.model-jobs-panel {
+  display:grid;
+  gap:12px;
+  padding:20px clamp(20px, 4vw, 56px) 0;
+}
+
+.model-jobs-panel[hidden] {
+  display:none;
+}
+
+.model-job-notice {
+  padding:18px 22px;
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-left:3px solid var(--amber);
+  border-radius:var(--radius);
+  overflow-wrap:anywhere;
+}
+
+.model-job-heading {
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:space-between;
+  gap:6px 16px;
+  margin-bottom:6px;
+}
+
+.model-job-heading span {
+  color:var(--muted);
+  font-size:12px;
+}
+
+.model-job-notice details {
+  margin:12px 0;
+}
+
+.model-job-notice summary {
+  color:var(--green);
+  cursor:pointer;
+}
+
+.model-job-notice blockquote {
+  margin:10px 0;
+  white-space:pre-wrap;
+}
+
+.home-view .model-jobs-panel {
+  width:min(1160px, 100%);
+  margin:0 auto;
+}
+
 * {
   box-sizing:border-box
 }
