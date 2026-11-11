@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "mixed-genuine-compound-and-discretionary-wrap",
+  "synthetic": true,
+  "construction": "Authored same sentence with one genuine compound and one discretionary word wrap. No external publication.",
+  "matcher_version": "lexical-v4-line-wrap-variants",
+  "target": "Scientists measured long-term changes in extremely distant galaxies.",
+  "source": "Scientists measured long-\nterm changes in ex-\ntremely distant galaxies.",
+  "expected_exact_words": 9,
+  "observed_exact_words": 6,
+  "full_literal_equivalent": false,
+  "matches": [
+    {
+      "source_id": "authored-mixed-linewrap",
+      "source_title": "Authored counterexample",
+      "source_url": "https://example.invalid/mixed-linewrap",
+      "start": 0,
+      "end": 40,
+      "source_start": 0,
+      "source_end": 41,
+      "excerpt": "Scientists measured long-term changes in",
+      "source_excerpt": "Scientists measured long-\nterm changes in",
+      "kind": "exact",
+      "score": 1.0,
+      "quoted": false,
+      "id": "match-1"
+    }
+  ],
+  "limitation": "The two global streams either retain every wrap or join every wrap. This pair requires preserving long-term and joining ex-tremely locally in one alignment."
+}

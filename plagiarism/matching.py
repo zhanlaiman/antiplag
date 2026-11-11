@@ -13,7 +13,7 @@ import unicodedata
 
 MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
-MATCHER_VERSION = "lexical-v4-line-wrap-variants"
+MATCHER_VERSION = "lexical-v4.1-cached-anchors"
 MIN_WORDS = 6
 MIN_CHARACTERS = 35
 # These combining marks cover Cyrillic stress and Latin/Cyrillic diacritics.
@@ -221,6 +221,9 @@ def _segments(text, tokens):
 
 
 def _similar_matches(text, source, target_tokens, source_tokens, exact):
+    # An exact span may cover thousands of sentence windows. Count its words
+    # once, rather than tokenizing that same long excerpt in every window.
+    long_exact = [match for match in exact if len(_tokens(match["excerpt"])) >= MIN_WORDS]
     source_segments = _segments(source["text"], source_tokens)
     segment_words = [[token.value for token in source_tokens[start:end]]
                      for start, end in source_segments]
@@ -234,10 +237,8 @@ def _similar_matches(text, source, target_tokens, source_tokens, exact):
         character_end = target_tokens[end - 1].end
         covered = _coverage([
             {"start": max(character_start, match["start"]), "end": min(character_end, match["end"])}
-            for match in exact
+            for match in long_exact
             if match["start"] < character_end and match["end"] > character_start
-            # Short supported tails must not hide the edits between long seeds.
-            and len(_tokens(match["excerpt"])) >= MIN_WORDS
         ])
         if covered / (character_end - character_start) >= 0.75:
             continue
