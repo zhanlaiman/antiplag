@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+.runtime/
+data/*.sqlite3*
+data/runs/
+.DS_Store
