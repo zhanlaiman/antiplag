@@ -20,6 +20,19 @@ D13_REVIEWED_ATTRIBUTION = tuple(t.value for t in _tokens(
     "Приведём подсказку из статьи «Шахматные часы» русской Википедии:"))
 
 
+def copied_target_tokens(tokens, gold):
+    """Scoring only: exclude target insertions absent from the source quote.
+
+    In D10, the extra word 'ещё' is inside the annotated target span but was
+    not copied. Full copied coverage is therefore 11/11, not 11/12.
+    """
+    start, end = gold["target_span"]
+    wanted = [t for t in tokens if start <= t.start and t.end <= end]
+    original = [t.value for t in _tokens(gold["source_quote"])]
+    aligned = SequenceMatcher(None, [t.value for t in wanted], original, autojunk=False)
+    return [wanted[i] for block in aligned.get_matching_blocks() for i in range(block.a, block.a + block.size)]
+
+
 def reviewed_similar_extension(case, match, exact, text):
     """Recognize the reviewed attribution error only with the same pair evidence.
 
@@ -88,9 +101,7 @@ def inspect(dev, reports):
             covered = [t for t in wanted if any(m["start"] <= t.start and t.end <= m["end"] for m in exact)]
             urls = {_url(u) for u in gold["source_urls"]}
             literal = gold["needs_lexical_highlight"]
-            original_words = [t.value for t in _tokens(gold["source_quote"])]
-            aligned = SequenceMatcher(None, [t.value for t in wanted], original_words, autojunk=False)
-            copied = [wanted[i] for block in aligned.get_matching_blocks() for i in range(block.a, block.a + block.size)]
+            copied = copied_target_tokens(tokens, gold)
             copied_covered = [t for t in copied if any(m["start"] <= t.start and t.end <= m["end"] for m in exact)]
             source_faithful = [t for t in copied if any(m["start"] <= t.start and t.end <= m["end"]
                                                        and _url(m["source_url"]) in urls for m in exact)]

@@ -5,7 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.analyze_web_dev_checks import compare, inspect
+from scripts.analyze_web_dev_checks import compare, inspect, copied_target_tokens
+from plagiarism.matching import _tokens
 
 
 class SavedDevInspectionTests(unittest.TestCase):
@@ -70,6 +71,13 @@ class SavedDevInspectionTests(unittest.TestCase):
         _, case = self.run_inspection()
         self.assertTrue(case["evidence"][0]["whole_query_in_both_spans"])
         self.assertEqual(case["evidence"][0]["query_shared_words"], 10)
+
+    def test_target_insertion_is_excluded_from_copied_word_denominator(self):
+        text = "amber birch cedar inserted dahlia elm fir"
+        gold = {"target_span": [0, len(text)], "source_quote": "amber birch cedar dahlia elm fir"}
+        copied = copied_target_tokens(_tokens(text), gold)
+        self.assertEqual([t.value for t in copied], ["amber", "birch", "cedar", "dahlia", "elm", "fir"])
+        self.assertEqual(len(_tokens(text)), 7)
 
     def test_expected_source_url_is_counted_separately(self):
         self.case["expected_evidence"][0]["source_urls"] = ["https://mirror.example/essay"]
