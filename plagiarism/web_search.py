@@ -32,7 +32,7 @@ DISTINCTIVE_STRATEGY = "distinctive-paragraph-v1"
 HYBRID_STRATEGY = "hybrid-paragraph-v1"
 CITATION_STRATEGY = "hybrid-citation-v2"
 COVERAGE_STRATEGY = "hybrid-paragraph-v3"
-DEFAULT_QUERY_STRATEGY = COVERAGE_STRATEGY
+DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
     "fetch_timeout": "Сайт не ответил за отведённое время.",
