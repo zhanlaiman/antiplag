@@ -66,7 +66,7 @@ def main():
         search, pages = Search(), Pages()
         report = web.run(fresh["text"], "offline-D20-diagnosis", searcher=search, fetcher=pages,
             query_strategy=fresh["web"]["query_strategy"], url_strategy=strategy,
-            use_named_references=fresh["web"]["named_references_enabled"])
+            use_named_references=fresh["web"]["named_references_enabled"], use_zero_fallback=False)
         dump(OUT / (strategy + ".json"), report)
         rows.append({"url_strategy": strategy, "matched_words": report["stats"]["matched_words"],
             "missing_page_captures": pages.missing, "same_attempted_order_as_fresh": report["web"]["attempted_urls"] == fresh["web"]["attempted_urls"],

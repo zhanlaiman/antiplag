@@ -86,7 +86,7 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
             "assignments": assignments, "authored_bases": {"A": base},
             "authored_controls": {cid: base for cid in probe.IDS[6:]}}
         configuration = {"choice_sha256": "authored-choice", "code_sha256": {},
-                         "choice": {"query_strategy": probe.web.DENSE_STRATEGY}}
+                         "choice": {"query_strategy": probe.web.DENSE_STRATEGY, "zero_fallback": False}}
         page = {"id": "authored-source", "url": "https://example.test/authored", "title": "Authored", "text": source}
         with patch.object(probe, "OUT", self.root), patch.object(probe, "metadata", return_value=plan), \
                 patch.object(probe, "check_freeze", return_value=configuration), \
@@ -257,8 +257,52 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     probe.account_calls(self.root, run, cases, plans, reports)
 
+    def test_zero_choice_is_required_boolean_and_passed_under_production_name(self):
+        base = {"query_strategy": "authored-query", "url_strategy": "authored-path", "named_references": True}
+        for invalid in ({}, {"zero_fallback": None}, {"zero_fallback": 0}, {"zero_fallback": 1}, {"zero_fallback": "true"}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "boolean zero_fallback"):
+                probe.execution_options({**base, **invalid})
+        for enabled in (False, True):
+            options = probe.execution_options({**base, "zero_fallback": enabled})
+            self.assertIs(options["use_zero_fallback"], enabled)
+            self.assertNotIn("zero_fallback", options)
+            received = Mock()
+            received(**options)
+            self.assertIs(received.call_args.kwargs["use_zero_fallback"], enabled)
+
+    def test_zero_report_flag_and_physical_bounds_are_frozen(self):
+        base = {"query_strategy": "authored-query", "url_strategy": "authored-path", "named_references": False,
+                "matcher_version": "authored-matcher"}
+        for enabled, cap in ((False, 12), (True, 24)):
+            choice = {**base, "zero_fallback": enabled}
+            meta = {"query_strategy": base["query_strategy"], "url_strategy": base["url_strategy"],
+                "named_references_enabled": False, "matcher_version": base["matcher_version"],
+                "zero_fallback_enabled": enabled, "urls_attempted": cap}
+            probe.validate_report_variant({"web": meta}, choice)
+            for change in ({"zero_fallback_enabled": not enabled}, {"zero_fallback_enabled": int(enabled)},
+                           {"urls_attempted": cap + 1}, {"urls_attempted": -1}, {"urls_attempted": True}):
+                with self.subTest(enabled=enabled, change=change), self.assertRaises(ValueError):
+                    probe.validate_report_variant({"web": {**meta, **change}}, choice)
+            old = {k:v for k,v in meta.items() if k != "zero_fallback_enabled"}
+            with self.assertRaises(ValueError):
+                probe.validate_report_variant({"web": old}, choice)
+
+    def test_old_choice_without_zero_flag_cannot_reveal_sources(self):
+        choice_path = self.root / "choice.json"
+        choice = {"frozen": True, "git_head": "a" * 40, "plan_sha256": probe.PLAN_SHA,
+            "amendment_sha256": probe.AMENDMENT_SHA, "matcher_version": probe.MATCHER_VERSION,
+            "html_extraction_version": probe.HTML_EXTRACTION_VERSION, "query_strategy": probe.web.DENSE_STRATEGY,
+            "url_strategy": probe.web.PATH_URL_STRATEGY, "named_references": True, "pdf_alternative_engine": "pdfium",
+            "frozen_at": "2026-01-01T00:00:00Z"}
+        choice_path.write_text(json.dumps(choice))
+        with patch.object(probe, "CHOICE", choice_path), patch.object(probe, "metadata", return_value={}), \
+                patch.object(probe.subprocess, "check_output", return_value="a" * 40), \
+                patch.object(probe, "checked_source", side_effect=AssertionError("old choice must not reveal")):
+            with self.assertRaisesRegex(ValueError, "boolean zero_fallback"):
+                probe.reveal("a" * 40)
     def test_score_only_uses_own_reports_without_reservations_plans_or_network(self):
-        choice = {"query_strategy": "authored", "url_strategy": "authored", "matcher_version": "authored", "named_references": False}
+        choice = {"query_strategy": "authored", "url_strategy": "authored", "matcher_version": "authored", "named_references": False,
+                  "zero_fallback": False}
         text, cases = "One authored sentence with seven separate words.", []
         for index, cid in enumerate(probe.IDS):
             case = {"id": cid, "text_sha256": sha256(text.encode()).hexdigest(), "control": index >= 6,
@@ -267,6 +311,7 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
             report = {"id": str(index) * 32, "text": text, "scope": "web_search", "sources": [], "matches": [],
                 "web": {"query_strategy": "authored", "url_strategy": "authored", "matcher_version": "authored",
                     "named_references_enabled": False, "queries_attempted": 6, "sources_checked": 0,
+                    "zero_fallback_enabled": False, "urls_attempted": 0,
                     "discovered_urls": [], "errors": [], "status": "partial"}, "stats": {"uniqueness_percent": None}}
             if index in {0, 7}:
                 url = "https://example.test/mirror" if index == 0 else "https://example.test/authored"
@@ -275,6 +320,7 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
                     "start": 0, "end": len(text), "source_start": 0, "source_end": len(text),
                     "excerpt": text, "source_excerpt": text}]
                 report["web"]["sources_checked"] = 1
+                report["web"]["urls_attempted"] = 1
             probe.dump(self.root / (cid + ".json"), report)
         local = {"cases": [{"id": cid, "plans": {"selected": [{"query": f'"Authored query {index} for {cid}"'}
                   for index in range(6)]}} for cid in probe.IDS]}
@@ -303,6 +349,16 @@ class UnfamiliarQueryV2Guards(unittest.TestCase):
         self.assertEqual(result["summary"]["queries_in_completed_reports"], 48)
         self.assertFalse(result["summary"]["provider_credit_usage_complete"])
         self.assertIsNone(result["summary"]["total_basic_credits"])
+        # Repeat scoring must reject a choice/report flag disagreement before
+        # any source read, replan or network activity.
+        changed = {**run, "configuration": {"choice": {**choice, "zero_fallback": True}}}
+        with patch.object(probe, "OUT", self.root), patch.object(probe, "load_run", return_value=changed), \
+                patch.object(probe, "checked_json", side_effect=lambda path, _: local if path.name == "local-first-use.json" else {"cases": cases}), \
+                patch.object(probe, "checked_source", side_effect=AssertionError("no source")), \
+                patch.object(probe.web, "plan_queries", side_effect=AssertionError("no replan")), \
+                patch.object(probe, "quota", side_effect=AssertionError("no network")):
+            with self.assertRaisesRegex(ValueError, "zero-fallback flag"):
+                probe.score_only()
 
 
 if __name__ == "__main__":

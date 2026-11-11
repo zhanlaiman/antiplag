@@ -177,7 +177,7 @@ class WebSearchTests(unittest.TestCase):
                         'Другой материал посвящён морским глубинам, кораблям и холодным течениям.'}
 
         pages = Corpus()
-        report = web_search.run(text, searcher=Batches(), fetcher=pages)
+        report = web_search.run(text, searcher=Batches(), fetcher=pages, use_zero_fallback=False)
         self.assertEqual(len(pages.calls), 12)
         self.assertNotIn(unvisited, pages.calls)
         self.assertEqual(report['web']['status'], 'partial')

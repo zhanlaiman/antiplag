@@ -332,6 +332,9 @@ def main():
     if len(set(ids)) != len(ids) or any(cid not in {c["id"] for c in cases} for cid in ids):
         parser.error("Choose unique D01–D30 cases only")
     strategy = args.query_strategy or run["query_strategy"]
+    # These two accepted historical runs predate named references and ZERO.
+    # A missing URL field meant the then-current domain round-robin policy.
+    url_strategy = args.url_strategy or run.get("url_strategy") or web_search.DOMAIN_URL_STRATEGY
     if args.url_strategy and "url_strategy" not in inspect.signature(web_search.run).parameters:
         parser.error("This code version does not expose run(url_strategy=...)")
     if args.url_strategy and hasattr(web_search, "_fetch_order"):
@@ -343,7 +346,8 @@ def main():
     out.mkdir(mode=0o700, exist_ok=False)
     pool, origins, known_links = load_source_pool()
     invocation = {"id": uuid4().hex, "created_at": datetime.now(timezone.utc).isoformat(), "case_ids": ids,
-        "query_strategy": strategy, "url_strategy": args.url_strategy,
+        "query_strategy": strategy, "url_strategy": url_strategy,
+        "named_references": False, "zero_fallback": False,
         "frozen_search_run": str(saved.relative_to(ROOT)), "source_snapshot_reports": origins,
         "fill_missing_pages": args.fill_missing_pages, "refresh_missing_links": args.refresh_missing_links,
         "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
@@ -360,9 +364,8 @@ def main():
         search = FrozenSearch(records)
         pages = CachedPages(pool, search.allowed_urls, fill_missing=args.fill_missing_pages,
                             refresh_missing_links=args.refresh_missing_links, known_parent_links=known_links.get(cid))
-        options = {"query_strategy": strategy}
-        if args.url_strategy:
-            options["url_strategy"] = args.url_strategy
+        options = {"query_strategy": strategy, "url_strategy": url_strategy,
+                   "use_named_references": False, "use_zero_fallback": False}
         identifier = sha256((invocation["id"] + cid).encode()).hexdigest()[:32]
         report = web_search.run(text, identifier, searcher=search, fetcher=pages, **options)
         report.update(id=identifier, created_at=datetime.now(timezone.utc).isoformat())

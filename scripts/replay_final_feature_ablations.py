@@ -182,7 +182,7 @@ def main():
             identifier = sha256(("final-feature-ablation-v1\0" + cid + "\0" + policy).encode()).hexdigest()[:32]
             report = web_search.run(text, request_id=identifier, searcher=search, fetcher=pages,
                 query_strategy=web_search.DENSE_STRATEGY, url_strategy=web_search.PATH_URL_STRATEGY,
-                use_named_references=named_enabled)
+                use_named_references=named_enabled, use_zero_fallback=False)
             if denied or pages.fresh_attempts or search.missing_queries or pages.validation_errors:
                 raise ValueError("Frozen-data guarantee violated")
             if report["web"]["urls_attempted"] > 12 or report["web"]["queries_attempted"] > 6:

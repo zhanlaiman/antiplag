@@ -159,7 +159,8 @@ def main():
         token = active_variant.set(variant)
         try:
             report = original_run(value, request_id=request_id, progress=progress, searcher=RecordingSearch(),
-                query_strategy=web.CITATION_STRATEGY, url_strategy=web.DOMAIN_URL_STRATEGY)
+                query_strategy=web.CITATION_STRATEGY, url_strategy=web.DOMAIN_URL_STRATEGY,
+                use_named_references=False, use_zero_fallback=False)
         finally:
             active_variant.reset(token)
         report["web"]["query_strategy"] = VARIANTS[variant]

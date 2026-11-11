@@ -273,7 +273,7 @@ class RelatedPageTests(unittest.TestCase):
         self.assertEqual(report["web"]["priority_link_replacements"], 2)
         self.assertEqual(report["web"]["priority_link_budget_remaining"], 1)
 
-    def test_link_discovery_cannot_exceed_twelve_loads(self):
+    def test_link_discovery_cannot_exceed_twelve_loads_when_extra_phase_is_disabled(self):
         from plagiarism.web_search import CITATION_STRATEGY
         class Search:
             def search(self, query, request_id):
@@ -287,7 +287,7 @@ class RelatedPageTests(unittest.TestCase):
                         "links": [{"url": "https://source.test/extra", "text": "Обсерватории"}]}
         pages = Pages()
         report = run("Исследователь изучил старинные чертежи большой обсерватории перед поездкой.", searcher=Search(),
-                     fetcher=pages, query_strategy=CITATION_STRATEGY)
+                     fetcher=pages, query_strategy=CITATION_STRATEGY, use_zero_fallback=False)
         self.assertEqual(len(pages.calls), 12)
         self.assertEqual(len(report["web"]["link_discoveries"]), 1)
         self.assertEqual(pages.calls[1], "https://source.test/extra")

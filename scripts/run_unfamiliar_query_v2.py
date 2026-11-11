@@ -73,6 +73,30 @@ def code_hashes():
     return {str(p.relative_to(ROOT)): sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
+def zero_fallback(choice):
+    value = choice.get("zero_fallback")
+    if type(value) is not bool:
+        raise ValueError("Frozen choice requires an explicit boolean zero_fallback")
+    return value
+
+
+def execution_options(choice):
+    return {"query_strategy": choice["query_strategy"], "url_strategy": choice["url_strategy"],
+            "use_named_references": choice["named_references"], "use_zero_fallback": zero_fallback(choice)}
+
+
+def validate_report_variant(report, choice):
+    enabled = zero_fallback(choice)
+    meta = report.get("web")
+    if (not isinstance(meta, dict) or any(meta.get(key) != choice[value] for key, value in (
+            ("query_strategy", "query_strategy"), ("url_strategy", "url_strategy"),
+            ("matcher_version", "matcher_version"), ("named_references_enabled", "named_references")))
+            or meta.get("zero_fallback_enabled") is not enabled
+            or type(meta.get("urls_attempted")) is not int
+            or not 0 <= meta["urls_attempted"] <= (24 if enabled else 12)):
+        raise ValueError("Saved report differs from frozen variant, zero-fallback flag or physical URL bound")
+
+
 def check_freeze(expected_head):
     """Must complete before any source file or source-bearing response is read."""
     if not isinstance(expected_head, str) or not re.fullmatch(r"[a-f0-9]{40}", expected_head):
@@ -87,6 +111,7 @@ def check_freeze(expected_head):
                 "html_extraction_version": HTML_EXTRACTION_VERSION}
     if any(choice.get(k) != v for k, v in required.items()):
         raise ValueError("Complete variant has not been explicitly frozen")
+    zero_fallback(choice)
     if (choice.get("query_strategy") not in {web.CITATION_STRATEGY, web.DENSE_STRATEGY}
             or choice.get("url_strategy") not in {web.DOMAIN_URL_STRATEGY, web.BALANCED_URL_STRATEGY, web.PATH_URL_STRATEGY}
             or type(choice.get("named_references")) is not bool
@@ -236,6 +261,7 @@ def reveal(expected_head):
 
 def load_run():
     run = json.loads((OUT / "run.json").read_text())
+    zero_fallback(run["configuration"]["choice"])
     manifest = checked_json(OUT / "manifest.json", run["manifest_sha256"])
     local = checked_json(OUT / "local-first-use.json", run["local_sha256"])
     if (tuple(c["id"] for c in manifest["cases"]) != IDS
@@ -344,8 +370,12 @@ def account_calls(out, run, cases, plans, report_rows):
 class RecordedSearch:
     provider = "tavily"
 
-    def __init__(self, real, out, allowed):
+    def __init__(self, real, out, allowed, *, max_queries=MAX_QUERIES, max_per_document=MAX_PER_DOCUMENT):
+        if (type(max_queries) is not int or not 1 <= max_queries <= MAX_QUERIES
+                or type(max_per_document) is not int or not 1 <= max_per_document <= MAX_PER_DOCUMENT):
+            raise ValueError("Explicit provider caps must stay within the frozen bounds")
         self.real, self.out, self.allowed = real, out, allowed
+        self.max_queries, self.max_per_document = max_queries, max_per_document
 
     def search(self, query, call_id):
         expected = self.allowed.get(call_id)
@@ -355,7 +385,7 @@ class RecordedSearch:
         if path.exists():
             raise RuntimeError("A submitted provider call is never automatically repeated")
         records = [json.loads(p.read_text()) for p in self.out.glob("*-search.json")]
-        if len(records) >= MAX_QUERIES or sum(r["case_id"] == expected["case_id"] for r in records) >= MAX_PER_DOCUMENT:
+        if len(records) >= self.max_queries or sum(r["case_id"] == expected["case_id"] for r in records) >= self.max_per_document:
             raise RuntimeError("Frozen provider-call cap exhausted")
         record = {"request_id": call_id, **expected, "search_depth": "basic", "state": "submitted", "submitted_at": now()}
         dump(path, record)
@@ -435,8 +465,7 @@ def live(expected_head):
     else:
         os.environ["ISTOK_PDF_ALTERNATIVE_ENGINE"] = choice["pdf_alternative_engine"]
     web.run = partial(original, searcher=RecordedSearch(TavilySearch(web.SearchBudget()), OUT, allowed), fetcher=pages,
-                      query_strategy=choice["query_strategy"], url_strategy=choice["url_strategy"],
-                      use_named_references=choice["named_references"])
+                      **execution_options(choice))
     service = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     service.saas, service.store, service.jobs = None, Store(), Jobs()
     Thread(target=service.serve_forever, daemon=True).start()
@@ -479,12 +508,8 @@ def live(expected_head):
                 dump(OUT / (cid + "-error.json"), job)
                 print(cid, "terminal failure", flush=True)
                 continue
-            if (report["text"] != text or report["web"]["queries_attempted"] > len(plans[cid])
-                    or report["web"]["urls_attempted"] > 12
-                    or report["web"]["query_strategy"] != choice["query_strategy"]
-                    or report["web"]["url_strategy"] != choice["url_strategy"]
-                    or report["web"]["named_references_enabled"] != choice["named_references"]
-                    or report["web"]["matcher_version"] != choice["matcher_version"]):
+            validate_report_variant(report, choice)
+            if report["text"] != text or report["web"]["queries_attempted"] > len(plans[cid]):
                 raise ValueError("Saved report differs from frozen execution bounds")
             dump(path, report)
             print(cid, "queries", report["web"]["queries_attempted"], "pages", report["web"]["sources_checked"],
@@ -518,10 +543,7 @@ def score_only():
             rows.append({"id": cid, "status": "failed", "reason": json.loads(error.read_text())})
             continue
         report = json.loads(path.read_text())
-        if any(report["web"].get(k) != choice[v] for k, v in (
-                ("query_strategy", "query_strategy"), ("url_strategy", "url_strategy"),
-                ("matcher_version", "matcher_version"), ("named_references_enabled", "named_references"))):
-            raise ValueError("Saved report differs from the frozen variant")
+        validate_report_variant(report, choice)
         checked = _report(report, case)
         evidence = []
         for gold in case["expected_evidence"]:

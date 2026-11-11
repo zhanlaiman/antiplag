@@ -155,7 +155,8 @@ def main():
                 rank = current_rank if variant == "current" else lambda ordered, submitted: rank_with_rule(ordered, submitted, rule)
                 with patch.object(web, "_rank_url_paths", rank):
                     report = web.run(text, request_id="suffix-offline-" + cid, searcher=search, fetcher=pages,
-                        query_strategy=web.DENSE_STRATEGY, url_strategy=web.PATH_URL_STRATEGY, use_named_references=True)
+                        query_strategy=web.DENSE_STRATEGY, url_strategy=web.PATH_URL_STRATEGY,
+                        use_named_references=True, use_zero_fallback=False)
                 if denied or search.missing_queries or pages.fresh_attempts or pages.validation_errors:
                     raise ValueError("Frozen replay guarantee failed")
                 report.update(id=sha256((cohort + cid + variant).encode()).hexdigest()[:32], created_at=datetime.now(timezone.utc).isoformat())

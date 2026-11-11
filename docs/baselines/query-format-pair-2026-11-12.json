@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "preregistered_at": "2026-11-11T21:22:52.169285+00:00",
+  "hypothesis": "Remove only two outer ASCII quotation marks from each existing DENSE query; preserve every word, target span, order and query count.",
+  "diagnostic_spec": [
+    {
+      "case_id": "D01",
+      "zero_based_query_index": 1
+    },
+    {
+      "case_id": "D02",
+      "zero_based_query_index": 1
+    },
+    {
+      "case_id": "D20",
+      "zero_based_query_index": 0
+    }
+  ],
+  "formats": [
+    "quoted",
+    "unquoted"
+  ],
+  "maximum_total_basic_calls": 6,
+  "maximum_basic_calls_per_job": 1,
+  "normal_http_queue": true,
+  "utf8_json_body": true,
+  "stable_ids_and_get_first_resume": true,
+  "fresh_zero_paygo_free_quota_required_before_post": true,
+  "no_current_live_authorization": true,
+  "gold_urls_or_labels_passed_to_backend": false,
+  "production_default_changed": false,
+  "local_invariance_proved_by_transformation": true,
+  "authored_matrix_documents": 13,
+  "actual_live_queries": 0,
+  "actual_live_fetches": 0,
+  "source_scope": "Only selected DEV inputs for preparation; final70 and untouched RFCs remain closed.",
+  "prepared_manifest_sha256": "73a4bd8c3ee7f7062166e9bdf91d3edbfbde3b5b66aca203b621f32141ec8151"
+}

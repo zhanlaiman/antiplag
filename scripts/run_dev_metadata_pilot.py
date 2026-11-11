@@ -352,7 +352,7 @@ def candidate_run(original, out, run, searcher, real_pages, text, request_id, pr
     try:
         result = original(text, request_id, progress=progress, searcher=searcher,
             fetcher=RecordingPages(out, cid, real_pages, searcher.real.key), query_strategy=web.DENSE_STRATEGY,
-            url_strategy=web.BALANCED_URL_STRATEGY, use_named_references=False)
+            url_strategy=web.BALANCED_URL_STRATEGY, use_named_references=False, use_zero_fallback=False)
     finally:
         web._fetch_order = original_order
     result["web"].update(url_strategy=STRATEGY, experimental_strategy=STRATEGY,
@@ -434,7 +434,8 @@ def replay_baseline(out, run, cid, text, original=web.run):
             return record["fetched"]
 
     report = original(text, config["request_ids"][cid], searcher=Search(), fetcher=Pages(),
-        query_strategy=web.DENSE_STRATEGY, url_strategy=web.PATH_URL_STRATEGY, use_named_references=False)
+        query_strategy=web.DENSE_STRATEGY, url_strategy=web.PATH_URL_STRATEGY,
+        use_named_references=False, use_zero_fallback=False)
     report["web"].update(replay="same-frozen-search-replies-and-fetches", unknown_unfetched_urls=unknown,
         page_refills_allowed=False, conditional_on_saved_pages=True, frozen_query_plan=config["query_plans"][cid])
     if unknown:

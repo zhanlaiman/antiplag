@@ -100,7 +100,7 @@ def main():
         search = FrozenSearch(new_records)
         pages = Outcomes(deepcopy(pool), search.allowed_urls, cache_directory=OUT / "no-page-cache",
                          fill_missing=False, refresh_missing_links=False, failed=failed)
-        options = {"use_named_references": True} if module is web_search else {}
+        options = {"use_named_references": True, "use_zero_fallback": False} if module is web_search else {}
         report = module.run(text, request_id=sha256(policy.encode()).hexdigest()[:32],
             searcher=search, fetcher=pages, query_strategy=module.DENSE_STRATEGY, url_strategy=strategy, **options)
         if denied or pages.fresh_attempts or search.missing_queries:

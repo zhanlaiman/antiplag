@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.analyze_web_dev_checks import inspect, compare
 from scripts.dev_report_provenance import cohort_configuration, report_provenance
+from scripts.metadata_pilot_accounting import collect as metadata_pilot_expenses
 from scripts.run_dev_query_probe import dump
 
 BASE = ROOT / "data/private/web-evaluation"
@@ -44,6 +45,15 @@ EXPENSE_REPORTS = (
     ("query_first_use", "query-unfamiliar-first-use-v1", tuple(f"QH{i:02d}.json" for i in range(1, 9))),
     ("final_controls", "dev-final-control-live-v1", ("D07.json", "D10.json", "D13.json")),
 )
+
+
+def diagnostic_pilot_expenses(base, root):
+    # Lazy import avoids a module cycle through the format pilot's shared DEV
+    # key constant. Neither collector reads corpus inputs or initializes APIs.
+    from scripts.query_format_accounting import collect as query_format_expenses
+    metadata_rows, metadata_hashes = metadata_pilot_expenses(base, root)
+    format_rows, format_hashes = query_format_expenses(base, root)
+    return metadata_rows + format_rows, {**metadata_hashes, **format_hashes}
 
 
 def source_pair_transitions(before, after):
@@ -263,6 +273,9 @@ def build():
             source_files.add(str(path.relative_to(ROOT)))
         expenses.append({"series": label, "saved_documents": len(filenames), "query_attempts": attempts})
     expenses.extend(batch_expenses)
+    diagnostic_expenses, diagnostic_hashes = diagnostic_pilot_expenses(BASE, ROOT)
+    expenses.extend(diagnostic_expenses)
+    source_files.update(diagnostic_hashes)
     quota_candidates = []
     for directory in ("dev-final-control-live-v1", *(name for name, _ in ALL_BATCHES)):
         for filename in ("quota-before.json", "quota-after.json"):
@@ -271,6 +284,10 @@ def build():
                 continue
             q = json.loads(path.read_text())
             source_files.add(str(path.relative_to(ROOT)))
+            if "local_monthly_attempts" in q and "paygo_usage" in q:
+                quota_candidates.append((q.get("checked_at", ""), q))
+    for row in diagnostic_expenses:
+        for q in row["quota_observations"].values():
             if "local_monthly_attempts" in q and "paygo_usage" in q:
                 quota_candidates.append((q.get("checked_at", ""), q))
     quota = max(quota_candidates, key=lambda item: item[0])[1]

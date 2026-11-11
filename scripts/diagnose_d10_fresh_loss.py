@@ -89,7 +89,7 @@ def main():
         pages, search = Pages(), Search()
         replay = web.run(fresh["text"], "offline-D10-rank-diagnosis", searcher=search, fetcher=pages,
                          query_strategy=fresh["web"]["query_strategy"], url_strategy=strategy,
-                         use_named_references=fresh["web"]["named_references_enabled"])
+                         use_named_references=fresh["web"]["named_references_enabled"], use_zero_fallback=False)
         if search.count != 6:
             raise ValueError("Replay did not use exactly the saved six responses")
         dump(OUT / (strategy + ".json"), replay)

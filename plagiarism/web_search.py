@@ -40,8 +40,12 @@ DEFAULT_QUERY_STRATEGY = DENSE_STRATEGY
 DOMAIN_URL_STRATEGY = "domain-round-robin-v1"
 BALANCED_URL_STRATEGY = "hybrid-domain-query-v2"
 PATH_URL_STRATEGY = "hybrid-input-path-v3"
-DEFAULT_URL_STRATEGY = BALANCED_URL_STRATEGY
-DEFAULT_NAMED_REFERENCES = False
+DEFAULT_URL_STRATEGY = PATH_URL_STRATEGY
+DEFAULT_NAMED_REFERENCES = True
+DEFAULT_ZERO_FALLBACK = True
+ZERO_FALLBACK_POLICY = "initial-zero-extra-twelve-v1"
+ZERO_FALLBACK_EXTRA_URLS = 12
+ZERO_FALLBACK_SECONDS = 300
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
     "fetch_timeout": "Сайт не ответил за отведённое время.",
@@ -237,8 +241,10 @@ def status():
              if provider == "tavily" else
              "Поиск по интернету ещё не подключён. Нужны ключ Brave и подтверждённые условия хранения результатов."
              if provider == "brave" else "Выбранный поисковый сервис недоступен.")
+    zero_fallback = os.environ.get("ISTOK_WEB_ZERO_FALLBACK", "1" if DEFAULT_ZERO_FALLBACK else "0") == "1"
     return {"provider": provider, "configured": configured,
-            "max_queries": MAX_QUERIES, "max_urls": MAX_URLS,
+            "max_queries": MAX_QUERIES, "max_urls": MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if zero_fallback else MAX_URLS,
+            "max_initial_urls": MAX_URLS, "zero_fallback_enabled": zero_fallback,
             "error": None if configured else error}
 
 
@@ -472,7 +478,7 @@ def _rank_url_paths(ordered, text):
 
 
 def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None,
-        use_named_references=None):
+        use_named_references=None, use_zero_fallback=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
     This is a first lexical web search, not a guarantee over every internet page.
@@ -490,6 +496,14 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         use_named_references = DEFAULT_NAMED_REFERENCES if configured is None else configured == "1"
     if type(use_named_references) is not bool:
         raise ValueError("Неверная настройка указанных в тексте источников.")
+    if use_zero_fallback is None:
+        configured = os.environ.get("ISTOK_WEB_ZERO_FALLBACK")
+        if configured not in (None, "0", "1"):
+            raise ValueError("Неверная настройка дополнительного чтения страниц.")
+        use_zero_fallback = DEFAULT_ZERO_FALLBACK if configured is None else configured == "1"
+    if type(use_zero_fallback) is not bool:
+        raise ValueError("Неверная настройка дополнительного чтения страниц.")
+    max_page_attempts = MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if use_zero_fallback else MAX_URLS
     if query_strategy is None:
         query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
@@ -551,6 +565,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 stopped_code = error.code
                 break
     queries_unattempted = len(queries) - queries_attempted
+    # Preserve the complete search-only PATH order before references, the
+    # twelve-page prefix, and productive-link replacements change its queue.
+    fallback_search_order = (_rank_url_paths(_fetch_order(urls, query_groups, PATH_URL_STRATEGY), text)
+                             if use_zero_fallback else [])
     input_references = extract_named_references(text) if use_named_references else []
     reference_urls = [reference["url"] for reference in input_references]
     for url in reference_urls:
@@ -577,7 +595,39 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     priority_link_replacements = 0
     priority_link_credit, priority_link_urls = 1, set()
     confirmed_matches, fully_covered = [], False
-    for index, url in enumerate(ordered):
+    zero_phase = {"triggered": False, "grounded_initial_words": None,
+                  "in_extra_phase": False, "extra_attempts": 0, "deadline_reached": False, "prefix_sources": []}
+
+    def reading_queue():
+        # Two phases preserve the original mutable prefix. A handled final
+        # fetch failure or continue resumes this generator; an unhandled
+        # exception leaves the function without opening another phase.
+        yield from enumerate(ordered)
+        if not use_zero_fallback:
+            return
+        zero_phase["prefix_sources"] = list(sources) + list(supplements)
+        gate = analyze_with_supplements(text, sources, supplements)
+        zero_phase["grounded_initial_words"] = _word_coverage(text, gate["matches"])["matched_words"]
+        if zero_phase["grounded_initial_words"]:
+            return
+        zero_phase["triggered"] = True
+        zero_phase["in_extra_phase"] = True
+        from plagiarism.web_fetch import TOTAL_TIMEOUT
+        for candidate in fallback_search_order:
+            if candidate in attempted_urls or candidate in final_urls:
+                continue
+            if zero_phase["extra_attempts"] >= ZERO_FALLBACK_EXTRA_URLS or urls_attempted >= max_page_attempts:
+                break
+            if time.monotonic() - started + TOTAL_TIMEOUT > ZERO_FALLBACK_SECONDS:
+                zero_phase["deadline_reached"] = True
+                errors.append({"stage": "limit", "code": "extra_fetch_time_budget_reached",
+                    "message": "Дополнительное чтение остановлено из-за общего времени проверки."})
+                break
+            ordered.append(candidate)
+            zero_phase["extra_attempts"] += 1
+            yield len(ordered) - 1, candidate
+
+    for index, url in reading_queue():
         if progress:
             progress("Сверяем доступные страницы", index, len(ordered), phase="web_fetch")
         try:
@@ -615,7 +665,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 if url in priority_link_urls and linked_coverage["matched_words"] > previous_link_words:
                     priority_link_credit = 1
                 fully_covered = linked_coverage["matched_words"] == linked_coverage["total_words"]
-            if query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and not fully_covered:
+            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and not fully_covered:
                 page_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)
@@ -657,6 +707,16 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
             code = getattr(error, "code", "fetch_error")
             errors.append({"stage": "fetch", "url": url, "code": code,
                            "message": FETCH_FAILURE_MESSAGES.get(code, "Страница недоступна или не разрешает автоматическую загрузку.")})
+    if zero_phase["triggered"]:
+        # Failed attempts stay attempts; unrequested search/link/reference URLs
+        # remain outside the checked scope. Redirect aliases already read do not.
+        skipped_urls = list(dict.fromkeys(url for url in urls
+            if url not in attempted_urls and url not in final_urls))
+        outside_limit = len(skipped_urls)
+        errors = [error for error in errors if error.get("code") != "url_limit_reached"]
+        if outside_limit:
+            errors.append({"stage": "limit", "code": "url_limit_reached", "count": outside_limit,
+                           "message": "Часть найденных ссылок не проверена из-за лимита загрузок."})
     if not sources:
         errors.append({"stage": "coverage", "code": "no_sources_checked",
                        "message": "Не проверено ни одного источника. Уникальность не установлена."})
@@ -671,9 +731,21 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         result["stats"]["uniqueness_upper_bound_percent"] = ((1000 * unmatched + total - 1) // total) / 10
     from plagiarism import pdf_source, web_fetch
 
-    result.update(text=text, sources=sources + supplements, scope="web_search", web={
+    source_snapshots = sources + supplements
+    if zero_phase["triggered"]:
+        prefix_ids = {source["id"] for source in zero_phase["prefix_sources"]}
+        source_snapshots = zero_phase["prefix_sources"] + [source for source in source_snapshots if source["id"] not in prefix_ids]
+    result.update(text=text, sources=source_snapshots, scope="web_search", web={
         "provider": provider, "status": "complete" if complete else "partial",
         "query_strategy": query_strategy, "url_strategy": url_strategy, "matcher_version": MATCHER_VERSION,
+        "zero_fallback_enabled": use_zero_fallback,
+        "zero_fallback_policy": ZERO_FALLBACK_POLICY if use_zero_fallback else None,
+        "zero_fallback_triggered": zero_phase["triggered"],
+        "zero_fallback_initial_exact_words": zero_phase["grounded_initial_words"],
+        "zero_fallback_extra_attempts": zero_phase["extra_attempts"],
+        "zero_fallback_deadline_reached": zero_phase["deadline_reached"],
+        "zero_fallback_total_budget_seconds": ZERO_FALLBACK_SECONDS if use_zero_fallback else None,
+        "max_page_attempts": max_page_attempts,
         "queries_planned": len(queries), "queries_attempted": queries_attempted, "queries_completed": queries_completed,
         "queries_unattempted": queries_unattempted, "query_stop_code": stopped_code,
         "query_spans": [{"start": item["start"], "end": item["end"]} for item in queries],
@@ -688,7 +760,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "source_followup_policy": SOURCE_FOLLOWUP_POLICY,
         "priority_link_budget_remaining": priority_link_credit,
         "discovered_urls": list(dict.fromkeys(urls[:30] + reference_urls + [link["url"] for link in link_discoveries])),
-        "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
+        "attempted_urls": attempted_urls[:max_page_attempts], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
         "supplemental_text_views": len(supplements),
         "pdf_evidence_policy": PDF_EVIDENCE_POLICY if supplements else None,
@@ -701,7 +773,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
             "total_timeout_seconds": web_fetch.TOTAL_TIMEOUT, "pdf_max_pages": pdf_source.MAX_PAGES,
             "pdf_timeout_seconds": pdf_source.MAX_SECONDS},
         "limitations": ["Оценка относится к найденным доступным страницам, а не ко всему интернету.",
-                        "Выполняется не более шести поисковых запросов и загрузка не более двенадцати страниц.",
+                        ("Выполняется не более шести поисковых запросов и загрузка не более двадцати четырёх страниц."
+                         if use_zero_fallback else "Выполняется не более шести поисковых запросов и загрузка не более двенадцати страниц."),
                         "Закрытые, неиндексируемые и недоступные материалы могут остаться незамеченными.",
                         "Пересказ и перевод требуют отдельной смысловой сверки; они не включены в этот процент."]})
     if not complete:

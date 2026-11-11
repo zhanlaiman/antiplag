@@ -48,7 +48,7 @@ def main():
         pages = CachedPages(deepcopy(pool), search.allowed_urls, cache_directory=PAGE_CACHE,
                             fill_missing=False, refresh_missing_links=False)
         report = web_search.run(text, searcher=search, fetcher=pages, query_strategy=web_search.DENSE_STRATEGY,
-                                url_strategy=args.url_strategy)
+                                url_strategy=args.url_strategy, use_named_references=False, use_zero_fallback=False)
         if denied or pages.fresh_attempts or search.missing_queries:
             raise ValueError("Verification attempted network or an unrecorded query")
         annotate_replay(report, search, pages, {"new_searches": 0, "query_identity": identity,

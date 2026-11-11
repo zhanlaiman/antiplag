@@ -93,9 +93,9 @@ class URLOrderTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ISTOK_WEB_URL_STRATEGY", None)
             previous = run(text, searcher=SavedSearch(), fetcher=previous_pages,
-                           query_strategy=CITATION_STRATEGY, url_strategy=DOMAIN_URL_STRATEGY)
+                           query_strategy=CITATION_STRATEGY, url_strategy=DOMAIN_URL_STRATEGY, use_zero_fallback=False)
             candidate = run(text, searcher=SavedSearch(), fetcher=candidate_pages,
-                            query_strategy=CITATION_STRATEGY, url_strategy=BALANCED_URL_STRATEGY)
+                            query_strategy=CITATION_STRATEGY, url_strategy=BALANCED_URL_STRATEGY, use_zero_fallback=False)
         self.assertEqual(previous["web"]["url_strategy"], DOMAIN_URL_STRATEGY)
         self.assertEqual(candidate["web"]["url_strategy"], BALANCED_URL_STRATEGY)
         self.assertEqual(len(previous_pages.calls), MAX_URLS)
