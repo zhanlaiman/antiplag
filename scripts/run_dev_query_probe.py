@@ -25,6 +25,17 @@ from urllib.request import Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+SOURCE_MODULES = ("plagiarism/web_search.py", "plagiarism/matching.py", "plagiarism/web_fetch.py",
+                  "plagiarism/pdf_source.py", "plagiarism/pdf_evidence.py", "plagiarism/input_references.py")
+
+
+def source_identity():
+    return {name: sha256((ROOT / name).read_bytes()).hexdigest() for name in SOURCE_MODULES}
+
+
+def confirm_new_call_identity(run, current_identity):
+    if run.get("source_code_sha256") != current_identity:
+        raise ValueError("New calls require the saved, unchanged source-code identity; recover prior identifiers without resubmitting.")
 
 
 def dump(path, value):
@@ -92,7 +103,7 @@ def main():
     from plagiarism.search_tavily import TavilySearch
     from plagiarism.storage import Store
     from plagiarism.saas import report_identifier
-    from plagiarism.web_fetch import Fetcher
+    from plagiarism.web_fetch import Fetcher, HTML_EXTRACTION_VERSION
 
     dev = ROOT / "data/private/web-evaluation/materials/dev-30"
     key = dev / "key.json"
@@ -122,11 +133,13 @@ def main():
     else:
         run = {**configuration, "id": sha256(args.run_name.encode()).hexdigest()[:32],
                "created_at": datetime.now(timezone.utc).isoformat(),
+               "source_code_sha256": source_identity(), "html_extraction_version": HTML_EXTRACTION_VERSION,
                "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}
         dump(manifest, run)
     unsent = [cid for cid in args.ids if not (out / (cid + ".json")).exists()
               and not (out / (cid + "-request.json")).exists()]
     if unsent:
+        confirm_new_call_identity(run, source_identity())
         dump(out / "quota-before.json", quota(sum(planned[cid] for cid in unsent)))
 
     real = TavilySearch(web_search.SearchBudget())

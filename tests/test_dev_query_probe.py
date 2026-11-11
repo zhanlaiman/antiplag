@@ -4,10 +4,17 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.run_dev_query_probe import confirmed_quota, saved_request_identifier
+from scripts.run_dev_query_probe import confirmed_quota, saved_request_identifier, confirm_new_call_identity
 
 
 class DevProbeSafetyTests(unittest.TestCase):
+    def test_changed_or_unknown_code_cannot_start_new_provider_calls(self):
+        original = {"matcher.py": "a" * 64, "fetcher.py": "b" * 64}
+        self.assertIsNone(confirm_new_call_identity({"source_code_sha256": original}, dict(original)))
+        for saved in ({}, {"source_code_sha256": {**original, "fetcher.py": "c" * 64}}):
+            with self.subTest(saved=saved), self.assertRaises(ValueError):
+                confirm_new_call_identity(saved, original)
+
     def account(self):
         return {"current_plan": "Researcher", "plan_usage": 100, "plan_limit": 1000,
                 "paygo_usage": 0, "paygo_limit": None}
