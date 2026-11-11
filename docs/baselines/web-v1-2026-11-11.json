@@ -1,0 +1,68 @@
+{
+  "baseline_id": "istok-web-baseline-2026-11-11-v1",
+  "git_tag": "istok-web-baseline-2026-11-11-v1",
+  "scope": "Internet lexical uniqueness prototype; not a measured accuracy claim",
+  "endpoint": {
+    "method": "POST",
+    "path": "/api/web-check-jobs",
+    "fields": [
+      "request_id",
+      "text",
+      "internet_consent"
+    ],
+    "gold_urls_passed": false
+  },
+  "query": {
+    "strategy": "uniform-quoted-v1",
+    "max_queries": 6,
+    "window_tokens": 10,
+    "one_window_per_tokens": 80,
+    "provider": "tavily",
+    "search_depth": "basic",
+    "auto_parameters": false,
+    "max_results_per_query": 5
+  },
+  "fetch": {
+    "max_urls": 12,
+    "max_wire_or_decompressed_bytes": 1048576,
+    "max_source_characters": 200000,
+    "request_timeout_seconds": 8,
+    "total_timeout_per_url_seconds": 20,
+    "max_redirects": 3,
+    "robots_respected": true
+  },
+  "pdf": {
+    "parser": "pypdf",
+    "version": "7.0.1",
+    "max_pages": 40,
+    "max_parse_seconds": 5,
+    "max_text_characters": 200000,
+    "ocr": false
+  },
+  "matching": {
+    "version": "lexical-v2-kind-aware-dedup",
+    "min_exact_tokens": 6,
+    "min_exact_characters": 35,
+    "web_percentage": "union of normalized exact word matches / all normalized words",
+    "similar_in_web_percentage": false,
+    "no_sources": "uniqueness unavailable",
+    "partial_upper_bound": "ceil of raw unmatched fraction to 0.1 percent"
+  },
+  "resources": {
+    "web_check_uses_gpu": false,
+    "global_search_attempt_cap_per_month": 900,
+    "saas_free_characters_per_day": 6000,
+    "saas_free_checks_per_day": 3,
+    "saas_model_budget_per_day": 60,
+    "embedding_batch_size": 12
+  },
+  "evaluation": {
+    "planned_cases": 100,
+    "dev_cases": 30,
+    "test_cases": 70,
+    "family_disjoint": true,
+    "reviewed_real_cases_available": 0,
+    "holdout_run_completed": false,
+    "synthetic_smokes_are_accuracy_evidence": false
+  }
+}

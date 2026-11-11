@@ -13,6 +13,7 @@ import unicodedata
 
 MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
+MATCHER_VERSION = "lexical-v2-kind-aware-dedup"
 MIN_WORDS = 6
 MIN_CHARACTERS = 35
 # These combining marks cover Cyrillic stress and Latin/Cyrillic diacritics.
@@ -201,7 +202,8 @@ def _similar_matches(text, source, target_tokens, source_tokens, exact):
 def _deduplicate(matches):
     selected = []
     for match in sorted(matches, key=lambda item: (item["start"], -item["end"])):
-        if any(previous["start"] <= match["start"] and previous["end"] >= match["end"] for previous in selected):
+        if any(previous["kind"] == match["kind"] and previous["start"] <= match["start"]
+               and previous["end"] >= match["end"] for previous in selected):
             continue
         selected.append(match)
     return selected

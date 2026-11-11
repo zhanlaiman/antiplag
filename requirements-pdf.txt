@@ -1,0 +1,3 @@
+# Optional text-only public PDF extraction. Official PyPI wheel, verified 2026-11-11.
+# https://pypi.org/project/pypdf/7.0.1/
+pypdf==7.0.1 --hash=sha256:6131b764b046282357037309e7ef2a1b7679d4a5c53eed3db2bfbf7c673ddc2b

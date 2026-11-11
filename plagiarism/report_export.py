@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from html import escape
+import math
 from urllib.parse import urlsplit
 
 
@@ -52,6 +53,45 @@ def _evidence(judgment, candidate):
     return _pair(judgment["evidence_text"], judgment["evidence_source"])
 
 
+def _web_summary(report, stats):
+    web = report.get("web") or {}
+    errors = web.get("errors") or []
+    checked = web.get("sources_checked", len(report.get("sources", [])))
+    have_sources = bool(report.get("sources")) and type(checked) is int and checked > 0
+    complete = web.get("status") == "complete" and not errors and have_sources
+    uniqueness = stats.get("uniqueness_percent") if complete else None
+    score = "Не установлена" if uniqueness is None else _text(uniqueness) + "%"
+    upper_bound = stats.get("uniqueness_upper_bound_percent")
+    has_bound = (web.get("status") == "partial" and have_sources and type(upper_bound) in (int, float)
+                 and math.isfinite(upper_bound) and 0 <= upper_bound <= 100)
+    headline = ("Уникальность не выше " + _text(format(upper_bound, "g")) + "%" if has_bound
+                else "Уникальность среди проверенных страниц: " + score)
+    status = "Завершена в пределах указанного охвата" if complete else "Частичная проверка — итоговая уникальность не установлена"
+    details = ('<p class="notice">Оценка относится к найденным доступным страницам, а не ко всему интернету. '
+               'Сходство не устанавливает направление копирования или нарушение правил. Корректная цитата может совпадать с источником.</p>'
+               '<p><strong>' + headline + '</strong>'
+               + (' <span class="meta">Проверка неполная</span>' if has_bound else "") + '</p>'
+               '<p>Статус: ' + status + '. Поисковых запросов выполнено: ' + _text(web.get("queries_completed", 0))
+               + ' из ' + _text(web.get("queries_planned", 0)) + '. Проверено страниц: '
+               + _text(web.get("sources_checked", len(report.get("sources", [])))) + '. Ошибок: ' + _text(len(errors)) + '.</p>'
+               '<p>Основа процента — доля слов в дословных совпадениях после нормализации: '
+               + _text(stats.get("matched_words", 0)) + ' из ' + _text(stats.get("total_words", 0))
+               + ' (' + _text(stats.get("matched_word_percent", 0)) + '%). Перекрывающиеся совпадения учитываются один раз. '
+               'Расчёт использует исходное число слов; проценты показаны с округлением. '
+               'Уникальность равна 100% минус эта доля. Похожие формулировки, пересказ и перевод в этот процент не входят. '
+               'Qwen не рассчитывает уникальность; её оценки пар приведены отдельно.</p>')
+    for limitation in web.get("limitations", []):
+        details += '<p class="notice">' + _text(limitation) + '</p>'
+    for error in errors:
+        if isinstance(error, dict):
+            details += ('<p class="notice">' + _text(error.get("stage", "")) + ' · ' + _text(error.get("code", ""))
+                        + ': ' + _text(error.get("message", "Ошибка проверки."))
+                        + (' ' + _link(error["url"], error["url"]) if error.get("url") else "") + '</p>')
+        else:
+            details += '<p class="notice">' + _text(error) + '</p>'
+    return details
+
+
 def render(report, reviews=None, retrieval=None, outcomes=()):
     """Return standalone HTML. This never fetches sources or invokes a model.
 
@@ -60,6 +100,7 @@ def render(report, reviews=None, retrieval=None, outcomes=()):
     """
     reviews = reviews or {}
     stats = report.get("stats", {})
+    is_web = report.get("scope") == "web_search"
     matches = report.get("matches", [])
     chunks = []
     for index, match in enumerate(matches, 1):
@@ -73,6 +114,8 @@ def render(report, reviews=None, retrieval=None, outcomes=()):
                       + '</strong></p>' + ('<p class="preserve">' + _text(review["comment"]) + '</p>' if review.get("comment") else "")
                       + '</article>')
     lexical = ''.join(chunks) or '<p>Лексических совпадений в выбранной библиотеке не найдено. Это не исключает пересказов и источников за её пределами.</p>'
+    if is_web and not chunks:
+        lexical = '<p>Совпадений среди сохранённых страниц не найдено. Это не исключает пересказов и совпадений с другими источниками.</p>'
 
     semantic = '<p>Поиск кандидатов для этого отчёта не сохранён. Смысловая проверка не подтверждена.</p>'
     if retrieval:
@@ -108,12 +151,29 @@ def render(report, reviews=None, retrieval=None, outcomes=()):
     bibliography = []
     for source in report.get("sources", []):
         provenance = source.get("provenance") or {}
+        snapshot = ""
+        if is_web:
+            snapshot = ('<p>' + _link(source.get("url"), source.get("url", "")) + '</p>'
+                        + ('<p>Снимок получен: ' + _date(provenance["fetched_at"]) + '</p>' if provenance.get("fetched_at") else "")
+                        + ('<p class="preserve">SHA256 сохранённого текста: ' + _text(provenance["text_sha256"]) + '</p>' if provenance.get("text_sha256") else "")
+                        + '<p>Статус лицензии в снимке: ' + _text("не проверена" if provenance.get("license_status") == "not_verified" else provenance.get("license_status", "не указан"))
+                        + '. Этот снимок не передаёт разрешение на обучение модели.</p>')
         bibliography.append('<li><strong>' + _link(source.get("url"), source.get("title", "Источник")) + '</strong>'
                             + ('<p>' + _text(provenance["attribution"]) + '</p>' if provenance.get("attribution") else "")
                             + ('<p>' + _link(provenance.get("license_url"), provenance["license_name"]) + '</p>' if provenance.get("license_name") else "")
-                            + '</li>')
+                            + snapshot + '</li>')
     issues = ''.join('<p class="notice">' + _text(issue.get("message", "") if isinstance(issue, dict) else issue) + '</p>'
                      for issue in report.get("issues", []))
+    heading = "Проверка уникальности в интернете" if is_web else "Проверка по библиотеке источников"
+    summary = (_web_summary(report, stats) if is_web else
+               '<p class="notice">Проверена выбранная библиотека, а не весь интернет. Сходство не устанавливает направление копирования или нарушение правил. Корректная цитата может совпадать с источником.</p>'
+               '<p><strong>' + _text(stats.get("similarity_percent", 0)) + '%</strong> текста с лексическими совпадениями. Проверено источников: '
+               + _text(stats.get("checked_source_count", len(report.get("sources", [])))) + '. Найдено фрагментов: ' + str(len(matches))
+               + '. Пересечения учитываются один раз; смысловые оценки в этот процент не входят.</p>')
+    semantic_heading = "Дополнительная сверка пар с Qwen" if is_web else "Поиск кандидатов и последние оценки Qwen"
+    bibliography_heading = "Сохранённые снимки проверенных страниц" if is_web else "Библиотека этого отчёта"
+    bibliography_notice = ("Список относится к сохранённым страницам этого отчёта. Страницы заново не загружаются; их текущее содержимое может отличаться."
+                           if is_web else "Список соответствует сохранённому отчёту. Изменения текущей библиотеки его не заменяют.")
     return '''<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
@@ -127,12 +187,11 @@ a{color:#18553a;overflow-wrap:anywhere}.notice{padding:16px;background:#fff3df;b
 li{margin-bottom:20px}li p{margin:4px 0}.meta{color:#54675d;font-size:14px}footer{border-top:1px solid #dce3dd;margin-top:32px;padding-top:16px}
 @media(max-width:650px){main{margin:0;padding:20px;border-radius:0}.pair{grid-template-columns:1fr}h1{font-size:32px}}
 @media print{body{background:white;font-size:11pt}main{margin:0;padding:0;max-width:none}h2,h3,h4{break-after:avoid}blockquote{break-inside:avoid}.notice{border:1px solid #aaa}a::after{content:" (" attr(href) ")";font-size:9pt}}
-</style></head><body><main><header><p>ИСТОК · ОТЧЁТ ДЛЯ СВЕРКИ</p><h1>Проверка по библиотеке источников</h1>
+</style></head><body><main><header><p>ИСТОК · ОТЧЁТ ДЛЯ СВЕРКИ</p><h1>''' + heading + '''</h1>
 <p class="meta">Отчёт ''' + _text(report.get("id")) + ' · Сохранён ' + _date(report.get("created_at")) + '''</p></header>
-<p class="notice">Проверена выбранная библиотека, а не весь интернет. Сходство не устанавливает направление копирования или нарушение правил. Корректная цитата может совпадать с источником.</p>
-<p><strong>''' + _text(stats.get("similarity_percent", 0)) + '%</strong> текста с лексическими совпадениями. Проверено источников: ' + _text(stats.get("checked_source_count", len(report.get("sources", [])))) + '. Найдено фрагментов: ' + str(len(matches)) + '''. Пересечения учитываются один раз; смысловые оценки в этот процент не входят.</p>
+''' + summary + '''
 ''' + issues + '''<h2>Лексические совпадения и решения редактора</h2>''' + lexical + '''
-<h2>Поиск кандидатов и последние оценки Qwen</h2>''' + semantic + '''
+<h2>''' + semantic_heading + '''</h2>''' + semantic + '''
 <h2>Сохранённая версия проверяемого текста</h2><div class="preserve">''' + _text(report.get("text", "")) + '''</div>
-<h2>Библиотека этого отчёта</h2><p>Список соответствует сохранённому отчёту. Изменения текущей библиотеки его не заменяют.</p><ol>''' + ''.join(bibliography) + '''</ol>
+<h2>''' + bibliography_heading + '''</h2><p>''' + bibliography_notice + '''</p><ol>''' + ''.join(bibliography) + '''</ol>
 <footer class="meta">Автономная копия отчёта. Новые проверки и правки в этом файле не выполняются. Окончательное решение принимает редактор.</footer></main></body></html>'''

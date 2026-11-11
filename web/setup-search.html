@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Подключение поиска · Исток</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/setup-search.js" defer></script>
+</head>
+<body>
+  <main style="max-width:680px;margin:48px auto;padding:24px">
+    <p class="eyebrow">ИСТОК · НАСТРОЙКА НА ЭТОМ MAC</p>
+    <h1 style="font-size:clamp(30px,6vw,48px)">Подключение поиска по интернету</h1>
+    <p>Поисковый сервис находит страницы. Исток загружает доступные тексты и сверяет совпадения. Qwen для расчёта этой уникальности не требуется.</p>
+    <ol style="padding-left:24px;line-height:1.8">
+      <li>Войдите в <a href="https://app.tavily.com/" target="_blank" rel="noopener noreferrer">личный кабинет Tavily</a>.</li>
+      <li>Выберите бесплатный Researcher. У него 1000 кредитов в месяц без карты. Платный Pay As You Go для этого теста не нужен.</li>
+      <li>Скопируйте API-ключ и вставьте его ниже.</li>
+    </ol>
+    <p>Ключ сохранится в закрытом файле на этом Mac. Он не попадёт в документы посетителей или GitHub. Эта страница доступна только в локальном режиме владельца.</p>
+    <form id="search-setup-form" class="card" style="padding:24px;margin-top:24px">
+      <label for="search-api-key" class="field-label">API-ключ Tavily</label>
+      <input id="search-api-key" name="api_key" class="field" type="password" autocomplete="off" spellcheck="false" required placeholder="tvly-…">
+      <button class="button" type="submit" style="margin-top:18px">Сохранить подключение</button>
+      <p id="setup-result" role="status" aria-live="polite"></p>
+    </form>
+    <p><a href="/#check">Вернуться к проверке текста →</a></p>
+    <p class="subtle"><a href="https://www.tavily.com/pricing" target="_blank" rel="noopener noreferrer">Условия бесплатного плана</a> · <a href="https://help.tavily.com/articles/5880393096-permitted-use-customer-applications" target="_blank" rel="noopener noreferrer">Использование в приложении</a></p>
+  </main>
+</body>
+</html>

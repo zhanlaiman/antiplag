@@ -94,20 +94,23 @@ class FixtureElement {
   dispatchEvent(event) { return this.emit(event.type); }
 }
 
-function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
+function fixture({ stored = {}, fetch: customFetch, view = 'check', turnstile } = {}) {
   const storage = new Map(Object.entries(stored));
   const delays = [];
   const intervals = [];
   const downloads = [];
   const blobs = new Map();
+  const scripts = [];
+  const reloads = [];
   const windowListeners = new Map();
   const document = {
     elements: new Map(), body: { classList: { toggle() {} }, append() {} },
+    head: { append(script) { scripts.push(script); } },
     querySelector(selector) { return selector.startsWith('#') ? this.elements.get(selector.slice(1)) || null : null; },
     querySelectorAll() { return []; },
     getElementById(id) { return this.elements.get(id) || null; },
     createElement(tag) {
-      assert.equal(tag, 'a', 'The fixture only supports download anchors');
+      assert.ok(['a', 'script'].includes(tag), 'The fixture supports download anchors and optional CAPTCHA script');
       const anchor = new FixtureElement(this);
       anchor.click = () => downloads.push({ filename: anchor.download, blob: blobs.get(anchor.href) });
       anchor.remove = () => { anchor.isConnected = false; };
@@ -116,7 +119,7 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
   };
   const initial = new FixtureElement(document);
   initial.innerHTML = documentHTML;
-  const location = { hash: `#${view}` };
+  const location = { hash: `#${view}`, reload() { reloads.push(true); } };
   const context = vm.createContext({
     document, location, console, TextDecoder, Uint8Array, Event, Blob, crypto: webcrypto,
     URL: class extends URL {
@@ -128,17 +131,18 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => { storage.set(key, value); },
     },
-    window: { addEventListener: (name, callback) => windowListeners.set(name, callback), matchMedia: () => ({ matches: false }) },
+    window: { turnstile, addEventListener: (name, callback) => windowListeners.set(name, callback), matchMedia: () => ({ matches: false }) },
     setInterval(callback) { intervals.push(callback); },
     setTimeout(callback, milliseconds) { delays.push(milliseconds); queueMicrotask(callback); return 1; },
     clearTimeout() {},
     fetch: async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : undefined;
       if (customFetch) {
-        const response = await customFetch(url, body);
+        const response = await customFetch(url, body, options);
         if (response) return response;
       }
       const defaults = {
+        '/api/session': { mode: 'local', user: null, csrf_token: '', quota: null, auth: { configured: false } },
         '/api/status': { model: { model: 'qwen3:4b', available: true, models: ['qwen3:4b'] }, counts: { sources: 0, reports: 0 } },
         '/api/sources': { sources: [] },
         '/api/source-packs': { packs: [] },
@@ -152,7 +156,7 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check' } = {}) {
   // Execute every statement, including startup and normal listener registration.
   vm.runInContext(application, context, { filename: 'web/app.js' });
   return {
-    document, storage, delays, intervals, downloads,
+    document, storage, delays, intervals, downloads, scripts, reloads,
     evaluate: expression => vm.runInContext(expression, context),
     expose: (name, value) => { context[name] = value; },
     element: id => document.getElementById(id),
@@ -751,4 +755,487 @@ test('registered HTML export displays a server error and downloads nothing on fa
   assert.equal(app.downloads.length, 0);
   assert.equal(app.element('toast').textContent, 'Учебная ошибка экспорта');
   assert.equal(app.element('download-reading-report').disabled, false);
+});
+
+function saasSession(user = { id: 'user-a', email: 'a@example.test', email_verified: true }, remaining = 6000) {
+  return { mode: 'saas', user, csrf_token: 'fixture-csrf',
+    quota: { limit: 6000, used: 6000 - remaining, reserved: 0, remaining, reset_at: '2026-11-12T00:00:00Z' },
+    auth: { configured: true, method: 'email_otp', captcha_site_key: null } };
+}
+
+test('SaaS bootstrap waits for session and never loads private APIs or historical local storage for a guest', async () => {
+  const session = deferred();
+  const calls = [];
+  const oldJob = 'a'.repeat(32);
+  const app = fixture({ stored: {
+    'istok.draft.v1': 'Исторический локальный учебный черновик',
+    'istok.model-jobs.v1': JSON.stringify({ [oldJob]: { request_id: oldJob, path: '/api/judge', body: {}, status: 'running' } }),
+  }, fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/session') return session.promise;
+  } });
+  assert.deepEqual(calls.map(call => call.url), ['/api/session']);
+  assert.equal(app.element('check-text'), null);
+  session.resolve(json(saasSession(null)));
+  await settle();
+  assert.equal(app.element('guest-text').value, '');
+  assert.equal(app.element('model-jobs-panel').hidden, true);
+  assert.deepEqual(calls.map(call => call.url), ['/api/session']);
+  app.element('guest-text').value = 'Отдельный гостевой учебный текст';
+  await app.element('guest-text').emit('input');
+  await app.navigate('history');
+  assert.equal(app.element('guest-text').value, 'Отдельный гостевой учебный текст');
+  assert.equal(app.storage.get('istok.draft.v1.saas.guest'), 'Отдельный гостевой учебный текст');
+  assert.equal(app.storage.get('istok.draft.v1'), 'Исторический локальный учебный черновик');
+  assert.ok(calls.every(call => call.url === '/api/session'));
+  assert.equal(app.scripts.length, 0);
+});
+
+test('SaaS drafts and model choices remain scoped to the authenticated account', async () => {
+  const app = fixture({ stored: {
+    'istok.draft.v1': 'Локальный учебный текст',
+    'istok.draft.v1.saas.guest': 'Гостевой учебный текст',
+    'istok.draft.v1.saas.user.user-a': 'Учебный текст A',
+    'istok.draft.v1.saas.user.user-b': 'Учебный текст B',
+    'istok.model.modal.v1': 'local-choice',
+  }, fetch(url) {
+    if (url === '/api/session') return json(saasSession());
+    if (url === '/api/status') return json(modalStatus());
+  } });
+  await settle();
+  assert.equal(app.element('check-text').value, 'Учебный текст A');
+  app.element('check-text').value = 'Новая учебная правка A';
+  await app.element('check-text').emit('input');
+  app.element('model-select').value = 'fixture-qwen-other';
+  await app.element('model-select').emit('change');
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), 'Новая учебная правка A');
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-b'), 'Учебный текст B');
+  assert.equal(app.storage.get('istok.draft.v1.saas.guest'), 'Гостевой учебный текст');
+  assert.equal(app.storage.get('istok.draft.v1'), 'Локальный учебный текст');
+  assert.equal(app.storage.get('istok.model.modal.v1.saas.user.user-a'), 'fixture-qwen-other');
+  assert.equal(app.storage.get('istok.model.modal.v1'), 'local-choice');
+  assert.equal(app.element('evaluation-nav').hidden, true);
+  await app.navigate('evaluation');
+  assert.equal(app.element('run-evaluation'), null);
+  assert.equal(app.element('export-training'), null);
+});
+
+test('email OTP uses the session CSRF token and reloads without importing the guest draft', async () => {
+  const posts = [];
+  const app = fixture({ fetch(url, body, options) {
+    if (url === '/api/session') return json(saasSession(null));
+    if (url.startsWith('/api/auth/')) {
+      posts.push({ url, body, options });
+      return json(url.endsWith('/request') ? { challenge_id: 'fixture-challenge' } : { verified: true });
+    }
+  } });
+  await settle();
+  app.element('guest-text').value = 'Учебный гостевой черновик';
+  await app.element('guest-text').emit('input');
+  app.element('auth-email').value = 'student@example.test';
+  await app.element('auth-request-form').emit('submit');
+  await settle();
+  assert.equal(posts[0].options.headers['X-Istok-CSRF'], 'fixture-csrf');
+  assert.equal(posts[0].options.credentials, 'same-origin');
+  assert.equal(posts[0].body.email, 'student@example.test');
+  assert.equal(app.evaluate('state.authChallenge'), 'fixture-challenge');
+  app.element('auth-code').value = '123456';
+  await app.element('auth-verify-form').emit('submit');
+  await settle();
+  assert.equal(posts[1].url, '/api/auth/verify');
+  assert.equal(posts[1].body.challenge_id, 'fixture-challenge');
+  assert.equal(posts[1].options.headers['X-Istok-CSRF'], 'fixture-csrf');
+  assert.equal(app.reloads.length, 1);
+  assert.equal(app.storage.get('istok.draft.v1.saas.guest'), 'Учебный гостевой черновик');
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), undefined);
+});
+
+test('daily quota counts Unicode code points and preserves an oversized imported document', async () => {
+  const posts = [];
+  const app = fixture({ fetch(url, body) {
+    if (url === '/api/session') return json(saasSession(undefined, 3));
+    if (url === '/api/sources') return json({ sources: [{ id: 'fixture-source', title: 'Fixture', text: 'Учебный источник' }] });
+    if (body) posts.push({ url, body });
+  } });
+  await settle();
+  app.element('check-text').value = '😀😀😀';
+  await app.element('check-text').emit('input');
+  assert.equal(app.element('check-button').disabled, false);
+  const input = app.element('text-file');
+  input.files = [textFile('😀😀😀😀')];
+  await input.emit('change');
+  assert.equal(app.element('check-text').value, '😀😀😀😀');
+  assert.equal(app.element('check-button').disabled, true);
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), '😀😀😀😀');
+  await assert.rejects(app.evaluate('checkText()'), /остаток дневного лимита/);
+  assert.equal(posts.length, 0);
+});
+
+test('a SaaS check persists exact input before POST and only retries the same ID after explicit action', async () => {
+  const attempts = [];
+  const derivedReportId = '9'.repeat(32);
+  let charged = false;
+  const app = fixture({ fetch(url, body, options) {
+    if (url === '/api/session') return json(saasSession(undefined, charged ? 5900 : 6000));
+    if (url === '/api/sources') return json({ sources: [{ id: 'fixture-source', title: 'Fixture', text: 'Учебный источник' }] });
+    if (url.startsWith('/api/retrievals/')) return json({ retrieval: null });
+    if (url === '/api/check') {
+      attempts.push(body);
+      assert.equal(options.headers['X-Istok-CSRF'], 'fixture-csrf');
+      const saved = JSON.parse(app.storage.get('istok.check-requests.v1.saas.user.user-a'))[body.request_id];
+      assert.equal(saved.text, body.text);
+      assert.deepEqual(saved.source_ids, body.source_ids);
+      if (attempts.length === 1) throw new TypeError('Учебный обрыв связи');
+      charged = true;
+      return json({ report: { id: derivedReportId, text: body.text, matches: [], stats: {}, issues: [] } });
+    }
+  } });
+  await settle();
+  app.element('check-text').value = 'Исходный учебный текст';
+  await app.element('check-text').emit('input');
+  await app.element('check-button').emit('click');
+  assert.equal(attempts.length, 1);
+  const id = attempts[0].request_id;
+  assert.match(id, /^[a-f0-9]{32}$/);
+  app.element('check-text').value = 'Более новая учебная правка';
+  await app.element('check-text').emit('input');
+  await app.element(`retry-check-${id}`).emit('click');
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[0], attempts[1]);
+  assert.equal(app.element('check-text').value, 'Более новая учебная правка');
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), 'Более новая учебная правка');
+  assert.equal(app.evaluate('state.session.quota.remaining'), 5900);
+  const stored = Object.fromEntries(app.storage);
+  const reloadedPosts = [];
+  const reloaded = fixture({ stored, fetch(url, body) {
+    if (url === '/api/session') return json(saasSession());
+    if (url === `/api/reports/${derivedReportId}`) return json({ report: { id: derivedReportId, text: 'Исходный учебный текст', matches: [], stats: {} } });
+    if (url.startsWith('/api/retrievals/')) return json({ retrieval: null });
+    if (body) reloadedPosts.push({ url, body });
+  } });
+  await settle();
+  assert.equal(reloadedPosts.length, 0);
+  assert.ok(reloaded.element(`open-check-${id}`));
+  await reloaded.element(`open-check-${id}`).emit('click');
+  assert.equal(reloaded.evaluate('state.report.id'), derivedReportId);
+});
+
+test('public model actions require an unchanged saved report and share job ID with operation ID', async () => {
+  let request;
+  const app = fixture({ fetch(url, body, options) {
+    if (url === '/api/session') return json(saasSession());
+    if (url === '/api/status') return json(modalStatus());
+    if (url === '/api/model-jobs') {
+      request = body;
+      assert.equal(body.body.operation_id, body.request_id);
+      assert.equal(body.body.report_id, 'fixture-owned-report');
+      assert.equal(options.headers['X-Istok-CSRF'], 'fixture-csrf');
+      return json({ job: { id: body.request_id, status: 'queued' } });
+    }
+    if (request && url === `/api/jobs/${request.request_id}`) return json({ job: { id: request.request_id, status: 'complete', result: { judgment: { relation: 'same_topic', explanation: 'Учебное сравнение' } } } });
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебный текст';
+  await app.element('check-text').emit('input');
+  app.element('compare-source').value = 'fixture-source';
+  assert.equal(app.element('compare-button').disabled, true);
+  await assert.rejects(app.evaluate("modelRequest('/api/compare',{text:state.text,source_id:'fixture-source',model:selectedModel()})"), /Сначала проверьте/);
+  assert.equal(request, undefined);
+  app.evaluate("state.report={id:'fixture-owned-report',text:state.text,matches:[],stats:{}};updateModelActionControls()");
+  assert.equal(app.element('compare-button').disabled, false);
+  await app.element('compare-button').emit('click');
+  assert.ok(app.storage.get('istok.model-jobs.v1.saas.user.user-a'));
+  assert.equal(app.storage.get('istok.model-jobs.v1'), undefined);
+  app.element('check-text').value = 'Изменённый учебный текст';
+  await app.element('check-text').emit('input');
+  assert.equal(app.element('compare-button').disabled, true);
+});
+
+test('Turnstile loads only for the guest login and expiry clears its token before another request', async () => {
+  let widgetOptions;
+  let resets = 0;
+  const sdk = { render(container, options) { widgetOptions = options; return 'fixture-widget'; },
+    reset() { resets++; }, remove() {} };
+  const app = fixture({ fetch(url) {
+    if (url === '/api/session') {
+      const session = saasSession(null);
+      session.auth.captcha_site_key = 'fixture-sitekey';
+      return json(session);
+    }
+  } });
+  await settle();
+  assert.equal(app.scripts.length, 1);
+  assert.equal(app.scripts[0].src, 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit');
+  assert.equal(app.element('auth-request-button').disabled, true);
+  app.expose('fixtureSDK', sdk);
+  app.evaluate('window.turnstile=fixtureSDK');
+  app.scripts[0].onload();
+  await settle();
+  assert.equal(widgetOptions.sitekey, 'fixture-sitekey');
+  widgetOptions.callback('fixture-captcha-token');
+  assert.equal(app.element('auth-request-button').disabled, false);
+  widgetOptions['expired-callback']();
+  assert.equal(resets, 1);
+  assert.equal(app.evaluate('state.captchaToken'), '');
+  assert.equal(app.element('auth-request-button').disabled, true);
+  const authenticated = fixture({ fetch(url) {
+    if (url === '/api/session') {
+      const session = saasSession({ id: 'user-a', email_verified: true });
+      session.auth.captcha_site_key = 'fixture-sitekey';
+      return json(session);
+    }
+  } });
+  await settle();
+  assert.equal(authenticated.scripts.length, 0);
+  assert.equal(authenticated.element('account-name').textContent, 'Аккаунт подтверждён');
+});
+
+test('logout saves the account draft and reloads before another account can hydrate', async () => {
+  let logout;
+  const app = fixture({ fetch(url, body, options) {
+    if (url === '/api/session') return json(saasSession());
+    if (url === '/api/auth/logout') { logout = { body, options }; return json({ logged_out: true }); }
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебная правка аккаунта A';
+  await app.element('check-text').emit('input');
+  await app.element('logout-button').emit('click');
+  assert.equal(logout.options.headers['X-Istok-CSRF'], 'fixture-csrf');
+  assert.equal(app.reloads.length, 1);
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), 'Учебная правка аккаунта A');
+  const other = fixture({ stored: Object.fromEntries(app.storage), fetch(url) {
+    if (url === '/api/session') return json(saasSession({ id: 'user-b', email_verified: true }));
+  } });
+  await settle();
+  assert.equal(other.element('check-text').value, '');
+  assert.equal(other.storage.get('istok.draft.v1.saas.user.user-a'), 'Учебная правка аккаунта A');
+});
+
+test('a session refresh after expiry preserves the in-progress login form instead of recreating it', async () => {
+  let expired = false;
+  const app = fixture({ fetch(url) {
+    if (url === '/api/session') return json(saasSession(expired ? null : undefined));
+  } });
+  await settle();
+  app.element('check-text').value = 'Учебный текст до завершения сессии';
+  await app.element('check-text').emit('input');
+  expired = true;
+  app.intervals[0]();
+  await settle();
+  const email = app.element('auth-email');
+  email.value = 'student@example.test';
+  await email.emit('input');
+  app.intervals[0]();
+  await settle();
+  assert.equal(app.element('auth-email'), email);
+  assert.equal(app.element('auth-email').value, 'student@example.test');
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), 'Учебный текст до завершения сессии');
+});
+
+test('homepage motion mounts only on home and keeps real library counts without a local SaaS allowance claim', async () => {
+  const app = fixture({ fetch(url) {
+    if (url === '/api/sources') return json({ sources: [1, 2, 3].map(id => ({ id: `fixture-${id}`, title: 'Учебный источник', text: 'Учебный текст' })) });
+  } });
+  await settle();
+  let mounts = 0, teardowns = 0;
+  app.expose('fixtureMotion', { mount() { mounts++; }, teardown() { teardowns++; } });
+  app.evaluate('window.IstokMotion=fixtureMotion');
+  await app.navigate('home');
+  const html = app.element('main-content').innerHTML;
+  assert.equal(mounts, 1);
+  assert.ok(html.includes('id="home-library-count">3</strong>'));
+  assert.ok(html.includes('data-count="6" aria-hidden="true"') && html.includes('data-count="12" aria-hidden="true"'));
+  assert.ok(html.includes('aria-label="Проверьте уникальность текста"'));
+  assert.ok(html.includes('Интернет-поиск пока не подключён'));
+  assert.ok(!html.includes('знаков в сутки'));
+  await app.navigate('check');
+  assert.equal(mounts, 1);
+  assert.equal(teardowns, 2);
+});
+
+function webReport(text = 'Учебный текст', partial = false) {
+  return { id: '8'.repeat(32), text, scope: 'web_search', created_at: '2026-11-11T10:00:00Z',
+    source_snapshots_count: 1,
+    stats: { uniqueness_percent: partial ? null : 58.3, similarity_percent: 30, source_count: 1 },
+    matches: [{ id: 'web-match', source_id: 'web-fixture', source_url: 'https://example.test/article',
+      source_title: 'Учебный источник', start: 0, end: 7, excerpt: 'Учебный', source_excerpt: 'Учебный', kind: 'exact', score: 1 }],
+    issues: [], web: { status: partial ? 'partial' : 'complete', queries_planned: 2, queries_completed: partial ? 1 : 2,
+      sources_checked: 1, urls_attempted: 1, limitations: ['Учебный ограниченный поиск по доступным страницам.'],
+      errors: partial ? [{ message: 'Учебная страница недоступна', url: 'https://example.test/unavailable' }] : [] } };
+}
+
+test('Internet mode explains missing configuration and never sends a check without it', async () => {
+  const posts = [];
+  const app = fixture({ fetch(url, body) { if (body) posts.push({ url, body }); } });
+  await settle();
+  await app.element('mode-internet').emit('click');
+  assert.equal(app.element('check-button').disabled, true);
+  assert.equal(app.element('web-availability').hidden, false);
+  assert.equal(app.element('setup-search-link').hidden, false);
+  app.element('check-text').value = 'Учебный текст';
+  await app.element('check-text').emit('input');
+  await assert.rejects(app.evaluate('checkText()'), /ещё не подключена/);
+  assert.equal(posts.length, 0);
+  assert.equal(app.element('check-text').value, 'Учебный текст');
+});
+
+test('configured Internet mode requires consent and returns uniqueness with actual source URLs without Qwen', async () => {
+  let request;
+  const calls = [];
+  const app = fixture({ fetch(url, body) {
+    calls.push({ url, body });
+    if (url === '/api/session') return json({ mode: 'local', web: { configured: true, provider: 'tavily' } });
+    if (url === '/api/web-check-jobs') {
+      request = body;
+      const saved = JSON.parse(app.storage.get('istok.model-jobs.v1'))[body.request_id];
+      assert.equal(saved.path, '/api/web-check');
+      assert.deepEqual(saved.body, { text: body.text, internet_consent: true });
+      return json({ job: { id: body.request_id, status: 'queued' } });
+    }
+    if (request && url === `/api/jobs/${request.request_id}`) return json({ job: { id: request.request_id, status: 'complete', result: { report: webReport(request.text) } } });
+  } });
+  await settle();
+  assert.equal(app.evaluate('state.checkMode'), 'internet');
+  app.element('check-text').value = 'Учебный текст';
+  await app.element('check-text').emit('input');
+  assert.equal(app.element('check-button').disabled, true);
+  app.element('internet-consent').checked = true;
+  await app.element('internet-consent').emit('change');
+  assert.equal(app.element('check-button').disabled, false);
+  await app.element('check-button').emit('click');
+  assert.equal(request.internet_consent, true);
+  const html = app.element('report-area').innerHTML;
+  assert.ok(html.includes('58,3%'));
+  assert.ok(html.includes('https://example.test/article'));
+  assert.ok(html.includes('Поисковые сниппеты не используются как доказательство'));
+  assert.equal(app.evaluate('state.report.id'), '8'.repeat(32));
+  assert.ok(!calls.some(call => ['/api/check', '/api/model-jobs', '/api/candidate-check-jobs'].includes(call.url)));
+  assert.ok(!calls.some(call => call.url.startsWith('/api/retrievals/')));
+});
+
+test('a restored public web job only polls and keeps the newer draft when its partial report is opened', async () => {
+  const id = '7'.repeat(32);
+  const body = { text: 'Учебный старый текст', internet_consent: true };
+  const calls = [];
+  const app = fixture({ stored: {
+    'istok.draft.v1.saas.user.user-a': 'Более новый учебный черновик',
+    'istok.model-jobs.v1.saas.user.user-a': JSON.stringify({ [id]: { request_id: id, path: '/api/web-check', body, status: 'running' } }),
+  }, fetch(url, payload) {
+    calls.push({ url, payload });
+    if (url === '/api/session') return json(saasSession());
+    if (url === `/api/jobs/${id}`) return json({ job: { id, status: 'complete', result: { report: webReport(body.text, true) } } });
+  } });
+  await settle();
+  assert.equal(app.evaluate('state.report'), null);
+  await app.element(`open-web-report-${id}`).emit('click');
+  assert.ok(app.element('report-area').innerHTML.includes('Не установлена'));
+  assert.ok(app.element('report-area').innerHTML.includes('Учебная страница недоступна'));
+  assert.equal(app.element('check-text').value, 'Более новый учебный черновик');
+  assert.equal(app.storage.get('istok.draft.v1.saas.user.user-a'), 'Более новый учебный черновик');
+  assert.ok(calls.every(call => call.payload === undefined));
+  assert.equal(app.element('setup-search-link').hidden, true);
+});
+
+test('a partial web report never presents an accidental 100 percent as established uniqueness', async () => {
+  const app = fixture();
+  await settle();
+  const report = webReport('Учебный текст', true);
+  report.stats.uniqueness_percent = 100;
+  app.expose('partialReport', report);
+  app.evaluate('state.report=partialReport;renderReport()');
+  assert.ok(app.element('report-area').innerHTML.includes('Не установлена'));
+  assert.ok(!app.element('report-area').innerHTML.includes('100%'));
+});
+
+test('historical web reports without readable sources cannot claim uniqueness and fractional upper bounds stay visible', async () => {
+  const app = fixture();
+  await settle();
+  const report = webReport('Учебный текст');
+  report.source_snapshots_count = 0;
+  report.web.sources_checked = 0;
+  report.stats.uniqueness_percent = 100;
+  app.expose('historicalWebReport', report);
+  app.evaluate('state.report=historicalWebReport;renderReport()');
+  assert.ok(app.element('report-area').innerHTML.includes('Не установлена'));
+  assert.ok(!app.element('report-area').innerHTML.includes('100%'));
+  const partial = webReport('Учебный текст', true);
+  partial.stats.uniqueness_upper_bound_percent = 0.1;
+  app.expose('fractionalWebReport', partial);
+  app.evaluate('state.report=fractionalWebReport;renderReport()');
+  assert.ok(app.element('report-area').innerHTML.includes('Не выше 0,1%'));
+});
+
+test('an explicit web retry reuses its original request and consent without sending the newer draft', async () => {
+  const attempts = [];
+  const app = fixture({ fetch(url, body) {
+    if (url === '/api/session') return json({ mode: 'local', web: { configured: true } });
+    if (url === '/api/web-check-jobs') {
+      attempts.push(body);
+      if (attempts.length === 1) throw new TypeError('Учебный обрыв связи');
+      return json({ job: { id: body.request_id, status: 'queued' } });
+    }
+    if (attempts.length && url === `/api/jobs/${attempts[0].request_id}`) return json({ job: { id: attempts[0].request_id, status: 'complete', result: { report: webReport(attempts[0].text) } } });
+  } });
+  await settle();
+  app.element('check-text').value = 'Исходный учебный текст';
+  await app.element('check-text').emit('input');
+  app.element('internet-consent').checked = true;
+  await app.element('internet-consent').emit('change');
+  await app.element('check-button').emit('click');
+  assert.equal(attempts.length, 1);
+  const id = attempts[0].request_id;
+  app.element('check-text').value = 'Более новая учебная правка';
+  await app.element('check-text').emit('input');
+  await app.element(`model-job-retry-${id}`).emit('click');
+  assert.deepEqual(attempts[0], attempts[1]);
+  assert.equal(app.element('check-text').value, 'Более новая учебная правка');
+});
+
+test('home hides completed job notices while retaining them for the document workspace', async () => {
+  const id = '6'.repeat(32);
+  const app = fixture({ view: 'home', stored: { 'istok.model-jobs.v1': JSON.stringify({ [id]: { request_id: id, path: '/api/evaluate', body: {}, status: 'running' } }) }, fetch(url) {
+    if (url === `/api/jobs/${id}`) return json({ job: { id, status: 'complete', result: { run: { model: 'fixture-qwen' } } } });
+  } });
+  await settle();
+  assert.equal(app.element('model-jobs-panel').hidden, true);
+  assert.equal(app.evaluate(`state.modelJobs['${id}'].job.status`), 'complete');
+  await app.navigate('check');
+  assert.equal(app.element('model-jobs-panel').hidden, false);
+  assert.ok(app.element('model-jobs-panel').innerHTML.includes('Ответ готов и сохранён'));
+  assert.ok(JSON.parse(app.storage.get('istok.model-jobs.v1'))[id]);
+});
+
+test('a partial web report retains a zero upper bound without claiming a completed score', async () => {
+  const app = fixture();
+  await settle();
+  const report = webReport('Учебный текст', true);
+  report.stats.uniqueness_upper_bound_percent = 0;
+  app.expose('boundedReport', report);
+  app.evaluate('state.report=boundedReport;renderReport()');
+  const html = app.element('report-area').innerHTML;
+  assert.ok(html.includes('Не выше 0%'));
+  assert.ok(html.includes('окончательный процент не установлен'));
+});
+
+test('the homepage checks its own draft and shows real source results without replacing the workspace draft', async () => {
+  let request;
+  const app = fixture({ view: 'home', stored: { 'istok.draft.v1': 'Личный учебный черновик редактора' }, fetch(url, body) {
+    if (url === '/api/session') return json({ mode: 'local', web: { configured: true, max_queries: 6, max_urls: 12 } });
+    if (url === '/api/web-check-jobs') { request = body; return json({ job: { id: body.request_id, status: 'queued' } }); }
+    if (request && url === `/api/jobs/${request.request_id}`) return json({ job: { id: request.request_id, status: 'complete', result: { report: webReport(request.text) } } });
+  } });
+  await settle();
+  assert.equal(app.element('home-text').value, '');
+  app.element('home-text').value = 'Учебный текст для главной';
+  await app.element('home-text').emit('input');
+  assert.equal(app.storage.get('istok.draft.v1'), 'Личный учебный черновик редактора');
+  assert.equal(app.storage.get('istok.home-draft.v1'), 'Учебный текст для главной');
+  app.element('home-consent').checked = true;
+  await app.element('home-consent').emit('change');
+  await app.element('home-check-form').emit('submit');
+  assert.equal(request.text, 'Учебный текст для главной');
+  assert.ok(app.element('home-report-result').innerHTML.includes('58,3%'));
+  assert.ok(app.element('home-report-result').innerHTML.includes('https://example.test/article'));
+  assert.equal(app.storage.get('istok.draft.v1'), 'Личный учебный черновик редактора');
+  assert.equal(app.evaluate('state.text'), 'Личный учебный черновик редактора');
 });

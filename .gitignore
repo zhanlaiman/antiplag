@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 .runtime/
 data/*.sqlite3*
+/data/tenants/
+/data/private/
 data/runs/
 .DS_Store

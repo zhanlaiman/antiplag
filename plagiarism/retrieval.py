@@ -25,6 +25,7 @@ MAX_SOURCE_CHUNKS = 4000
 CHUNK_WORDS = 120
 OVERLAP_WORDS = 25
 MAX_CHUNK_CHARACTERS = 6000
+EMBEDDING_BATCH_SIZE = 12
 CACHE_PATH = Path(__file__).resolve().parent.parent / ".runtime" / "embeddings.sqlite3"
 STOPWORDS = frozenset("и в во на с со к у а но или для из по от до при о об что это как не ни the a an and or in on of to for by with is are was were this that".split())
 
@@ -55,6 +56,25 @@ def chunks(text):
             break
         position = stop - OVERLAP_WORDS
     return output
+
+
+def estimate_embedding_calls(text, sources):
+    """Conservatively price a cold hybrid index without contacting a model.
+
+    The embedding cache batches twelve distinct passages per call. Existing
+    vectors can reduce actual calls, but are deliberately not an admission
+    discount: a free request must fit the budget even when its cache is cold.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Добавьте текст для поиска источников.")
+    queries = chunks(text)
+    source_chunks = [chunk for source in sources for chunk in chunks(source["text"])]
+    if len(queries) > MAX_QUERY_CHUNKS or len(source_chunks) > MAX_SOURCE_CHUNKS:
+        raise ValueError("Для этого локального прогона выберите более короткий текст или меньшую библиотеку. Лимит — 160 фрагментов текста и 4000 фрагментов источников.")
+    if not source_chunks:
+        raise ValueError("Добавьте непустые источники для поиска.")
+    unique = {chunk["text"] for chunk in source_chunks + queries}
+    return (len(unique) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
 
 
 def terms(text):
@@ -105,8 +125,8 @@ class EmbeddingCache:
                     cached[key] = json.loads(row[0])
         missing = list(dict.fromkeys(key for key in keys if key not in cached))
         by_key = dict(zip(keys, texts))
-        for start in range(0, len(missing), 12):
-            batch = missing[start:start + 12]
+        for start in range(0, len(missing), EMBEDDING_BATCH_SIZE):
+            batch = missing[start:start + EMBEDDING_BATCH_SIZE]
             if progress:
                 progress("Вычисляем смысловые представления", start, len(missing))
             vectors = llm.embed([by_key[key] for key in batch], model)

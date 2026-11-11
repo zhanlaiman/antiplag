@@ -4,10 +4,17 @@ const DRAFT_KEY = 'istok.draft.v1';
 const MODEL_KEY = 'istok.model.v1';
 const MODAL_MODEL_KEY = 'istok.model.modal.v1';
 const MODEL_JOBS_KEY = 'istok.model-jobs.v1';
-const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate'];
+const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate', '/api/web-check'];
 const RETRIEVAL_JOBS_KEY = 'istok.retrieval-jobs.v1';
 const CANDIDATE_JOBS_KEY = 'istok.candidate-jobs.v1';
 const REVIEW_DRAFTS_KEY = 'istok.review-drafts.v1';
+const CHECK_REQUESTS_KEY = 'istok.check-requests.v1';
+const OPERATION_IDS_KEY = 'istok.operation-ids.v1';
+const SOURCE_DRAFT_KEY = 'istok.source-draft.v1';
+const HOME_DRAFT_KEY = 'istok.home-draft.v1';
+let storageScope = null;
+let turnstileLoader = null;
+let turnstileWidget = null;
 const ACTIVE_JOB_STATUSES = ['queued', 'running', 'cancelling'];
 const retrievalPolls = new Set();
 const candidateRequests = new Set();
@@ -16,9 +23,54 @@ const fileReadTokens = new WeakMap();
 const modelJobObservers = new Map();
 const modelRequestGenerations = new Map();
 
+function storageKey(key) {
+  if (storageScope === null) return null;
+  return storageScope === 'local' ? key : `${key}.saas.${storageScope}`;
+}
+
+function storageGet(key) {
+  const scoped = storageKey(key);
+  return scoped ? localStorage.getItem(scoped) : null;
+}
+
+function storageSet(key, value) {
+  const scoped = storageKey(key);
+  if (!scoped) throw new Error('Рабочее пространство ещё не открыто.');
+  localStorage.setItem(scoped, value);
+}
+
+function isSaas() { return state.session?.mode === 'saas'; }
+function privateAccess() {
+  return state.sessionReady && !state.sessionExpired && !state.sessionTransition
+    && (!isSaas() || Boolean(state.session.user?.email_verified));
+}
+
+function authError(error) {
+  return error.status === 401 || ['auth_required', 'session_changed'].includes(error.code);
+}
+
+function hydrateSessionStorage() {
+  storageScope = isSaas() ? state.session.user ? `user.${encodeURIComponent(state.session.user.id)}` : 'guest' : 'local';
+  state.text = restoreDraft();
+  try { state.homeText = storageGet(HOME_DRAFT_KEY) || ''; } catch { state.homeText = ''; }
+  state.model = restoreModel();
+  state.modelJobs = restoreModelJobs();
+  state.retrievalJobs = restoreActiveJobs(RETRIEVAL_JOBS_KEY);
+  state.candidateCheckJobs = restoreActiveJobs(CANDIDATE_JOBS_KEY);
+  const reviews = restoreReviewDrafts();
+  state.findingDrafts = reviews.findings;
+  state.exampleDrafts = reviews.examples;
+  try { state.checkRequests = JSON.parse(storageGet(CHECK_REQUESTS_KEY) || '{}'); }
+  catch { state.checkRequests = {}; }
+  try { state.operationIds = JSON.parse(storageGet(OPERATION_IDS_KEY) || '{}'); }
+  catch { state.operationIds = {}; }
+  try { state.sourceDraft = JSON.parse(storageGet(SOURCE_DRAFT_KEY) || '{}'); }
+  catch { state.sourceDraft = {}; }
+}
+
 function restoreDraft() {
   try {
-    const draft = localStorage.getItem(DRAFT_KEY);
+    const draft = storageGet(DRAFT_KEY);
     return typeof draft === 'string' ? draft : '';
   } catch {
     return '';
@@ -29,7 +81,7 @@ function saveDraft(text) {
   if (state.text !== text) document.querySelector('#direct-judgment')?.replaceChildren();
   state.text = text;
   try {
-    localStorage.setItem(DRAFT_KEY, text);
+    storageSet(DRAFT_KEY, text);
     state.draftSaved = true;
   } catch {
     state.draftSaved = false;
@@ -40,7 +92,7 @@ function saveDraft(text) {
 
 function restoreModel(provider = 'ollama') {
   try {
-    return localStorage.getItem(provider === 'modal' ? MODAL_MODEL_KEY : MODEL_KEY) || '';
+    return storageGet(provider === 'modal' ? MODAL_MODEL_KEY : MODEL_KEY) || '';
   } catch {
     return '';
   }
@@ -48,7 +100,7 @@ function restoreModel(provider = 'ollama') {
 
 function restoreModelJobs() {
   try {
-    const saved = JSON.parse(localStorage.getItem(MODEL_JOBS_KEY) || '{}');
+    const saved = JSON.parse(storageGet(MODEL_JOBS_KEY) || '{}');
     return Object.fromEntries(Object.entries(saved).filter(([id, entry]) => (
       /^[a-f0-9]{32}$/.test(id) && entry?.request_id === id
       && MODEL_JOB_PATHS.includes(entry.path) && entry.body && typeof entry.body === 'object'
@@ -65,7 +117,7 @@ function saveModelJobs() {
       request_id: id, path: entry.path, body: entry.body, context: entry.context,
       created_at: entry.created_at, status: entry.status, submission_error: entry.submission_error,
     }]));
-    localStorage.setItem(MODEL_JOBS_KEY, JSON.stringify(saved));
+    storageSet(MODEL_JOBS_KEY, JSON.stringify(saved));
     return true;
   } catch {
     return false;
@@ -74,7 +126,7 @@ function saveModelJobs() {
 
 function restoreActiveJobs(storageKey) {
   try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+    const saved = JSON.parse(storageGet(storageKey) || '{}');
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return {};
     return Object.fromEntries(Object.entries(saved).filter(([reportId, job]) => (
       reportId.length <= 100 && job && typeof job.id === 'string' && job.id.length <= 100
@@ -92,15 +144,17 @@ function saveActiveJobs(storageKey, jobs) {
     .filter(([, job]) => job.id && ACTIVE_JOB_STATUSES.includes(job.status))
     .map(([reportId, job]) => [reportId, { id: job.id, status: job.status }]));
   try {
-    localStorage.setItem(storageKey, JSON.stringify(active));
+    storageSet(storageKey, JSON.stringify(active));
+    return true;
   } catch {
     // Polling in this open tab continues when browser storage is unavailable.
+    return false;
   }
 }
 
 function restoreReviewDrafts() {
   try {
-    const saved = JSON.parse(localStorage.getItem(REVIEW_DRAFTS_KEY) || '{}');
+    const saved = JSON.parse(storageGet(REVIEW_DRAFTS_KEY) || '{}');
     const findings = Object.fromEntries(Object.entries(saved.findings || {})
       .filter(([, value]) => typeof value === 'string' && value.length <= 8000));
     const examples = Object.fromEntries(Object.entries(saved.examples || {})
@@ -113,7 +167,7 @@ function restoreReviewDrafts() {
 
 function saveReviewDrafts() {
   try {
-    localStorage.setItem(REVIEW_DRAFTS_KEY, JSON.stringify({
+    storageSet(REVIEW_DRAFTS_KEY, JSON.stringify({
       findings: state.findingDrafts, examples: state.exampleDrafts,
     }));
   } catch {
@@ -128,7 +182,7 @@ function updateDraftStatus() {
   if (!status) return;
   status.textContent = state.draftSaved === false
     ? 'Черновик хранится только в открытой вкладке'
-    : 'Черновик сохраняется на этом Mac';
+    : isSaas() ? 'Черновик сохраняется в этом браузере для вашего аккаунта' : 'Черновик сохраняется на этом Mac';
 }
 
 function updateReportFreshness() {
@@ -149,6 +203,11 @@ function updateReportFreshness() {
 
 
 const state = {
+  session: null, sessionReady: false, sessionExpired: false, sessionTransition: false,
+  authChallenge: null, authEmail: '', captchaToken: '', checkRequests: {}, operationIds: {},
+  sourceDraft: {},
+  checkMode: null, checkModeChosen: false, internetConsent: false,
+  homeText: '', homeConsent: false,
   view: 'check', viewRevision: 0, text: restoreDraft(), sources: [], status: null, model: restoreModel(), report: null,
   modelProvider: 'ollama', modelJobs: restoreModelJobs(),
   selectedMatch: null, rewrite: null, judgment: null, examples: [], run: null,
@@ -222,9 +281,19 @@ function currentComparison(reportId, matchId) {
 const date = value => value ? new Date(value).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 
 async function api(path, data, method) {
+  const publicPath = path === '/api/session' || path.startsWith('/api/auth/');
+  if (isSaas() && !publicPath && !privateAccess()) {
+    const error = new Error('Войдите в аккаунт, чтобы продолжить. Черновик сохранён в браузере.');
+    error.status = 401;
+    error.code = 'auth_required';
+    throw error;
+  }
+  const owner = state.session?.user?.id;
+  const verb = method || (data === undefined ? 'GET' : 'POST');
+  const headers = data === undefined ? {} : { 'Content-Type': 'application/json' };
+  if (isSaas() && verb !== 'GET') headers['X-Istok-CSRF'] = state.session.csrf_token || '';
   const response = await fetch(path, {
-    method: method || (data === undefined ? 'GET' : 'POST'),
-    headers: data === undefined ? {} : { 'Content-Type': 'application/json' },
+    method: verb, headers, credentials: 'same-origin',
     body: data === undefined ? undefined : JSON.stringify(data),
   });
   let result;
@@ -235,12 +304,338 @@ async function api(path, data, method) {
     error.status = response.status;
     error.code = result.code;
     error.details = result.details;
+    if (isSaas() && result.quota) { state.session.quota = result.quota; updateQuotaUI(); }
+    if (isSaas() && response.status === 401 && !publicPath) {
+      saveDraft(state.text);
+      state.sessionExpired = true;
+      await refreshSession().catch(() => {});
+      renderView();
+      renderModelJobs();
+    }
+    throw error;
+  }
+  if (!publicPath && isSaas() && (state.sessionTransition || state.sessionExpired || state.session.user?.id !== owner)) {
+    const error = new Error('Сессия изменилась. Ответ сохранён в исходном аккаунте.');
+    error.code = 'session_changed';
     throw error;
   }
   return result;
 }
 
+function resetCaptcha(remove = false) {
+  state.captchaToken = '';
+  if (turnstileWidget !== null && window.turnstile) {
+    if (remove) { window.turnstile.remove(turnstileWidget); turnstileWidget = null; }
+    else window.turnstile.reset(turnstileWidget);
+  }
+  updateAuthButton();
+}
+
+function updateAuthButton() {
+  const button = document.querySelector('#auth-request-button');
+  if (button) button.disabled = !state.session?.auth?.configured || Boolean(button.dataset.busy)
+    || Boolean(state.session.auth.captcha_site_key && !state.captchaToken);
+}
+
+async function mountCaptcha() {
+  const sitekey = state.session?.auth?.captcha_site_key;
+  const container = document.querySelector('#auth-captcha');
+  if (!isSaas() || privateAccess() || !state.session.auth.configured || !sitekey || !container || state.authChallenge) return;
+  if (!window.turnstile) {
+    if (!turnstileLoader) turnstileLoader = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => { script.remove(); turnstileLoader = null; reject(new Error('Не удалось загрузить проверку CAPTCHA. Попробуйте ещё раз.')); };
+      document.head.append(script);
+    });
+    await turnstileLoader;
+  }
+  if (!container.isConnected || state.authChallenge || !window.turnstile) return;
+  turnstileWidget = window.turnstile.render(container, {
+    sitekey, theme: 'light', size: 'compact',
+    callback(token) { if (container.isConnected) { state.captchaToken = token; updateAuthButton(); } },
+    'expired-callback'() { if (container.isConnected) resetCaptcha(); },
+    'error-callback'() {
+      if (container.isConnected) {
+        state.captchaToken = '';
+        document.querySelector('#auth-feedback').textContent = 'Проверка CAPTCHA не завершена. Нажмите «Обновить CAPTCHA».';
+        updateAuthButton();
+      }
+    },
+  });
+}
+
+function renderAuthScreen() {
+  resetCaptcha(true);
+  const auth = state.session?.auth || {};
+  main.innerHTML = `
+    <section class="auth-layout">
+      <div class="auth-intro"><div class="eyebrow">Исток · личное пространство</div>
+        <h1>Проверьте текст.<br>Сохраните источники.</h1>
+        <p>До 6 000 знаков в сутки после подтверждения почты. ${webConfigured() ? 'Ищем доступные страницы в интернете и показываем совпавшие фрагменты со ссылками.' : 'Доступна проверка по вашей библиотеке. Поиск страниц в интернете ещё не подключён.'}</p>
+        <p class="field-help">В бесплатном режиме до 3 проверок и 3 правок в сутки. Смысловая сверка ограничена общим лимитом модели: большая подборка может в него не войти. Подтверждение почты и CAPTCHA помогают ограничивать массовые регистрации.</p>
+      </div>
+      <section class="card auth-card"><h2>${state.authChallenge ? 'Введите код из письма' : 'Войти по почте'}</h2>
+        <p class="field-help">${state.sessionExpired ? 'Сессия завершилась. Черновик вашего аккаунта сохранён в браузере.' : 'Пароль не нужен. Отправим одноразовый код.'}</p>
+        ${!auth.configured ? '<p class="warning">Вход по почте пока не настроен. Можно сохранить гостевой черновик ниже.</p>' : ''}
+        <form id="auth-request-form" ${state.authChallenge ? 'hidden' : ''}>
+          <label class="field-label" for="auth-email">Электронная почта</label>
+          <input class="field" id="auth-email" type="email" autocomplete="email" required maxlength="254" value="${escapeHTML(state.authEmail)}">
+          <div id="auth-captcha"></div>
+          ${auth.captcha_site_key ? '<button class="text-button" id="auth-refresh-captcha" type="button">Обновить CAPTCHA</button>' : ''}
+          <button class="button" id="auth-request-button" type="submit" disabled>Получить код</button>
+        </form>
+        <form id="auth-verify-form" ${state.authChallenge ? '' : 'hidden'}>
+          <p>Код отправлен на ${escapeHTML(state.authEmail)}.</p>
+          <label class="field-label" for="auth-code">Код подтверждения</label>
+          <input class="field" id="auth-code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6,8}" minlength="6" maxlength="8" required>
+          <button class="button" id="auth-verify-button" type="submit">Подтвердить почту</button>
+          <button class="text-button" id="auth-new-code" type="button">Получить новый код</button>
+        </form>
+        <p id="auth-feedback" class="inline-error" role="alert"></p>
+        <p class="field-help">Общая сеть офиса или учебного заведения сама по себе не означает нарушение. При ограничении сохраните сообщение сервиса для обращения в поддержку.</p>
+      </section>
+    </section>
+    <section class="card guest-draft"><h2>Гостевой черновик</h2>
+      <p class="field-help">Остаётся в этом браузере. В новый аккаунт автоматически не переносится.</p>
+      <textarea id="guest-text" aria-label="Гостевой черновик" placeholder="Можно сохранить текст до входа…"></textarea>
+      <p class="field-help" id="guest-draft-status" role="status"></p>
+    </section>`;
+  const guestKey = `${DRAFT_KEY}.saas.guest`;
+  if (state.guestText === undefined) {
+    try { state.guestText = localStorage.getItem(guestKey) || ''; } catch { state.guestText = ''; }
+  }
+  const guest = document.querySelector('#guest-text');
+  guest.value = state.guestText;
+  guest.addEventListener('input', () => {
+    state.guestText = guest.value;
+    try {
+      localStorage.setItem(guestKey, guest.value);
+      document.querySelector('#guest-draft-status').textContent = 'Гостевой черновик сохранён в этом браузере.';
+    } catch { document.querySelector('#guest-draft-status').textContent = 'Черновик хранится только в открытой вкладке.'; }
+  });
+  document.querySelector('#auth-email').addEventListener('input', event => { state.authEmail = event.target.value; });
+  document.querySelector('#auth-request-form').addEventListener('submit', event => {
+    event.preventDefault();
+    busy(document.querySelector('#auth-request-button'), 'Отправляем код', async () => {
+      state.authEmail = document.querySelector('#auth-email').value.trim();
+      try {
+        if (!auth.configured) throw new Error('Вход по почте пока не настроен.');
+        if (auth.captcha_site_key && !state.captchaToken) throw new Error('Завершите CAPTCHA перед отправкой кода.');
+        const result = await api('/api/auth/request', { email: state.authEmail, captcha_token: state.captchaToken });
+        state.authChallenge = result.challenge_id;
+        renderAuthScreen();
+      } catch (error) { document.querySelector('#auth-feedback').textContent = error.message; resetCaptcha(); throw error; }
+    });
+  });
+  document.querySelector('#auth-verify-form').addEventListener('submit', event => {
+    event.preventDefault();
+    busy(document.querySelector('#auth-verify-button'), 'Подтверждаем', async () => {
+      try {
+        await api('/api/auth/verify', { challenge_id: state.authChallenge, email: state.authEmail, code: document.querySelector('#auth-code').value.trim() });
+        state.sessionTransition = true;
+        location.reload();
+      } catch (error) { document.querySelector('#auth-feedback').textContent = error.message; throw error; }
+    });
+  });
+  document.querySelector('#auth-new-code').addEventListener('click', () => { state.authChallenge = null; renderAuthScreen(); });
+  document.querySelector('#auth-refresh-captcha')?.addEventListener('click', () => {
+    if (turnstileWidget !== null) resetCaptcha();
+    else mountCaptcha().catch(error => { document.querySelector('#auth-feedback').textContent = error.message; });
+  });
+  updateAuthButton();
+  mountCaptcha().catch(error => { if (document.querySelector('#auth-feedback')) document.querySelector('#auth-feedback').textContent = error.message; });
+}
+
+async function refreshSession() {
+  const previous = state.session;
+  const session = await api('/api/session');
+  if (!['local', 'saas'].includes(session.mode)) throw new Error('Сервер вернул неизвестный режим рабочего пространства.');
+  if (previous && (previous.mode !== session.mode || (session.user && previous.user?.id !== session.user.id))) {
+    if (privateAccess()) saveDraft(state.text);
+    state.sessionTransition = true;
+    location.reload();
+    return;
+  }
+  const lostUser = Boolean(previous?.user && !session.user);
+  if (lostUser) {
+    saveDraft(state.text);
+    state.sessionExpired = true;
+  }
+  state.session = session;
+  updateAccountUI();
+  if (lostUser) { renderView(); renderModelJobs(); }
+}
+
+function updateAccountUI() {
+  const user = state.session?.user;
+  const name = document.querySelector('#account-name');
+  const description = document.querySelector('#account-description');
+  const logout = document.querySelector('#logout-button');
+  if (name) name.textContent = isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
+  if (description) description.textContent = isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
+  if (logout) logout.hidden = !isSaas() || !user;
+  const evaluation = document.querySelector('#evaluation-nav');
+  if (evaluation) evaluation.hidden = isSaas();
+  const storageNote = document.querySelector('#workspace-storage-note');
+  if (storageNote) storageNote.textContent = isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
+  updateQuotaUI();
+}
+
+function quotaRemaining() {
+  return Number.isFinite(state.session?.quota?.remaining) ? state.session.quota.remaining : 0;
+}
+
+function webStatus() { return state.status?.web || state.session?.web || {}; }
+function webConfigured() { return webStatus().configured === true; }
+function internetMode() { return state.checkMode === 'internet'; }
+
+function updateCheckModeUI() {
+  if (!state.checkModeChosen) state.checkMode = webConfigured() ? 'internet' : 'library';
+  const internet = internetMode();
+  for (const [id, selected] of [['mode-internet', internet], ['mode-library', !internet]]) {
+    const tab = document.getElementById(id);
+    if (tab) { tab.setAttribute('aria-selected', String(selected)); tab.classList.toggle('active', selected); }
+  }
+  const description = document.querySelector('#check-mode-description');
+  if (description) {
+    description.setAttribute('aria-labelledby', internet ? 'mode-internet' : 'mode-library');
+    description.textContent = internet
+      ? 'Находим страницы через поисковый сервис, загружаем доступный текст и показываем совпадения со ссылками. Qwen для этой проверки не используется.'
+      : 'Сравниваем текст только с материалами вашей библиотеки. Этот результат не является уникальностью по интернету.';
+  }
+  const unavailable = document.querySelector('#web-availability');
+  if (unavailable) unavailable.hidden = webConfigured();
+  const setup = document.querySelector('#setup-search-link');
+  if (setup) setup.hidden = isSaas();
+  const options = document.querySelector('#internet-options');
+  if (options) options.hidden = !internet;
+  const consent = document.querySelector('#internet-consent');
+  if (consent) consent.checked = state.internetConsent;
+  const tools = document.querySelector('#library-tools');
+  if (tools) tools.hidden = internet;
+  const scope = document.querySelector('#check-scope');
+  if (scope) scope.innerHTML = scopeAside();
+  const button = document.querySelector('#check-button');
+  if (button && !button.dataset.busy) button.textContent = internet ? 'Проверить уникальность ↗' : 'Проверить по библиотеке ↗';
+  updateQuotaUI();
+}
+
+function matchingCheckRequest(text = state.text) {
+  const sourceIds = state.sources.map(source => source.id).sort();
+  return Object.values(state.checkRequests).find(entry => entry.text === text
+    && JSON.stringify(entry.source_ids) === JSON.stringify(sourceIds));
+}
+
+function updateQuotaUI() {
+  const summary = document.querySelector('#quota-summary');
+  const quota = state.session?.quota;
+  if (summary) {
+    summary.hidden = !isSaas() || !privateAccess();
+    summary.textContent = `Осталось ${number(quotaRemaining())} из ${number(quota?.limit || 6000)} знаков`;
+  }
+  const note = document.querySelector('#check-quota-note');
+  const entry = isSaas() && !internetMode() ? matchingCheckRequest() : null;
+  const length = chars(state.text).length;
+  if (note) {
+    note.hidden = !isSaas();
+    note.textContent = length > quotaRemaining()
+      ? `В тексте ${number(length)} знаков, осталось ${number(quotaRemaining())}. Текст сохранён целиком. Сократите его перед новой проверкой.`
+      : `На новую проверку ${number(length)} знаков. Осталось ${number(quotaRemaining())} из ${number(quota?.limit || 6000)} сегодня.${quota?.reset_at ? ` Лимит обновится ${date(quota.reset_at)}.` : ''}`;
+  }
+  const button = document.querySelector('#check-button');
+  const pendingWeb = internetMode() && pendingModelRequest('/api/web-check', { text: state.text, internet_consent: true });
+  if (button) button.disabled = Boolean(button.dataset.busy) || !privateAccess()
+    || Boolean(isSaas() && entry?.status !== 'complete' && length > quotaRemaining())
+    || Boolean(entry && entry.status !== 'complete')
+    || Boolean(internetMode() && (!webConfigured() || !state.internetConsent || pendingWeb));
+  updateHomeControls();
+}
+
+function saveCheckRequests() {
+  storageSet(CHECK_REQUESTS_KEY, JSON.stringify(state.checkRequests));
+}
+
+function renderCheckRequests() {
+  const area = document.querySelector('#check-requests');
+  if (!area) return;
+  const entries = isSaas() ? Object.values(state.checkRequests) : [];
+  area.hidden = !entries.length;
+  area.innerHTML = entries.map(entry => `<div class="card check-request-notice">
+    <strong>${entry.status === 'complete' ? 'Отчёт сохранён' : entry.status === 'pending' ? 'Проверка отправлена' : 'Проверка не завершена'}</strong>
+    <p>${number(chars(entry.text).length)} знаков${entry.error ? ` · ${escapeHTML(entry.error.message)}` : ''}</p>
+    ${entry.status === 'complete'
+      ? `<button class="text-button" id="open-check-${entry.request_id}" type="button">Открыть отчёт</button>`
+      : `<p class="field-help">Повторная отправка использует прежний идентификатор и исходный текст. Автоматического повтора нет.</p><button class="text-button" id="retry-check-${entry.request_id}" type="button" ${entry.status === 'pending' && state.checkSending === entry.request_id ? 'disabled' : ''}>Повторить отправку проверки</button>`}
+  </div>`).join('');
+  for (const entry of entries) {
+    document.getElementById(`retry-check-${entry.request_id}`)?.addEventListener('click', event => busy(event.currentTarget, 'Отправляем проверку', () => sendCheckRequest(entry)));
+    document.getElementById(`open-check-${entry.request_id}`)?.addEventListener('click', event => busy(event.currentTarget, 'Открываем отчёт', async () => {
+      const { report } = await api(`/api/reports/${encodeURIComponent(entry.report_id || entry.request_id)}`);
+      state.report = report;
+      state.selectedMatch = report.matches[0]?.id || null;
+      state.rewrite = null;
+      state.judgment = null;
+      if (state.view === 'check') renderReport();
+    }));
+  }
+  updateQuotaUI();
+}
+
+async function sendCheckRequest(entry) {
+  if (state.checkSending === entry.request_id) return;
+  entry.status = 'pending';
+  try { saveCheckRequests(); }
+  catch {
+    entry.status = 'rejected';
+    entry.error = { message: 'Не удалось сохранить отправку в браузере. Проверка не отправлена.' };
+    renderCheckRequests();
+    throw new Error(entry.error.message);
+  }
+  state.checkSending = entry.request_id;
+  renderCheckRequests();
+  try {
+    const { report } = await api('/api/check', { request_id: entry.request_id, text: entry.text, source_ids: entry.source_ids });
+    entry.status = 'complete';
+    entry.report_id = report.id;
+    delete entry.error;
+    saveCheckRequests();
+    acceptCheckReport(report, entry.text);
+  } catch (error) {
+    entry.status = error.status >= 400 && error.status < 500 ? 'rejected' : 'uncertain';
+    entry.error = { message: error.message, code: error.code, details: error.details };
+    saveCheckRequests();
+    throw error;
+  } finally {
+    state.checkSending = null;
+    renderCheckRequests();
+    if (privateAccess()) await refreshSession().catch(() => {});
+  }
+}
+
+function publicOperationId(key) {
+  if (!isSaas()) return undefined;
+  if (!state.operationIds[key]) {
+    state.operationIds[key] = crypto.randomUUID().replaceAll('-', '');
+    storageSet(OPERATION_IDS_KEY, JSON.stringify(state.operationIds));
+  }
+  return state.operationIds[key];
+}
+
+function acknowledgeOperation(key) {
+  if (!isSaas()) return;
+  delete state.operationIds[key];
+  storageSet(OPERATION_IDS_KEY, JSON.stringify(state.operationIds));
+}
+
+function publicReportReady(reportId = state.report?.id) {
+  return !isSaas() || Boolean(privateAccess() && state.report && state.report.id === reportId && state.text === state.report.text);
+}
+
 function modelJobTitle(entry) {
+  if (entry.path === '/api/web-check') return 'Проверка уникальности в интернете';
   if (entry.path === '/api/evaluate') return 'Оценка на учебных примерах';
   if (entry.path.includes('rewrite')) return entry.body.mode === 'quote' ? 'Оформление цитаты' : 'Предложение правки';
   return 'Сравнение фрагментов';
@@ -259,9 +654,13 @@ function canonicalModelBody(value) {
 }
 
 function pendingModelRequest(path, body) {
-  const signature = JSON.stringify(canonicalModelBody(body));
+  const signatureOf = value => {
+    const { operation_id, ...input } = value;
+    return JSON.stringify(canonicalModelBody(input));
+  };
+  const signature = signatureOf(body);
   return Object.values(state.modelJobs).find(entry => entry.path === path && modelJobActive(entry)
-    && JSON.stringify(canonicalModelBody(entry.body)) === signature);
+    && signatureOf(entry.body) === signature);
 }
 
 function candidateHasModelJob(retrievalId, candidateId) {
@@ -272,6 +671,11 @@ function candidateHasModelJob(retrievalId, candidateId) {
 function modelJobResultHTML(entry) {
   const result = entry.job?.result;
   if (!result) return '';
+  if (result.report) {
+    const report = result.report;
+    return `<p>${report.scope === 'web_search' ? 'Уникальность' : 'Отчёт'} · ${webUniqueness(report)}</p>
+      <button class="text-button" id="open-web-report-${entry.request_id}" type="button">Открыть отчёт со ссылками</button>`;
+  }
   const key = `${entry.body.retrieval_id}:${entry.body.candidate_id}`;
   if (entry.path === '/api/candidate-judge') {
     if (!entry.latestLoaded) return '<p>Ответ задания сохранён. Актуальную оценку пары пока не удалось загрузить. Откройте отчёт и обновите её перед правкой.</p>';
@@ -300,6 +704,7 @@ function modelJobResultHTML(entry) {
 function renderModelJobs() {
   const panel = document.querySelector('#model-jobs-panel');
   if (!panel) return;
+  if (!privateAccess() || state.view === 'home') { panel.hidden = true; updateHomeControls(); return; }
   const entries = Object.values(state.modelJobs);
   const openResults = entries.filter(entry => document.getElementById(`model-job-result-${entry.request_id}`)?.open);
   const focusedId = panel.contains(document.activeElement) ? document.activeElement.id : '';
@@ -341,6 +746,16 @@ function renderModelJobs() {
   }
   if (focusedId) document.getElementById(focusedId)?.focus({ preventScroll: true });
   for (const entry of entries) {
+    document.getElementById(`open-web-report-${entry.request_id}`)?.addEventListener('click', () => {
+      const report = entry.job?.result?.report;
+      if (!report) return;
+      state.report = report;
+      state.selectedMatch = report.matches[0]?.id || null;
+      state.rewrite = null;
+      state.judgment = null;
+      if (state.view === 'check') renderReport();
+      else location.hash = '#check';
+    });
     document.getElementById(`model-job-cancel-${entry.request_id}`)?.addEventListener('click', event => busy(event.currentTarget, 'Останавливаем', async () => {
       const { job } = await api(`/api/jobs/${entry.request_id}/cancel`, {});
       entry.job = job;
@@ -372,9 +787,9 @@ async function submitModelJob(entry) {
   }
   renderModelJobs();
   try {
-    const { job } = await api('/api/model-jobs', {
-      request_id: entry.request_id, path: entry.path, body: entry.body,
-    });
+    const { job } = entry.path === '/api/web-check'
+      ? await api('/api/web-check-jobs', { request_id: entry.request_id, ...entry.body })
+      : await api('/api/model-jobs', { request_id: entry.request_id, path: entry.path, body: entry.body });
     if (job.id !== entry.request_id) throw new Error('Сервер вернул неожиданный идентификатор задания.');
     entry.job = job;
     entry.status = job.status;
@@ -410,6 +825,12 @@ async function observeModelJob(entry) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch (error) {
+      if (authError(error)) {
+        entry.watchMessage = 'Войдите в аккаунт, чтобы восстановить наблюдение за заданием.';
+        saveModelJobs();
+        renderModelJobs();
+        throw error;
+      }
       entry.status = 'missing';
       entry.job = null;
       entry.watchMessage = error.message;
@@ -421,7 +842,17 @@ async function observeModelJob(entry) {
       entry.latestLoaded = Boolean(await loadCandidateJudgments(entry.body.retrieval_id, true));
       renderModelJobs();
     }
-    if (entry.job.status === 'complete') return entry.job.result;
+    if (entry.job.status === 'complete') {
+      if (entry.path === '/api/web-check' && entry.job.result?.report) {
+        if (entry.context?.surface === 'home' && state.homeText === entry.body.text) {
+          state.homeReport = entry.job.result.report;
+          if (state.view === 'home') renderHomeResult();
+        }
+        if (state.text === entry.job.result.report.text && state.view === 'check') acceptCheckReport(entry.job.result.report, entry.body.text);
+        if (isSaas() && privateAccess()) await refreshSession().catch(() => {});
+      }
+      return entry.job.result;
+    }
     const error = new Error(entry.job.error || 'Задание остановлено. Сохранённые результаты остаются доступны.');
     error.code = entry.job.code;
     error.details = entry.job.details;
@@ -433,7 +864,14 @@ async function observeModelJob(entry) {
 }
 
 async function modelRequest(path, body, context = {}) {
-  if (modelProvider() !== 'modal') return api(path, body);
+  if (isSaas()) {
+    if (path === '/api/evaluate') throw new Error('Диагностическая оценка недоступна в общем сервисе.');
+    if (!publicReportReady(context.report_id || body.report_id || state.report?.id)) {
+      throw new Error('Сначала проверьте текущий текст. Смысловые операции доступны для сохранённого отчёта этого текста.');
+    }
+    if (path === '/api/compare') body = { ...body, report_id: state.report.id };
+  }
+  if (modelProvider() !== 'modal' && !isSaas()) return api(path, body);
   if (body.mode !== 'quote' && !modelAvailable()) {
     throw new Error('Отправка модельных заданий сейчас отключена. Проверьте настройки сервера.');
   }
@@ -448,6 +886,7 @@ async function modelRequest(path, body, context = {}) {
   const generation = (modelRequestGenerations.get(actionKey) || 0) + 1;
   modelRequestGenerations.set(actionKey, generation);
   const requestId = crypto.randomUUID().replaceAll('-', '');
+  if (isSaas()) body = { ...body, operation_id: requestId };
   const entry = { request_id: requestId, path, body, context, created_at: new Date().toISOString(), status: 'submitting' };
   state.modelJobs[requestId] = entry;
   await submitModelJob(entry);
@@ -458,6 +897,73 @@ async function modelRequest(path, body, context = {}) {
     throw error;
   }
   return result;
+}
+
+async function startWebCheck({ text = state.text, consent = state.internetConsent, surface = 'check' } = {}) {
+  if (!webConfigured()) throw new Error('Проверка по интернету ещё не подключена. Подключите поисковый сервис перед запуском.');
+  if (!text.trim()) throw new Error('Вставьте текст для проверки.');
+  if (textLengthError(text)) throw new Error(textLengthError(text));
+  if (!consent) throw new Error('Подтвердите отправку поисковых фрагментов для проверки по интернету.');
+  if (isSaas() && chars(text).length > quotaRemaining()) throw new Error('Текст превышает остаток дневного лимита. Черновик сохранён целиком.');
+  const body = { text, internet_consent: true };
+  const pending = pendingModelRequest('/api/web-check', body);
+  if (pending) throw new Error('Для этого текста уже есть задание. Его состояние и повторная отправка доступны в уведомлении.');
+  const id = crypto.randomUUID().replaceAll('-', '');
+  const entry = { request_id: id, path: '/api/web-check', body, context: { surface }, created_at: new Date().toISOString(), status: 'submitting' };
+  state.modelJobs[id] = entry;
+  await submitModelJob(entry);
+  const { report } = await observeModelJob(entry);
+  if (surface === 'home') {
+    state.homeReport = report;
+    if (state.view === 'home') renderHomeResult();
+  } else acceptCheckReport(report, text);
+}
+
+function updateHomeControls() {
+  const button = document.querySelector('#home-check-button');
+  if (!button) return;
+  const pending = pendingModelRequest('/api/web-check', { text: state.homeText, internet_consent: true });
+  const length = chars(state.homeText).length;
+  button.disabled = Boolean(button.dataset.busy) || !webConfigured() || !state.homeConsent || !state.homeText.trim()
+    || Boolean(pending) || Boolean(isSaas() && length > quotaRemaining());
+  const count = document.querySelector('#home-character-count');
+  if (count) count.textContent = `${number(length)} знаков`;
+  const status = document.querySelector('#home-search-status');
+  if (status) status.textContent = webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету';
+  const setup = document.querySelector('#home-setup-search');
+  if (setup) setup.hidden = webConfigured() || isSaas();
+  const missing = document.querySelector('#home-search-unavailable');
+  if (missing) missing.hidden = webConfigured();
+  const quota = document.querySelector('#home-quota');
+  if (quota) { quota.hidden = !isSaas(); quota.textContent = `Осталось ${number(quotaRemaining())} из ${number(state.session.quota?.limit || 6000)} знаков сегодня.`; }
+  const progress = document.querySelector('#home-check-progress');
+  if (progress) {
+    progress.hidden = !pending;
+    progress.textContent = pending ? `${pending.job?.stage || 'Состояние проверки сохранено'}. Подробности доступны в рабочем пространстве.` : '';
+  }
+  const stale = document.querySelector('#home-report-stale');
+  if (stale) stale.hidden = state.homeReport?.text === state.homeText;
+}
+
+function renderHomeResult() {
+  const area = document.querySelector('#home-report-result');
+  if (!area) return;
+  const report = state.homeReport;
+  area.hidden = !report || report.scope !== 'web_search';
+  if (area.hidden) return;
+  area.innerHTML = `<section class="home-result-card">
+    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webUniqueness(report)}</h2><p>${webCheckComplete(report) ? 'уникальность по найденным страницам' : 'проверка неполная · показана только доступная оценка'}</p></div><a href="#check" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
+    <p id="home-report-stale" class="warning" hidden>Это отчёт для предыдущего текста. Новая правка в поле сохранена отдельно.</p>
+    ${report.matches.length ? `<div class="home-result-sources">${report.matches.map(match => `<article><h3>${escapeHTML(match.source_title)}</h3>${safeLink(match.source_url, 'Страница-источник')}<blockquote>${escapeHTML(match.excerpt)}</blockquote><p class="field-help">Совпавший фрагмент страницы</p><blockquote>${escapeHTML(match.source_excerpt)}</blockquote></article>`).join('')}</div>` : '<p>На найденных доступных страницах дословных совпадений не обнаружено.</p>'}
+    ${webCoverageHTML(report)}
+  </section>`;
+  document.querySelector('#home-open-full-report').addEventListener('click', () => {
+    state.report = report;
+    state.selectedMatch = report.matches[0]?.id || null;
+    state.rewrite = null;
+    state.judgment = null;
+  });
+  updateHomeControls();
 }
 
 let toastTimer;
@@ -475,13 +981,14 @@ async function busy(button, label, action) {
   button.disabled = true;
   button.innerHTML = `<span class="spinner" aria-hidden="true"></span>${escapeHTML(label)}`;
   try { await action(); }
-  catch (error) { if (error.code !== 'stale_result') toast(error.message, true); }
+  catch (error) { if (!['stale_result', 'session_changed'].includes(error.code)) toast(error.message, true); }
   finally {
     if (button.isConnected) {
       delete button.dataset.busy;
       button.disabled = false;
       button.innerHTML = original;
       updateModelActionControls();
+      updateAuthButton();
     }
   }
 }
@@ -499,6 +1006,15 @@ function empty(title, description, symbol = '⌕') {
   return `<div class="empty-state"><span class="empty-symbol" aria-hidden="true">${symbol}</span><h3>${escapeHTML(title)}</h3><p>${escapeHTML(description)}</p></div>`;
 }
 function scopeAside() {
+  if (internetMode()) return `
+    <div class="side-stack">
+      <section class="card side-card"><h2>Область проверки <span class="scope-badge">Интернет</span></h2>
+        <p>Поисковые фразы помогают найти страницы. Совпадения проверяются по загруженному тексту страниц и сопровождаются ссылками.</p>
+        <p class="field-help">Поисковый сниппет сам по себе не считается доказательством совпадения.</p>
+      </section>
+      <aside class="hint-card"><h3>Что означает процент</h3><p>Доля слов без найденных дословных совпадений на доступных страницах. Закрытые сайты, пересказы и переводы могут остаться незамеченными.</p></aside>
+      <p class="coverage-note">Если поиск или загрузка страниц завершатся с ошибками, итоговая уникальность будет помечена как неустановленная.</p>
+    </div>`;
   return `
     <div class="side-stack">
       <section class="card side-card">
@@ -516,7 +1032,7 @@ function scopeAside() {
         <p>Откройте совпадение, сравните фрагменты и проверьте, как автор указал источник.</p>
       </aside>
       <p class="coverage-note"><span aria-hidden="true">◌</span>
-        <span>Поиск по открытому интернету ещё не подключён. В отчёте учитывается только ваша библиотека.</span>
+        <span>Этот режим учитывает только вашу библиотеку. Для поиска страниц выберите вкладку «Интернет».</span>
       </p>
     </div>`;
 }
@@ -626,88 +1142,88 @@ function scrollHomeSection(id) {
 }
 
 function renderHome() {
+  const maxQueries = Number.isInteger(webStatus().max_queries) ? webStatus().max_queries : 6;
+  const maxUrls = Number.isInteger(webStatus().max_urls) ? webStatus().max_urls : 12;
   main.innerHTML = `
-    <div class="home-page">
+    <div class="home-page home-v2">
       <header class="home-nav">
-        <a class="home-brand" href="#home" aria-label="Исток, главная"><span class="home-brand-mark">и</span>исток<span class="home-brand-dot">.</span></a>
-        <nav aria-label="Главная навигация">
-          <a href="#check">Проверить</a>
-          <a href="#home" data-home-scroll="home-how">Как это работает</a>
-          <a href="#home" data-home-scroll="home-demo">Пример отчёта</a>
-        </nav>
-        <a class="home-nav-cta" href="#check">Открыть проверку <span aria-hidden="true">↗</span></a>
+        <a class="home-brand" href="#home" aria-label="Исток, главная">исток<span class="home-brand-dot">.</span></a>
+        <nav aria-label="Главная навигация"><a href="#home" data-home-scroll="home-check">Проверить текст</a><a href="#home" data-home-scroll="home-how">Как это работает</a><a href="#home" data-home-scroll="home-scope">Что входит в оценку</a></nav>
+        <a class="home-nav-cta" href="#check">Рабочее пространство ↗</a>
       </header>
-      <section class="home-hero">
-        <div class="home-hero-copy home-reveal">
-          <p class="home-overline">Проверка текста с опорой на источники</p>
-          <h1>
-            <span class="home-headline-line">У каждого</span>
-            <span class="home-headline-line">совпадения</span>
-            <span class="home-headline-line">есть <em>источник.</em></span>
-          </h1>
-          <p class="home-hero-description">Найдите заимствования в статье. Увидьте исходный фрагмент. Решите, что требует ссылки или правки.</p>
-          <div class="home-hero-actions">
-            <a class="home-primary" href="#check">Проверить документ <span aria-hidden="true">↗</span></a>
-            <button class="home-text-link" data-home-demo type="button">Посмотреть пример <span aria-hidden="true">↘</span></button>
-          </div>
-          <p class="home-hero-helper">TXT / MD · Сравнение с вашей библиотекой источников.</p>
-          ${state.text.trim() ? '<p class="home-draft-note">Ваш сохранённый черновик доступен в редакторе.</p>' : ''}
+      <section class="home-v2-hero" id="home-check">
+        <div class="home-orbit home-orbit-one" aria-hidden="true"></div><div class="home-orbit home-orbit-two" aria-hidden="true"></div>
+        <div class="home-v2-copy">
+          <p class="home-kicker">Исток · проверка текста с источниками</p>
+          <h1 class="home-v2-title" aria-label="Проверьте уникальность текста"><span data-reveal>Проверьте</span><span data-reveal>уникальность</span><span data-reveal>текста<span class="home-title-dot" aria-hidden="true">.</span></span></h1>
+          <p class="home-v2-description">Найдите страницы с совпадениями.<br>Сверьте фрагменты. Сохраните ссылки.</p>
+          <p class="home-v2-status" id="home-search-status">${webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету'}</p>
+          ${state.text.trim() ? '<p class="home-existing-draft">Есть черновик в рабочем пространстве. <a href="#check">Продолжить его ↗</a></p>' : ''}
         </div>
-        <div class="home-proof home-reveal" aria-label="Учебный пример сравнения фрагментов">
-          <div class="home-proof-heading"><span>Фрагмент статьи</span><span>Учебный пример</span></div>
-          <article class="home-proof-paper">
-            <div class="home-paper-top"><span class="home-paper-icon" aria-hidden="true">▤</span><span>Общие пространства в городе</span></div>
-            <p>Общие пространства в городе могут объединять людей вокруг повседневных дел.</p>
-            <p><mark>Городские сады помогают жителям выращивать овощи рядом с домом и знакомиться с соседями.</mark></p>
-            <p class="home-paper-faded">Для небольшого участка особенно важны доступ к воде, солнечное место и регулярный уход за почвой.</p>
-            <div class="home-paper-finding"><span class="home-finding-dot"></span>Этот фрагмент есть в источнике</div>
-          </article>
-          <div class="home-proof-connector" aria-hidden="true"><span></span>↙</div>
-          <article class="home-proof-source">
-            <div class="home-source-eyebrow">МАТЕРИАЛ БИБЛИОТЕКИ</div>
-            <h2>Городские сады</h2>
-            <p>Городские сады помогают жителям выращивать овощи рядом с домом и знакомиться с соседями.</p>
-            <button class="home-source-link" data-home-demo type="button">Сверить в настоящем отчёте <span aria-hidden="true">↗</span></button>
-          </article>
-        </div>
-        <div class="home-hero-bottom"><span>Статья и источник рядом.</span><a href="#home" data-home-scroll="home-demo">Посмотрите сами <span aria-hidden="true">↓</span></a></div>
+        <form class="home-checker" id="home-check-form">
+          <div class="home-checker-heading"><label for="home-text">Ваш текст</label><label class="home-file-button">Загрузить TXT / MD<input id="home-file" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label></div>
+          <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте статью, заметку или абзац, который хотите проверить…"></textarea>
+          <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
+          <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>С пробелами</span></div>
+          <label class="home-consent"><input id="home-consent" type="checkbox">Разрешаю отправить поисковые фрагменты этого текста внешнему поисковому сервису для поиска источников.</label>
+          <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
+          <p class="home-quota" id="home-quota" hidden></p>
+          <p class="home-connect-note" id="home-search-unavailable" ${webConfigured() ? 'hidden' : ''}>Интернет-поиск пока не подключён к этому экземпляру. Кнопка станет доступна после подключения сервиса.</p>
+          <a class="home-setup-link" id="home-setup-search" href="/setup-search.html" ${isSaas() || webConfigured() ? 'hidden' : ''}>Подключить поисковый сервис ↗</a>
+          <p class="home-check-progress" id="home-check-progress" role="status" hidden></p>
+          <p class="inline-error" id="home-check-error" role="alert"></p>
+          <a class="home-secondary-check" id="home-library-link" href="#check">Или открыть проверку по своей библиотеке ↗</a>
+        </form>
       </section>
-      <section class="home-how home-section" id="home-how">
-        <div class="home-section-heading"><p class="home-section-label">Рабочий процесс</p><h2>От найденного фрагмента<br>к решению редактора.</h2></div>
-        <div class="home-workflow">
-          <article><span class="home-step-symbol" aria-hidden="true">↥</span><h3>Добавьте статью <br>и материалы</h3><p>Загрузите свой текст и библиотеку публикаций, с которыми его нужно сравнить.</p></article>
-          <article><span class="home-step-symbol" aria-hidden="true">⌕</span><h3>Сверьте слова <br>и смысл</h3><p>Откройте совпадения и похожие фрагменты. Qwen поможет сравнить найденные пары.</p></article>
-          <article><span class="home-step-symbol" aria-hidden="true">↗</span><h3>Сохраните решение <br>и доработайте текст</h3><p>Подтвердите или отклоните находку. Оформите цитату или проверьте предложенную правку.</p></article>
+      <div id="home-report-result" class="home-report-result" hidden></div>
+      <div class="home-process-ribbon" aria-hidden="true"><div>Найти страницу <span>↗</span> Сверить текст <span>↗</span> Открыть источник <span>↗</span> Найти страницу <span>↗</span></div></div>
+      <section class="home-v2-how home-section" id="home-how">
+        <div class="home-section-heading"><p class="home-section-label" data-reveal>От текста к источнику</p><h2 data-reveal>Сначала совпадения.<br>Потом процент.</h2></div>
+        <div class="home-process-rows">
+          <article data-reveal><span>01</span><div><h3>Ищем страницы</h3><p>Составляем поисковые фразы из текста и получаем адреса возможных источников.</p></div></article>
+          <article data-reveal><span>02</span><div><h3>Сверяем содержимое</h3><p>Загружаем доступные страницы. Проверяем совпадения по их тексту, а не по поисковому сниппету.</p></div></article>
+          <article data-reveal><span>03</span><div><h3>Показываем, что совпало</h3><p>В отчёте остаются фрагменты, ссылки и результат проверки. Его можно скачать для чтения.</p></div></article>
         </div>
       </section>
-      <section class="home-demo-section home-section" id="home-demo">
-        <div class="home-demo-intro"><div><p class="home-section-label">Загляните в отчёт</p><h2>Посмотрите,<br>что совпало.</h2></div><p>Фрагмент статьи рядом с материалом библиотеки. Учебные тексты специально содержат заимствования, которые можно найти и проверить.</p></div>
-        <div class="home-demo-workbench">
-          <div class="home-demo-toolbar"><span><span class="home-demo-status-dot"></span>Учебная статья · Городские пространства</span><button class="home-demo-run" data-home-demo type="button">Проверить этот пример <span aria-hidden="true">↗</span></button></div>
-          <div id="home-demo-result"></div>
+      <section class="home-v2-scope home-section" id="home-scope">
+        <div data-reveal><p class="home-section-label">Понятные границы</p><h2>Процент со ссылками.<br>И с объяснением.</h2><p class="home-scope-copy">Уникальность — доля слов без найденных дословных совпадений на доступных страницах. Закрытые сайты, переводы и глубокие пересказы могут остаться незамеченными. Если часть поиска не завершилась, мы покажем это в отчёте.</p></div>
+        <div class="home-search-limits" data-reveal>
+          <div role="group" aria-label="До ${maxQueries} поисковых запросов за проверку"><small>До</small><strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span>поисковых запросов за проверку</span></div>
+          <div role="group" aria-label="До ${maxUrls} страниц для сверки"><small>До</small><strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span>страниц для сверки текста</span></div>
         </div>
-        <p class="home-demo-caption">Проверка примера использует рабочий поиск Истока. Ваш черновик в редакторе сохраняется.</p>
+        <p class="home-processing-note">Для интернет-проверки поисковые фрагменты передаются внешнему поисковому сервису. Смысловая сверка с Qwen — отдельный дополнительный инструмент.</p>
       </section>
-      <section class="home-privacy home-section">
-        <div><p class="home-section-label">Ваша библиотека. Ваши решения.</p><h2>Понятно, где<br>обрабатывается текст.</h2></div>
-        <div class="home-privacy-copy"><p>Точный поиск сверяет текст с вашей библиотекой. Источники, черновики и отчёты сохраняются в этом рабочем пространстве.</p><p data-processing-disclosure>${escapeHTML(processingDisclosure())}</p><p>Поиск по открытому интернету ещё не подключён.</p><a href="#sources">Открыть библиотеку источников <span aria-hidden="true">↗</span></a></div>
+      <section class="home-v2-library home-section" data-reveal>
+        <p class="home-section-label">Для собственных материалов</p><h2>Есть своя библиотека?</h2><p>Сравнивайте текст с выбранными публикациями отдельно от интернет-поиска. В вашем рабочем пространстве <strong id="home-library-count">${number(state.sources.length)}</strong> материалов.</p><a href="#sources">Открыть библиотеку ↗</a>
       </section>
-      <section class="home-final home-section"><p class="home-section-label">Начните со своего текста</p><h2>Проверьте статью<br>перед публикацией.</h2><a class="home-primary" href="#check">Проверить документ <span aria-hidden="true">↗</span></a><p>Сверяйте фрагменты. Сохраняйте источники. Решение за вами.</p></section>
-      <footer class="home-footer"><a class="home-brand" href="#home">исток<span class="home-brand-dot">.</span></a><span>Проверка по вашей библиотеке источников</span><a href="#check">К проверке <span aria-hidden="true">↗</span></a></footer>
+      <footer class="home-footer"><a class="home-brand" href="#home">исток<span class="home-brand-dot">.</span></a><span>У каждого совпадения есть источник</span><a href="#home" data-home-scroll="home-check">К проверке ↑</a></footer>
     </div>`;
-  main.querySelectorAll('[data-home-scroll]').forEach(link => {
-    link.addEventListener('click', event => {
-      event.preventDefault();
-      scrollHomeSection(link.dataset.homeScroll);
+  const field = document.querySelector('#home-text');
+  field.value = state.homeText;
+  document.querySelector('#home-consent').checked = state.homeConsent;
+  field.addEventListener('input', () => {
+    state.homeText = field.value;
+    try { storageSet(HOME_DRAFT_KEY, field.value); } catch { /* The current field remains available. */ }
+    document.querySelector('#home-check-error').textContent = '';
+    updateHomeControls();
+  });
+  document.querySelector('#home-consent').addEventListener('change', event => { state.homeConsent = event.target.checked; updateHomeControls(); });
+  document.querySelector('#home-file').addEventListener('change', async event => {
+    try { await readTextFile(event.target, field); } catch (error) { document.querySelector('#home-check-error').textContent = error.message; }
+  });
+  document.querySelector('#home-check-form').addEventListener('submit', event => {
+    event.preventDefault();
+    return busy(document.querySelector('#home-check-button'), 'Ищем источники…', async () => {
+      try { await startWebCheck({ text: state.homeText, consent: state.homeConsent, surface: 'home' }); }
+      catch (error) { if (document.querySelector('#home-check-error')) document.querySelector('#home-check-error').textContent = error.message; throw error; }
+      finally { updateHomeControls(); }
     });
   });
-  main.querySelectorAll('[data-home-demo]').forEach(button => {
-    button.addEventListener('click', () => {
-      scrollHomeSection('home-demo');
-      busy(button, 'Проверяем пример', runHomeDemo);
-    });
-  });
-  renderHomeDemo();
+  document.querySelector('#home-library-link').addEventListener('click', () => { state.checkMode = 'library'; state.checkModeChosen = true; });
+  main.querySelectorAll('[data-home-scroll]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); scrollHomeSection(link.dataset.homeScroll); }));
+  renderHomeResult();
+  updateHomeControls();
+  window.IstokMotion?.mount(main);
 }
 
 function renderHomeDemo() {
@@ -740,6 +1256,11 @@ function renderHomeDemo() {
 }
 
 async function runHomeDemo() {
+  if (isSaas()) {
+    location.hash = '#check';
+    toast('Учебный текст можно открыть кнопкой «Попробовать на примере». Проверка расходует дневной лимит.');
+    return;
+  }
   if (state.homeDemoRunning) return;
   state.homeDemoRunning = true;
   try {
@@ -757,11 +1278,19 @@ async function runHomeDemo() {
 
 function renderCheck() {
   main.innerHTML = heading(
-    'Проверьте свой текст.',
-    'Найдите совпадения, сравните источники и доработайте текст.',
+    'Проверьте уникальность текста.',
+    'Выберите область проверки. Получите найденные фрагменты и ссылки на источники.',
     '<button class="text-button" id="load-demo" type="button">Попробовать на примере <span aria-hidden="true">↗</span></button>',
-    'Сравнение с вашей библиотекой'
+    'Интернет и ваша библиотека'
   ) + `
+    <div class="check-modes" role="tablist" aria-label="Область проверки">
+      <button class="mode-tab" id="mode-internet" role="tab" type="button" aria-controls="check-mode-description" aria-selected="false">Интернет</button>
+      <button class="mode-tab" id="mode-library" role="tab" type="button" aria-controls="check-mode-description" aria-selected="true">Библиотека</button>
+    </div>
+    <p class="mode-description" id="check-mode-description" role="tabpanel"></p>
+    <div class="warning web-availability" id="web-availability">Проверка уникальности по интернету ещё не подключена. Для неё нужен поисковый сервис.
+      <a href="/setup-search.html" id="setup-search-link">Подключить поиск в этом локальном экземпляре ↗</a>
+    </div>
     <div class="workspace-grid">
       <div>
         <section class="card editor-card">
@@ -776,15 +1305,21 @@ function renderCheck() {
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
-            <span>До 200 000 знаков</span>
+            <span>${isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
+          </div>
+          <div class="internet-options" id="internet-options" hidden>
+            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста внешнему поисковому сервису для поиска страниц-источников.</label>
           </div>
           <div class="editor-footer">
             <p id="draft-status">Черновик сохраняется на этом Mac</p>
             <button class="button" id="check-button" type="button">Проверить текст <span aria-hidden="true">↗</span></button>
           </div>
         </section>
+        <p class="field-help quota-note" id="check-quota-note" hidden></p>
+        ${isSaas() ? '<p class="field-help quota-note">До 3 проверок, 60 сравнений модели и 3 правок в сутки. Один поиск кандидатов на отчёт. Смысловые действия доступны после проверки неизменённого текста.</p>' : ''}
+        <section id="check-requests" aria-label="Сохранённые отправки проверок" hidden></section>
         <div id="check-error" role="alert"></div>
-        <section class="card direct-compare">
+        <section class="card direct-compare" id="library-tools">
           <h2>Есть предполагаемый источник?</h2>
           <p>Попросите Qwen сравнить смысл вашего текста с конкретным материалом из библиотеки.
             До 12 000 знаков суммарно в двух текстах.</p>
@@ -798,7 +1333,7 @@ function renderCheck() {
           <div id="direct-judgment"></div>
         </section>
       </div>
-      ${scopeAside()}
+      <div id="check-scope">${scopeAside()}</div>
     </div>
     <section class="report-section" id="report-area" aria-live="polite"></section>`;
   const textarea = document.querySelector('#check-text');
@@ -812,6 +1347,25 @@ function renderCheck() {
   updateCharacterCount();
   validateTextLength(textarea);
   updateDraftStatus();
+  for (const [id, mode] of [['mode-internet', 'internet'], ['mode-library', 'library']]) {
+    document.getElementById(id).addEventListener('click', () => {
+      state.checkMode = mode;
+      state.checkModeChosen = true;
+      updateCheckModeUI();
+    });
+    document.getElementById(id).addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      event.preventDefault();
+      state.checkMode = mode === 'internet' ? 'library' : 'internet';
+      state.checkModeChosen = true;
+      document.getElementById(mode === 'internet' ? 'mode-library' : 'mode-internet').focus();
+      updateCheckModeUI();
+    });
+  }
+  document.querySelector('#internet-consent').addEventListener('change', event => {
+    state.internetConsent = event.target.checked;
+    updateQuotaUI();
+  });
   document.querySelector('#text-file').addEventListener('change', async event => {
     try { await readTextFile(event.target, textarea); } catch (error) { toast(error.message, true); }
   });
@@ -845,14 +1399,35 @@ function renderCheck() {
     resultArea.innerHTML = judgmentHTML(judgment);
   }));
   renderReport();
+  renderCheckRequests();
+  updateCheckModeUI();
   updateModelActionControls();
 }
 async function checkText() {
   if (!state.text.trim()) throw new Error('Вставьте текст для проверки.');
   if (textLengthError(state.text)) throw new Error(textLengthError(state.text));
+  if (internetMode()) return startWebCheck();
   if (!state.sources.length) throw new Error('Сначала добавьте хотя бы один источник или откройте готовый пример.');
   const text = state.text;
+  if (isSaas()) {
+    const previous = matchingCheckRequest(text);
+    if (previous?.status === 'complete') {
+      const { report } = await api(`/api/reports/${encodeURIComponent(previous.report_id || previous.request_id)}`);
+      acceptCheckReport(report, text);
+      return;
+    }
+    if (previous) throw new Error('Для этого текста есть сохранённая отправка. Используйте её кнопку повторной отправки.');
+    if (chars(text).length > quotaRemaining()) throw new Error('Текст превышает остаток дневного лимита. Он сохранён целиком в редакторе.');
+    const id = crypto.randomUUID().replaceAll('-', '');
+    const entry = { request_id: id, text, source_ids: state.sources.map(source => source.id).sort(), status: 'pending' };
+    state.checkRequests[id] = entry;
+    return sendCheckRequest(entry);
+  }
   const { report } = await api('/api/check', { text });
+  acceptCheckReport(report, text);
+}
+
+function acceptCheckReport(report, text) {
   if (state.text !== text) {
     toast('Отчёт для предыдущего варианта сохранён в истории. Проверьте обновлённый текст.');
     return;
@@ -884,7 +1459,7 @@ function annotatedText(report) {
 function matchCardHTML(match, index) {
   const selected = match.id === state.selectedMatch;
   const label = reviewLabel(match.id);
-  return `
+  return `<div class="match-entry">
     <button class="match-item ${selected ? 'selected' : ''}" data-match="${escapeHTML(match.id)}" type="button">
       <div class="match-kicker">
         <span>Фрагмент ${index + 1}</span>
@@ -894,7 +1469,41 @@ function matchCardHTML(match, index) {
       <p>${escapeHTML(match.excerpt.slice(0, 120))}${match.excerpt.length > 120 ? '…' : ''}</p>
       ${match.quoted ? '<div class="subtle">Есть признаки оформления цитаты</div>' : ''}
       ${label ? `<div class="finding-badge ${state.report.reviews[match.id].decision}">${escapeHTML(label)}</div>` : ''}
-    </button>`;
+    </button>
+    ${state.report?.scope === 'web_search' ? safeLink(match.source_url, 'Открыть страницу-источник') : ''}
+    </div>`;
+}
+
+function hasWebSources(report) {
+  const count = report.source_snapshots_count ?? report.web?.sources_checked ?? report.stats?.checked_source_count;
+  return Number.isInteger(count) && count > 0;
+}
+
+function webCheckComplete(report) {
+  return hasWebSources(report) && (report.web ? report.web.status === 'complete' && !report.web.errors?.length : report.scope === 'web_search');
+}
+
+function webUniqueness(report) {
+  const value = report.stats?.uniqueness_percent;
+  if (webCheckComplete(report) && Number.isFinite(value) && value >= 0 && value <= 100) {
+    return `${value.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`;
+  }
+  const upper = report.stats?.uniqueness_upper_bound_percent;
+  return hasWebSources(report) && Number.isFinite(upper) && upper >= 0 && upper <= 100
+    ? `Не выше ${upper.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%` : 'Не установлена';
+}
+
+function webCoverageHTML(report) {
+  const web = report.web || {};
+  return `<section class="card web-coverage">
+    <h3>${webCheckComplete(report) ? 'Проверка найденных страниц завершена' : 'Проверка завершена не полностью'}</h3>
+    <p>Поисковых запросов выполнено ${number(web.queries_completed)} из ${number(web.queries_planned)}.
+      Проверено страниц ${number(web.sources_checked)}. Попыток загрузки ${number(web.urls_attempted)}.</p>
+    <p class="field-help">Уникальность — доля слов без найденных дословных совпадений в загруженных страницах. Поисковые сниппеты не используются как доказательство. Оценка Qwen в этот процент не входит.</p>
+    ${web.status !== 'complete' && Number.isFinite(report.stats?.uniqueness_upper_bound_percent) ? '<p class="field-help">По найденным совпадениям указана верхняя граница уникальности. Проверка остальных страниц неполная, окончательный процент не установлен.</p>' : ''}
+    ${web.errors?.length ? `<details><summary>Не удалось проверить · ${number(web.errors.length)}</summary><ul>${web.errors.map(error => `<li>${escapeHTML(typeof error === 'string' ? error : error.message || 'Источник недоступен')} ${typeof error === 'object' ? safeLink(error.url) : ''}</li>`).join('')}</ul></details>` : ''}
+    <ul class="field-help">${(web.limitations || ['Оценка относится к найденным доступным страницам, а не ко всему интернету.']).map(value => `<li>${escapeHTML(value)}</li>`).join('')}</ul>
+  </section>`;
 }
 
 function renderReport() {
@@ -907,6 +1516,7 @@ function renderReport() {
   const report = state.report;
   const stats = report.stats;
   const matches = report.matches;
+  const webReport = report.scope === 'web_search';
   const selected = matches.find(match => match.id === state.selectedMatch);
   area.innerHTML = `
     <div id="stale-report" class="warning" hidden>
@@ -915,20 +1525,21 @@ function renderReport() {
       <button class="text-button" id="restore-report-text" type="button">Открыть текст отчёта в редакторе</button>
     </div>
     <div class="section-heading">
-      <div><h2>Фрагменты для сверки</h2><p>По библиотеке источников · ${escapeHTML(date(report.created_at))}</p></div>
+      <div><h2>${webReport ? 'Проверка уникальности по интернету' : 'Фрагменты для сверки'}</h2><p>${webReport ? 'Найденные доступные страницы' : 'По библиотеке источников'} · ${escapeHTML(date(report.created_at))}</p></div>
       <div class="action-row">
         <button class="text-button" id="download-reading-report" type="button">↓ Отчёт для чтения</button>
         <button class="text-button" id="download-report" type="button">↓ Данные JSON</button>
       </div>
     </div>
     <div class="stats-row">
-      <div class="stat-card">
-        <strong>${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%</strong>
-        <span>текста с лексическими совпадениями</span>
+      <div class="stat-card ${webReport ? 'web-uniqueness' : ''}">
+        <strong>${webReport ? webUniqueness(report) : `${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`}</strong>
+        <span>${webReport ? report.web?.status === 'complete' ? 'уникальность по найденным страницам' : 'проверка неполная · окончательный процент не установлен' : 'текста с лексическими совпадениями'}</span>
       </div>
       <div class="stat-card"><strong>${number(matches.length)}</strong><span>найдено фрагментов</span></div>
       <div class="stat-card"><strong>${number(stats.source_count)}</strong><span>источников с совпадениями</span></div>
     </div>
+    ${webReport ? webCoverageHTML(report) : ''}
     ${(report.issues || []).map(issue => `<div class="warning">${escapeHTML(typeof issue === 'string' ? issue : issue.message || JSON.stringify(issue))}</div>`).join('')}
     ${matches.length ? `
       <div class="report-grid">
@@ -941,8 +1552,8 @@ function renderReport() {
         </div>
         <div class="match-list">${matches.map(matchCardHTML).join('')}</div>
       </div>` : empty(
-        'Лексических совпадений в библиотеке не найдено',
-        'Глубокие пересказы могут остаться незамеченными. Для сравнения с конкретным источником используйте Qwen.',
+        webReport ? 'На доступных страницах совпадений не найдено' : 'Лексических совпадений в библиотеке не найдено',
+        webReport ? 'Это результат ограниченного поиска. Недоступные страницы, пересказы и переводы могут остаться незамеченными.' : 'Глубокие пересказы могут остаться незамеченными. Для сравнения с конкретным источником используйте Qwen.',
         '⌕'
       )}
     <div id="comparison-area">${selected ? comparisonHTML(selected) : ''}</div>
@@ -980,8 +1591,7 @@ function renderReport() {
   });
   bindComparison(selected);
   updateReportFreshness();
-  renderRetrieval();
-  loadRetrieval(report.id);
+  if (!webReport) { renderRetrieval(); loadRetrieval(report.id); }
   updateModelActionControls();
 }
 
@@ -1195,6 +1805,7 @@ async function pollRetrieval(reportId, jobId) {
       toast('Поиск источников завершён. Кандидаты готовы для сверки.');
     }
   } catch (error) {
+    if (authError(error)) return;
     state.retrievalJobs[reportId] = { status: 'failed', error: error.message };
     delete state.retrievals[reportId];
     await loadRetrieval(reportId);
@@ -1210,9 +1821,13 @@ async function startRetrieval(reportId, mode) {
   state.retrievalJobs[reportId] = { status: 'queued', stage: 'Подготавливаем поиск' };
   renderRetrieval();
   try {
-    const { job } = await api('/api/retrieval-jobs', { report_id: reportId, mode, top_k: 5 });
+    if (!publicReportReady(reportId)) throw new Error('Откройте в редакторе текст этого отчёта перед поиском.');
+    const operationKey = `retrieval:${reportId}:${mode}`;
+    const body = { report_id: reportId, mode, top_k: 5 };
+    if (isSaas()) body.operation_id = publicOperationId(operationKey);
+    const { job } = await api('/api/retrieval-jobs', body);
     state.retrievalJobs[reportId] = job;
-    saveActiveJobs(RETRIEVAL_JOBS_KEY, state.retrievalJobs);
+    if (saveActiveJobs(RETRIEVAL_JOBS_KEY, state.retrievalJobs)) acknowledgeOperation(operationKey);
     if (state.view === 'check' && state.report?.id === reportId) renderRetrieval();
     await pollRetrieval(reportId, job.id);
   } catch (error) {
@@ -1373,6 +1988,7 @@ async function pollCandidateCheck(retrievalId, jobId) {
     await loadCandidateJudgments(retrievalId, true);
     if (finished.status === 'complete') toast('Сравнение кандидатов завершено. Ответы и ошибки сохранены.');
   } catch (error) {
+    if (authError(error)) return;
     state.candidateCheckJobs[retrievalId] = { status: 'failed', error: error.message };
     await loadCandidateJudgments(retrievalId, true);
   } finally {
@@ -1396,9 +2012,13 @@ async function startCandidateCheck(retrieval) {
   updateCandidateCards(retrieval);
   updateReportFreshness();
   try {
-    const { job } = await api('/api/candidate-check-jobs', { retrieval_id: retrieval.id, model });
+    if (!publicReportReady(retrieval.report_id)) throw new Error('Откройте в редакторе текст этого отчёта перед сравнением.');
+    const operationKey = `candidate-check:${retrieval.id}:${model}`;
+    const body = { retrieval_id: retrieval.id, model };
+    if (isSaas()) body.operation_id = publicOperationId(operationKey);
+    const { job } = await api('/api/candidate-check-jobs', body);
     state.candidateCheckJobs[retrieval.id] = job;
-    saveActiveJobs(CANDIDATE_JOBS_KEY, state.candidateCheckJobs);
+    if (saveActiveJobs(CANDIDATE_JOBS_KEY, state.candidateCheckJobs)) acknowledgeOperation(operationKey);
     if (state.view === 'check' && state.retrievals[state.report?.id]?.id === retrieval.id) renderCandidateCheck(retrieval);
     await pollCandidateCheck(retrieval.id, job.id);
   } catch (error) {
@@ -1807,7 +2427,7 @@ function renderSources() {
           <p class="field-help" id="source-text-import-hint" role="status" hidden></p>
         </div>
         <button class="button" type="submit">Добавить в библиотеку <span aria-hidden="true">+</span></button>
-        <p class="field-help">Источники сохраняются на вашем Mac и используются в следующих проверках.</p>
+        <p class="field-help">${isSaas() ? 'Источники сохраняются в вашем аккаунте и используются в следующих проверках.' : 'Источники сохраняются на вашем Mac и используются в следующих проверках.'}</p>
       </form>
     </section>
     <div class="section-heading source-list-heading">
@@ -1818,6 +2438,14 @@ function renderSources() {
   loadSourcePacks();
   renderSourceList();
   const sourceText = document.querySelector('#source-text');
+  const draftFields = { title: document.querySelector('#source-title'), url: document.querySelector('#source-url'), text: sourceText };
+  for (const [key, field] of Object.entries(draftFields)) {
+    field.value = state.sourceDraft[key] || '';
+    field.addEventListener('input', () => {
+      state.sourceDraft = Object.fromEntries(Object.entries(draftFields).map(([name, input]) => [name, input.value]));
+      try { storageSet(SOURCE_DRAFT_KEY, JSON.stringify(state.sourceDraft)); } catch { /* Keep the current form in memory. */ }
+    });
+  }
   sourceText.addEventListener('input', () => validateTextLength(sourceText));
   document.querySelector('#source-form').addEventListener('submit', event => {
     event.preventDefault();
@@ -1833,6 +2461,8 @@ function renderSources() {
       await refreshSources();
       if (form.isConnected && Object.entries(submitted).every(([key, value]) => form.elements[key].value === value)) {
         form.reset();
+        state.sourceDraft = {};
+        try { storageSet(SOURCE_DRAFT_KEY, '{}'); } catch { /* The saved source is already on the server. */ }
         document.querySelector('#source-text-import-hint').hidden = true;
       }
       renderSourceList();
@@ -1982,7 +2612,7 @@ async function renderHistory() {
     const { reports } = await api('/api/reports');
     if (state.view !== 'history') return;
     const list = document.querySelector('#history-list');
-    list.innerHTML = reports.length ? reports.map(report => `<article class="card history-row"><div><small>${escapeHTML(date(report.created_at))}</small><h3>${escapeHTML(report.text.slice(0, 85))}${report.text.length > 85 ? '…' : ''}</h3><p>${number(report.stats.total_characters ?? chars(report.text).length)} знаков · ${Number(report.stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}% совпадений</p></div><button class="button secondary small" data-open-report="${escapeHTML(report.id)}" type="button">Открыть отчёт ↗</button></article>`).join('') : empty('Проверок пока нет', 'Проверьте первый текст, и его отчёт появится здесь.', '↶');
+    list.innerHTML = reports.length ? reports.map(report => `<article class="card history-row"><div><small>${escapeHTML(date(report.created_at))}</small><h3>${escapeHTML(report.text.slice(0, 85))}${report.text.length > 85 ? '…' : ''}</h3><p>${number(report.stats.total_characters ?? chars(report.text).length)} знаков · ${report.scope === 'web_search' ? `${webUniqueness(report)} · уникальность по интернету` : `${Number(report.stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}% совпадений по библиотеке`}</p></div><button class="button secondary small" data-open-report="${escapeHTML(report.id)}" type="button">Открыть отчёт ↗</button></article>`).join('') : empty('Проверок пока нет', 'Проверьте первый текст, и его отчёт появится здесь.', '↶');
     list.querySelectorAll('[data-open-report]').forEach(button => button.addEventListener('click', () => busy(button, 'Открываем', async () => {
       const revision = state.viewRevision;
       const { report } = await api(`/api/reports/${encodeURIComponent(button.dataset.openReport)}`);
@@ -2012,6 +2642,9 @@ async function refreshSources() {
   document.querySelector('#source-count').textContent = sources.length;
   const libraryCount = document.querySelector('#library-count');
   if (libraryCount) libraryCount.textContent = sources.length;
+  const homeCount = document.querySelector('#home-library-count');
+  if (homeCount) homeCount.textContent = number(sources.length);
+  document.querySelector('#home-library-fact')?.setAttribute('aria-label', `${number(sources.length)} материалов в вашей библиотеке`);
   const select = document.querySelector('#compare-source');
   if (select) {
     const selected = select.value;
@@ -2050,6 +2683,7 @@ function updateModelControls() {
   document.querySelector('#model-description').textContent = description;
   document.querySelector('#model-dialog-title').textContent = remote ? 'Серверная модель' : 'Настройки модели';
   updateProcessingLabels();
+  updateCheckModeUI();
   const select = document.querySelector('#model-select');
   select.replaceChildren();
   const models = installedModels();
@@ -2074,21 +2708,24 @@ function updateModelActionControls() {
   }
   const batchButton = document.querySelector('#check-all-candidates');
   const currentRetrieval = state.retrievals[state.report?.id];
-  if (batchButton) batchButton.disabled = !available || !currentRetrieval?.candidates.length || candidateCheckRunning(currentRetrieval.id);
+  if (batchButton) batchButton.disabled = !available || !publicReportReady() || !currentRetrieval?.candidates.length || candidateCheckRunning(currentRetrieval.id);
   const hybrid = document.querySelector('#retrieve-hybrid');
-  if (hybrid) hybrid.disabled = !state.status?.embedding?.available || retrievalRunning(state.report?.id);
+  if (hybrid) hybrid.disabled = !state.status?.embedding?.available || !publicReportReady() || retrievalRunning(state.report?.id)
+    || Boolean(isSaas() && currentRetrieval);
+  const lexical = document.querySelector('#retrieve-lexical');
+  if (lexical && isSaas()) lexical.disabled = !publicReportReady() || retrievalRunning(state.report?.id) || Boolean(currentRetrieval);
   const embeddingNotice = document.querySelector('#embedding-unavailable');
   if (embeddingNotice) embeddingNotice.hidden = Boolean(state.status?.embedding?.available);
   document.querySelectorAll('[data-candidate-action]').forEach(button => {
     const card = button.closest('[data-candidate]');
     const key = `${card.dataset.retrieval}:${card.dataset.candidate}`;
-    if (!candidateRequests.has(key)) button.disabled = (button.dataset.candidateAction !== 'quote' && !available) || candidateCheckRunning(card.dataset.retrieval)
+    if (!candidateRequests.has(key)) button.disabled = !publicReportReady() || (button.dataset.candidateAction !== 'quote' && !available) || candidateCheckRunning(card.dataset.retrieval)
       || candidateHasModelJob(card.dataset.retrieval, card.dataset.candidate);
   });
   const model = selectedModel();
   const target = { report_id: state.report?.id, match_id: state.selectedMatch, model };
   const controls = [
-    ['compare-button', '/api/compare', { text: state.text, source_id: document.querySelector('#compare-source')?.value || '', model }],
+    ['compare-button', '/api/compare', { text: state.text, source_id: document.querySelector('#compare-source')?.value || '', model, ...(isSaas() ? { report_id: state.report?.id } : {}) }],
     ['paraphrase-button', '/api/rewrite', { ...target, mode: 'paraphrase' }],
     ['quote-button', '/api/rewrite', { ...target, mode: 'quote' }],
     ['judge-button', '/api/judge', target],
@@ -2096,8 +2733,8 @@ function updateModelActionControls() {
   ];
   for (const [id, path, body] of controls) {
     const button = document.getElementById(id);
-    const pending = modelProvider() === 'modal' && pendingModelRequest(path, body);
-    if (button) button.disabled = Boolean(button.dataset.busy) || (id !== 'quote-button' && !available) || Boolean(pending);
+    const pending = (modelProvider() === 'modal' || isSaas()) && pendingModelRequest(path, body);
+    if (button) button.disabled = Boolean(button.dataset.busy) || !publicReportReady() || (id !== 'quote-button' && !available) || Boolean(pending);
     if (id === 'run-evaluation') {
       const note = document.querySelector('#evaluation-job-note');
       if (note) {
@@ -2108,11 +2745,25 @@ function updateModelActionControls() {
       }
     }
   }
+  updateQuotaUI();
 }
 function renderView() {
+  window.IstokMotion?.teardown();
   state.viewRevision += 1;
+  if (!state.sessionReady) {
+    main.innerHTML = '<section class="card auth-loading"><h1>Открываем рабочее пространство…</h1><p>Проверяем сессию без запуска моделей.</p></section>';
+    return;
+  }
+  document.body.classList.toggle('auth-view', !privateAccess());
+  if (isSaas() && !privateAccess()) {
+    document.body.classList.toggle('home-view', false);
+    document.querySelector('#breadcrumb-title').textContent = 'Вход по почте';
+    renderAuthScreen();
+    return;
+  }
   const requested = location.hash.replace('#', '') || 'home';
   state.view = viewNames[requested] ? requested : 'home';
+  if (isSaas() && state.view === 'evaluation') state.view = 'check';
   document.body.classList.toggle('home-view', state.view === 'home');
   document.querySelectorAll('[data-view]').forEach(link => {
     const active = link.dataset.view === state.view;
@@ -2128,12 +2779,13 @@ function renderView() {
   else renderHistory();
   updateProcessingLabels();
   updateModelActionControls();
+  renderModelJobs();
 }
 document.querySelector('#model-settings').addEventListener('click', () => document.querySelector('#model-dialog').showModal());
 document.querySelector('#model-select').addEventListener('change', event => {
   state.model = event.target.value;
   try {
-    localStorage.setItem(modelProvider() === 'modal' ? MODAL_MODEL_KEY : MODEL_KEY, state.model);
+    storageSet(modelProvider() === 'modal' ? MODAL_MODEL_KEY : MODEL_KEY, state.model);
   } catch {
     // The selected model still applies to this open tab.
   }
@@ -2145,9 +2797,30 @@ document.querySelector('#refresh-model').addEventListener('click', event => busy
     : modelAvailable() ? 'Настройки модели обновлены.' : 'Модель сейчас недоступна.', !modelAvailable());
 }));
 window.addEventListener('hashchange', renderView);
-(async function init() {
+document.querySelector('#logout-button').addEventListener('click', event => busy(event.currentTarget, 'Выходим', async () => {
+  saveDraft(state.text);
+  saveReviewDrafts();
+  await api('/api/auth/logout', {});
+  state.sessionTransition = true;
+  location.reload();
+}));
+
+async function bootstrap() {
   renderView();
+  try {
+    await refreshSession();
+    if (state.sessionTransition) return;
+    state.sessionReady = true;
+    hydrateSessionStorage();
+    updateAccountUI();
+    renderView();
+  } catch (error) {
+    main.innerHTML = `<section class="card auth-loading"><h1>Не удалось открыть сервис</h1><p>${escapeHTML(error.message)}</p><button class="button" id="retry-bootstrap" type="button">Попробовать ещё раз</button></section>`;
+    document.querySelector('#retry-bootstrap').addEventListener('click', bootstrap);
+    return;
+  }
   renderModelJobs();
+  if (!privateAccess()) return;
   for (const entry of Object.values(state.modelJobs)) {
     if (entry.status !== 'rejected') observeModelJob(entry).catch(() => {});
   }
@@ -2160,11 +2833,17 @@ window.addEventListener('hashchange', renderView);
   const results = await Promise.allSettled([refreshSources(), refreshStatus()]);
   for (const result of results) if (result.status === 'rejected') toast(result.reason.message, true);
   if (state.view === 'sources') renderSourceList();
-})();
+}
+bootstrap();
 
-setInterval(() => {
-  refreshStatus().catch(error => {
+setInterval(async () => {
+  if (!state.sessionReady || state.sessionTransition) return;
+  try {
+    if (isSaas()) await refreshSession();
+    if (privateAccess()) await refreshStatus();
+  } catch (error) {
+    if (!privateAccess()) return;
     state.status = { ...state.status, model: { ...state.status?.model, available: false, can_submit: false, models: [], error: error.message } };
     updateModelControls();
-  });
+  }
 }, 15000);

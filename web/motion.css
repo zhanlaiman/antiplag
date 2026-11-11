@@ -1,0 +1,70 @@
+/* Content is visible by default. JavaScript opts eligible elements into motion. */
+[data-reveal].istok-motion-reveal {
+  transition:opacity 560ms cubic-bezier(.2,.7,.25,1),
+             transform 560ms cubic-bezier(.2,.7,.25,1);
+}
+
+[data-reveal].istok-motion-pending {
+  opacity:0;
+  transform:translate3d(0,16px,0);
+}
+
+[data-count][aria-hidden="true"] {
+  display:inline-block;
+  min-inline-size:var(--istok-count-width,1ch);
+  font-variant-numeric:tabular-nums;
+}
+
+/* Stacking all phrases reserves their maximum size before any phrase changes. */
+[data-rotate] {
+  display:inline-grid;
+  vertical-align:baseline;
+}
+
+[data-rotate] > [data-motion-phrase] {
+  grid-area:1 / 1;
+  opacity:0;
+  transform:translate3d(0,6px,0);
+  transition:opacity 220ms ease,transform 220ms ease;
+}
+
+[data-rotate] > [data-motion-phrase]:first-child {
+  opacity:1;
+  transform:none;
+}
+
+[data-rotate].istok-motion-rotator > [data-motion-phrase] {
+  opacity:0;
+  transform:translate3d(0,6px,0);
+}
+
+[data-rotate].istok-motion-rotator > .istok-motion-current {
+  opacity:1;
+  transform:none;
+}
+
+[data-rotate].istok-motion-rotate-out > .istok-motion-current {
+  opacity:0;
+  transform:translate3d(0,-6px,0);
+}
+
+@media (prefers-reduced-motion:reduce) {
+  [data-reveal].istok-motion-reveal,
+  [data-rotate] > [data-motion-phrase] {
+    transition:none;
+  }
+
+  [data-reveal].istok-motion-pending {
+    opacity:1;
+    transform:none;
+  }
+
+  [data-rotate].istok-motion-rotator > [data-motion-phrase] {
+    opacity:0;
+    transform:none;
+  }
+
+  [data-rotate].istok-motion-rotator > [data-motion-phrase]:first-child {
+    opacity:1;
+  }
+}

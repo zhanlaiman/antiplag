@@ -41,6 +41,21 @@ class MatchingTests(unittest.TestCase):
         result = analyze(text, [source()])
         self.assertTrue(any(match["kind"] == "similar" for match in result["matches"]))
 
+    def test_larger_similar_match_does_not_remove_exact_evidence_inside_it(self):
+        words = [f"term{number:03}" for number in range(20)]
+        text = ' '.join(words) + '.'
+        changed = words.copy()
+        changed[6], changed[14] = 'changed006', 'changed014'
+        original = ' '.join(changed) + '.'
+        result = analyze(text, [source(original)])
+        exact = [match for match in result['matches'] if match['kind'] == 'exact']
+        self.assertEqual(len(exact), 2)
+        self.assertTrue(any(match['kind'] == 'similar' for match in result['matches']))
+        for match in result['matches']:
+            self.assertEqual(match['excerpt'], text[match['start']:match['end']])
+            self.assertEqual(match['source_excerpt'], original[match['source_start']:match['source_end']])
+        self.assertLessEqual(result['stats']['similarity_percent'], 100)
+
     def test_quotes_are_preserved_and_marked(self):
         match = analyze("Автор пишет «" + ORIGINAL + "».", [source()])["matches"][0]
         self.assertTrue(match["quoted"])

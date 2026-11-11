@@ -67,6 +67,30 @@ class RetrievalTests(unittest.TestCase):
                 cache.vectors(["Текст"], "model", "digest-two")
                 self.assertEqual(embed.call_count, 2)
 
+    def test_embedding_estimate_counts_distinct_passages_and_does_not_probe_models(self):
+        sources = [{"id": str(index), "text": f"Учебный источник номер {index}."} for index in range(25)]
+        text = sources[0]["text"]
+        with patch.object(retrieval, "embedding_identity") as identity, patch.object(retrieval.llm, "embed") as embed:
+            self.assertEqual(retrieval.estimate_embedding_calls(text, sources + sources), 3)
+            identity.assert_not_called()
+            embed.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            cache = retrieval.EmbeddingCache(Path(directory) / "cache.sqlite3")
+            with patch.object(retrieval, "embedding_identity", return_value="fixture-digest"), \
+                 patch.object(retrieval.llm, "embed", side_effect=lambda texts, model: [[1., 0.] for _ in texts]) as embed:
+                retrieval.retrieve(text, sources, mode="hybrid", top_k=1, cache=cache)
+                self.assertEqual(embed.call_count, 3)
+                retrieval.retrieve(text, sources, mode="hybrid", top_k=1, cache=cache)
+                self.assertEqual(embed.call_count, 3)
+                self.assertEqual(retrieval.estimate_embedding_calls(text, sources), 3)
+
+    def test_embedding_estimate_enforces_retrieval_resource_bounds(self):
+        with self.assertRaises(ValueError):
+            retrieval.estimate_embedding_calls("Текст", [])
+        with patch.object(retrieval, "MAX_SOURCE_CHUNKS", 1):
+            with self.assertRaises(ValueError):
+                retrieval.estimate_embedding_calls("Текст", [{"text": " ".join(f"слово{i}" for i in range(300))}])
+
     def test_weak_word_matches_cannot_exclude_best_cross_language_candidate(self):
         sources = [{"id": f"distractor-{index}", "text": f"Музыка в зале пример{index}."} for index in range(6)]
         sources.append({"id": "translation", "text": "The acoustic ceiling reduced the echo."})
