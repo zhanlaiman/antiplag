@@ -159,7 +159,7 @@ class ParagraphCoverageTests(unittest.TestCase):
                                   for start in range(0, size, 40))
             for limit in (1, 2, 3, 6):
                 queries = plan_queries(text, limit=limit)
-                self.assertLessEqual(len(queries), min(limit, (size + 79) // 80))
+                self.assertLessEqual(len(queries), limit)
                 self.assertEqual(len(queries), len({q["query"] for q in queries}))
                 for q in queries:
                     self.assertEqual(" ".join(t.value for t in _tokens(text[q["start"]:q["end"]])), q["query"][1:-1])

@@ -160,6 +160,9 @@ class WebSearchTests(unittest.TestCase):
     def test_unvisited_discovered_copy_does_not_claim_100_percent_uniqueness(self):
         text = ' '.join('лист' + str(number) for number in range(600))
         urls = [{'url': f'https://source{number}.org/article'} for number in range(13)]
+        # The balanced queue keeps early domains and first results from later
+        # queries; the fifth result of query two remains outside twelve loads.
+        unvisited = urls[9]['url']
 
         class Batches(Search):
             def search(self, query, request_id):
@@ -170,20 +173,20 @@ class WebSearchTests(unittest.TestCase):
         class Corpus(Pages):
             def fetch(self, url):
                 self.calls.append(url)
-                return {'url': url, 'text': text if url == urls[-1]['url'] else
+                return {'url': url, 'text': text if url == unvisited else
                         'Другой материал посвящён морским глубинам, кораблям и холодным течениям.'}
 
         pages = Corpus()
         report = web_search.run(text, searcher=Batches(), fetcher=pages)
         self.assertEqual(len(pages.calls), 12)
-        self.assertNotIn(urls[-1]['url'], pages.calls)
+        self.assertNotIn(unvisited, pages.calls)
         self.assertEqual(report['web']['status'], 'partial')
         self.assertIsNone(report['stats']['uniqueness_percent'])
         self.assertNotIn('uniqueness_upper_bound_percent', report['stats'])
         self.assertEqual(report['web']['urls_outside_limit'], 1)
-        self.assertIn(urls[-1]['url'], report['web']['discovered_urls'])
-        self.assertIn(urls[-1]['url'], report['web']['skipped_urls'])
-        self.assertNotIn(urls[-1]['url'], report['web']['attempted_urls'])
+        self.assertIn(unvisited, report['web']['discovered_urls'])
+        self.assertIn(unvisited, report['web']['skipped_urls'])
+        self.assertNotIn(unvisited, report['web']['attempted_urls'])
         self.assertEqual(report['web']['attempted_urls'], pages.calls)
         self.assertLessEqual(len(report['web']['discovered_urls']), 30)
         self.assertLessEqual(len(report['web']['attempted_urls']), 12)

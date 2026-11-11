@@ -33,9 +33,10 @@ HYBRID_STRATEGY = "hybrid-paragraph-v1"
 CITATION_STRATEGY = "hybrid-citation-v2"
 COVERAGE_STRATEGY = "hybrid-paragraph-v3"
 DENSE_STRATEGY = "hybrid-citation-v4-dense"
-DEFAULT_QUERY_STRATEGY = CITATION_STRATEGY
+DEFAULT_QUERY_STRATEGY = DENSE_STRATEGY
 DOMAIN_URL_STRATEGY = "domain-round-robin-v1"
 BALANCED_URL_STRATEGY = "hybrid-domain-query-v2"
+DEFAULT_URL_STRATEGY = BALANCED_URL_STRATEGY
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
     "fetch_timeout": "Сайт не ответил за отведённое время.",
@@ -428,7 +429,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     """
     started = time.monotonic()
     if url_strategy is None:
-        url_strategy = os.environ.get("ISTOK_WEB_URL_STRATEGY", DOMAIN_URL_STRATEGY)
+        url_strategy = os.environ.get("ISTOK_WEB_URL_STRATEGY", DEFAULT_URL_STRATEGY)
     if url_strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY):
         raise ValueError("Неизвестный способ отбора страниц для чтения.")
     if query_strategy is None:

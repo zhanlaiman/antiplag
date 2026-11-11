@@ -46,7 +46,7 @@ class URLOrderTests(unittest.TestCase):
         for strategy in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY):
             self.assertEqual(_fetch_order(urls, groups, strategy), urls)
 
-    def test_runtime_is_opt_in_records_policy_and_keeps_twelve_loads(self):
+    def test_runtime_records_selected_policy_and_keeps_twelve_loads(self):
         groups = source_groups()
         text = "\n\n".join(" ".join(f"абзац{p}измерение{i}" for i in range(100)) for p in range(6))
 
@@ -69,7 +69,8 @@ class URLOrderTests(unittest.TestCase):
         previous_pages, candidate_pages = SavedPages(), SavedPages()
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ISTOK_WEB_URL_STRATEGY", None)
-            previous = run(text, searcher=SavedSearch(), fetcher=previous_pages, query_strategy=CITATION_STRATEGY)
+            previous = run(text, searcher=SavedSearch(), fetcher=previous_pages,
+                           query_strategy=CITATION_STRATEGY, url_strategy=DOMAIN_URL_STRATEGY)
             candidate = run(text, searcher=SavedSearch(), fetcher=candidate_pages,
                             query_strategy=CITATION_STRATEGY, url_strategy=BALANCED_URL_STRATEGY)
         self.assertEqual(previous["web"]["url_strategy"], DOMAIN_URL_STRATEGY)

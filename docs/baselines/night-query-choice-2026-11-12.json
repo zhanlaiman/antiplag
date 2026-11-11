@@ -1,0 +1,43 @@
+{
+  "selected_at": "2026-11-11T18:50:40.370969+00:00",
+  "query_strategy": "hybrid-citation-v4-dense",
+  "url_strategy": "hybrid-domain-query-v2",
+  "matcher_version": "lexical-v4-line-wrap-variants",
+  "git_before_default_change": "fe8eceb850e3231569d016b03887d75ad83df7d3",
+  "scope": "DEV-only choice; final70 unopened",
+  "reasons": {
+    "fresh_recovered_words": {
+      "D05": 12,
+      "D08": 11,
+      "D20_second_source": 14
+    },
+    "fresh_D04_control_words": 7,
+    "same_cache_six_case_lost_words": 0,
+    "long_synthetic_insertions": {
+      "before": 185,
+      "after": 185,
+      "total": 420,
+      "documents": 348
+    },
+    "short_synthetic_insertions": {
+      "before": 62,
+      "after": 132,
+      "total": 162,
+      "documents": 162
+    },
+    "short_synthetic_actual_query_counts": {
+      "before": 162,
+      "after": 766
+    }
+  },
+  "cost_note": "Same six-query ceiling; more actual queries on short inputs. This is not an equal-actual-query efficiency gain.",
+  "rejected_default_candidates": [
+    "paragraph-v3:34 insertion losses vs22 gains",
+    "fixed-width scoring:5 long-matrix losses and no gains",
+    "six-word extra windows:D10 phrase-run loss and7 equal-budget short losses",
+    "spaced dash boundary:22 long-matrix losses and no gains",
+    "pure query URL round-robin:lost first D20 source"
+  ],
+  "unfamiliar_query_set_read_for_choice": false,
+  "unfamiliar_query_set": "query-unfamiliar-reserved-v1; NASA/NOAA pages previously used for matcher-v3, not query selection"
+}
