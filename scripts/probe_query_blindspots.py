@@ -172,7 +172,11 @@ def queue_check():
         sources = report["sources"]
         hashes = Counter(digest(s["text"]) for s in sources)
         duplicate_content = sum(n - 1 for n in hashes.values())
+        duplicate_loads = web["urls_attempted"] - web["sources_checked"] - sum(e["stage"] == "fetch" for e in web["errors"])
+        if duplicate_loads < 0:
+            raise ValueError("Fetch accounting needs manual review: " + case["id"])
         counts["exact_content_duplicate_pages"] += duplicate_content
+        counts["fetch_slots_with_duplicate_final_url"] += duplicate_loads
         counts["provider_or_redirect_duplicates_reported"] += web["urls_deduplicated"]
         counts["skipped_urls"] += len(web["skipped_urls"])
         counts["documents"] += 1
@@ -195,9 +199,36 @@ def queue_check():
         rows.append({"id": case["id"], "expected_urls_present": found,
                      "discovered": len(discovered), "attempted": len(attempted),
                      "outside_limit": len(web["skipped_urls"]), "exact_content_duplicate_pages": duplicate_content,
+                     "fetch_slots_with_duplicate_final_url": duplicate_loads,
                      "provider_or_redirect_duplicates_reported": web["urls_deduplicated"]})
     return {"schema_version": 1, "live_queries": 0, "counts": dict(counts), "cases": rows,
             "limit": "Saved reports retain deduplicated URL order and loaded text, not all raw result positions or unread content. Missing content permits queue-position analysis only."}
+
+
+def near_copy_check():
+    """Flag large overlaps for manual review; shared templates are not reprints."""
+    matched = []
+    for number in range(1, 31):
+        case_id = f"D{number:02d}"
+        report = json.loads((LIVE / (case_id + ".json")).read_text())
+        shingles, pairs = [], []
+        for index, source in enumerate(report["sources"]):
+            words = [t.value for t in _tokens(source["text"])]
+            current = {tuple(words[i:i + 5]) for i in range(len(words) - 4)}
+            shingles.append(current)
+            if len(current) < 50:
+                continue
+            for earlier, other in enumerate(shingles[:-1]):
+                if len(other) < 50:
+                    continue
+                overlap = len(current & other) / min(len(current), len(other))
+                if overlap >= .8:
+                    pairs.append({"left_url": report["sources"][earlier]["url"], "right_url": source["url"],
+                                  "shorter_5gram_overlap": round(overlap, 4), "shorter_5grams": min(len(current), len(other))})
+        if pairs:
+            matched.append({"id": case_id, "pairs": pairs})
+    return {"threshold": .8, "min_5grams": 50, "matches": matched,
+            "interpretation": "Candidate overlap only; a shared template or excerpt is not proof of a whole-page reprint."}
 
 
 def dump(path, value):
@@ -209,9 +240,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "data/private/web-evaluation/query-blindspots-v1")
     parser.add_argument("--candidate", choices=("coverage", "fixed-width", "dense-six"), default="coverage")
+    parser.add_argument("--near-copies", action="store_true", help="Only check large overlaps between saved loaded pages")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     args.output.chmod(0o700)
+    if args.near_copies:
+        result = near_copy_check()
+        dump(args.output / "near-copy-pages.json", result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     planners = None
     if args.candidate == "fixed-width":
         from scripts.probe_short_query_selection import fixed_width_plan
