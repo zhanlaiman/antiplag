@@ -23,6 +23,7 @@ from plagiarism.auth_provider import NoRedirect
 from plagiarism.matching import MATCHER_VERSION, MAX_TEXT_CHARS, MIN_WORDS, _tokens, analyze
 from plagiarism.search_credentials import key_for, selected_provider
 from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY, analyze_with_supplements
+from plagiarism.input_references import extract_named_references
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +41,7 @@ DOMAIN_URL_STRATEGY = "domain-round-robin-v1"
 BALANCED_URL_STRATEGY = "hybrid-domain-query-v2"
 PATH_URL_STRATEGY = "hybrid-input-path-v3"
 DEFAULT_URL_STRATEGY = BALANCED_URL_STRATEGY
+DEFAULT_NAMED_REFERENCES = False
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
     "fetch_timeout": "Сайт не ответил за отведённое время.",
@@ -469,7 +471,8 @@ def _rank_url_paths(ordered, text):
     return sorted(ordered, key=lambda url: -relevance(url))
 
 
-def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None):
+def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None,
+        use_named_references=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
     This is a first lexical web search, not a guarantee over every internet page.
@@ -480,6 +483,13 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         url_strategy = os.environ.get("ISTOK_WEB_URL_STRATEGY", DEFAULT_URL_STRATEGY)
     if url_strategy not in (DOMAIN_URL_STRATEGY, BALANCED_URL_STRATEGY, PATH_URL_STRATEGY):
         raise ValueError("Неизвестный способ отбора страниц для чтения.")
+    if use_named_references is None:
+        configured = os.environ.get("ISTOK_WEB_NAMED_REFERENCES")
+        if configured not in (None, "0", "1"):
+            raise ValueError("Неверная настройка указанных в тексте источников.")
+        use_named_references = DEFAULT_NAMED_REFERENCES if configured is None else configured == "1"
+    if type(use_named_references) is not bool:
+        raise ValueError("Неверная настройка указанных в тексте источников.")
     if query_strategy is None:
         query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
@@ -541,9 +551,17 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 stopped_code = error.code
                 break
     queries_unattempted = len(queries) - queries_attempted
+    input_references = extract_named_references(text) if use_named_references else []
+    reference_urls = [reference["url"] for reference in input_references]
+    for url in reference_urls:
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
     ordered = _fetch_order(urls, query_groups, url_strategy)
     if url_strategy == PATH_URL_STRATEGY:
         ordered = _rank_url_paths(ordered, text)
+    if reference_urls:
+        ordered = list(dict.fromkeys(reference_urls + ordered))
     ordered = ordered[:MAX_URLS]
     outside_limit = max(0, len(urls) - len(ordered))
     selected_urls = set(ordered)
@@ -660,13 +678,16 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "queries_unattempted": queries_unattempted, "query_stop_code": stopped_code,
         "query_spans": [{"start": item["start"], "end": item["end"]} for item in queries],
         "urls_found": len(urls) + len(rejected_urls), "urls_supported": len(urls),
-        "urls_discovered": discovered + len(link_discoveries),
+        "urls_discovered": discovered + len(link_discoveries) + len(input_references),
         "search_urls_discovered": discovered, "linked_urls_discovered": len(link_discoveries),
+        "named_references_enabled": use_named_references,
+        "input_reference_urls_discovered": len(input_references),
+        "input_references": input_references,
         "link_discoveries": link_discoveries,
         "priority_link_replacements": priority_link_replacements,
         "source_followup_policy": SOURCE_FOLLOWUP_POLICY,
         "priority_link_budget_remaining": priority_link_credit,
-        "discovered_urls": list(dict.fromkeys(urls[:30] + [link["url"] for link in link_discoveries])),
+        "discovered_urls": list(dict.fromkeys(urls[:30] + reference_urls + [link["url"] for link in link_discoveries])),
         "attempted_urls": attempted_urls[:MAX_URLS], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
         "supplemental_text_views": len(supplements),

@@ -77,6 +77,7 @@ def main():
     parser.add_argument("--ids", nargs="+", required=True)
     parser.add_argument("--strategy", required=True)
     parser.add_argument("--url-strategy", help="Optional experimental page-selection policy")
+    parser.add_argument("--named-references", action="store_true", help="Explicitly load references named in the submitted DEV input")
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--max-new-queries", type=int, required=True)
     args = parser.parse_args()
@@ -110,6 +111,10 @@ def main():
     manifest = out / "run.json"
     configuration = {"case_ids": args.ids, "query_strategy": args.strategy, "url_strategy": args.url_strategy,
                      "input_key_sha256": sha256(key.read_bytes()).hexdigest(), "planned_queries": planned}
+    if args.named_references:
+        configuration["named_references"] = True
+    if os.environ.get("ISTOK_PDF_ALTERNATIVE_ENGINE"):
+        configuration["pdf_alternative_engine"] = os.environ["ISTOK_PDF_ALTERNATIVE_ENGINE"]
     if manifest.exists():
         run = json.loads(manifest.read_text())
         if any(run.get(k) != v for k, v in configuration.items()):
@@ -159,8 +164,10 @@ def main():
                 dump(path, record)
                 raise
     original_run = web_search.run
-    web_search.run = partial(original_run, searcher=RecordingSearch(), fetcher=RecordingPages(),
-                             query_strategy=args.strategy, url_strategy=args.url_strategy)
+    options = {"query_strategy": args.strategy, "url_strategy": args.url_strategy}
+    if args.named_references:
+        options["use_named_references"] = True
+    web_search.run = partial(original_run, searcher=RecordingSearch(), fetcher=RecordingPages(), **options)
     service = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     service.saas, service.store, service.jobs = None, Store(), Jobs()
     Thread(target=service.serve_forever, daemon=True).start()
