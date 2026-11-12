@@ -96,9 +96,12 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(status,200);self.assertTrue(result['text']);self.assertTrue(result['sources'])
         self.assertEqual(self.calls,[])
 
-    def test_two_daily_checks_and_duplicate_request_does_not_run_again(self):
+    def test_six_daily_checks_and_duplicate_request_does_not_run_again(self):
         cookie,_=self.guest();self.check(cookie,'d'*32);self.check(cookie,'d'*32);self.check(cookie,'e'*32)
         self.assertEqual(len(self.calls),2)
+        for ch in '1234':self.check(cookie,ch*32)
+        self.assertEqual(len(self.calls),6)
+        self.assertEqual(self.http('/api/session',cookie=cookie)[1]['beta']['daily_checks'],6)
         self.assertEqual(self.http('/api/web-check-jobs',{'request_id':'f'*32,'text':TEXT,'internet_consent':True},cookie)[0],429)
 
     def test_invalid_cookie_creates_a_new_isolated_guest(self):

@@ -24,6 +24,7 @@ from plagiarism.tenants import TenantRegistry
 COOKIE='istok_beta'
 MAX_CHARACTERS=10000
 MONTHLY_SEARCHES=60
+DAILY_CHECKS=6
 
 
 class DurableTenants(TenantRegistry):
@@ -121,8 +122,8 @@ class BetaRuntime:
             if old:
                 if old[0]!=fingerprint:raise access.AccessError('Идентификатор уже использован для другого текста.','request_conflict',409)
                 return
-            if db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=?',(guest,day)).fetchone()[0]>=2:
-                raise access.AccessError('В бете доступны две интернет-проверки в сутки для этого браузера.','beta_check_limit',429)
+            if db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=?',(guest,day)).fetchone()[0]>=DAILY_CHECKS:
+                raise access.AccessError(f'В бете доступны {DAILY_CHECKS} интернет-проверок в сутки для этого браузера. Общая бесплатная квота ограничена.','beta_check_limit',429)
             db.execute('INSERT INTO checks VALUES (?,?,?,?)',(guest,identifier,fingerprint,day))
         self.persist()
 
@@ -171,7 +172,7 @@ class BetaHandler(server.Handler):
         beta=self.server.beta
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
-                'persistent':True,'daily_checks':2,'monthly_search_queries':MONTHLY_SEARCHES}}
+                'persistent':True,'daily_checks':DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
         allowed=(method=='GET' and (path in {'/api/status','/api/sources','/api/source-packs','/api/reports'}
                 or re.fullmatch(r'/api/(?:reports|jobs|report-exports)/[a-f0-9]{32}',path))
             or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo'}
