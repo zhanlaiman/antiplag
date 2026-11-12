@@ -55,7 +55,7 @@ def serve_beta():
 def build_app(directory,key):
     import modal
     volume=modal.Volume.from_name(VOLUME_NAME,create_if_missing=True,version=2)
-    image=(modal.Image.debian_slim(python_version='3.11')
+    image=(modal.Image.debian_slim(python_version='3.14')
         .pip_install('pypdf==7.0.1','pypdfium2==5.14.0')
         .add_local_dir(directory,REMOTE_ROOT,copy=True)
         .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':'tavily','ISTOK_MODEL_PROVIDER':'local'}))

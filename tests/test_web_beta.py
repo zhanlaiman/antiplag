@@ -91,6 +91,11 @@ class WebBetaTests(unittest.TestCase):
         body.update(internet_consent=True,text='x'*10001)
         self.assertEqual(self.http('/api/web-check-jobs',body,cookie)[0],400);self.assertEqual(self.calls,[])
 
+    def test_public_authored_demo_works_without_search_or_models(self):
+        cookie,_=self.guest();status,result,_=self.http('/api/demo',{},cookie)
+        self.assertEqual(status,200);self.assertTrue(result['text']);self.assertTrue(result['sources'])
+        self.assertEqual(self.calls,[])
+
     def test_two_daily_checks_and_duplicate_request_does_not_run_again(self):
         cookie,_=self.guest();self.check(cookie,'d'*32);self.check(cookie,'d'*32);self.check(cookie,'e'*32)
         self.assertEqual(len(self.calls),2)
