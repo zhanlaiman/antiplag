@@ -445,7 +445,7 @@ class FrozenB2ClauseGuards(unittest.TestCase):
             started_at=0,secondary_searcher=Search(),fetcher=fetch,clock=Clock(),progress=progress)
         self.assertEqual(events[:4],['progress:web_search','search','progress:web_search','search'])
         self.assertLess(events.index('progress:web_fetch'),events.index('fetch'))
-        self.assertEqual(report['web']['discovery_strategy'],'primary-mediawiki-post-v3-paragraph-clause')
+        self.assertEqual(report['web']['discovery_strategy'],'primary-mediawiki-post-v4-paragraph-clause')
         self.assertEqual(report['web']['primary_provider'],'tavily');self.assertEqual(report['web']['secondary_provider'],'mediawiki')
         self.assertEqual(audit['post_query_calls'][0]['query'],draft.select_post_queries(text,plan)[0]['query'])
 

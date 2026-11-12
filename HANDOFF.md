@@ -1,3 +1,19 @@
+# DEIMOS SEARCH FIX — 12 ноября 2026, 13:18 Алматы
+
+По просьбе пользователя улучшить сайт при оставшихся 15% завершено одно минимальное исправление поиска. Новый искусственный текст про Деймос (124 слова, вставка 18 слов) сначала проверен обычной очередью: найдено только 9/18, источник Циклопедия, ожидаемого Deimos URL нет. Оба дополнительных запроса были в одном вступительном абзаце, но не пересекались; правило v3 их сохраняло. Условие разнообразия расширено на любые две фразы внутри одного абзаца. Шесть primary, первый Wiki, защита цитат, B2-clause и лимиты 8/26 не менялись. Production policy `primary-mediawiki-post-v4-paragraph-clause`.
+
+Рабочий AFTER: http://127.0.0.1:8766/#check/0cc36319575a69168968f3208d28bc56 — **18/18**,18/124 total,12 прочитано/13 попыток,partial,upper85.5,finalNull. Normal HTTP/Jobs/mainStore/current defaults; только сохранённые ответы, UI явно маркирует повтор. BEFORE http://127.0.0.1:8766/#check/e7777a25be2dc1b6e21b16faf9f172c6 —9/18,11 прочитано/12 попыток. В старой summary поле source_found означало любой Wikipedia URL; это НЕ доказательство ожидаемой статьи «Деймос». В новом отчёте есть сама статья и полная дословная пара.
+
+После freeze кандидата: три свежие Wiki-пробы (D20,D21→пусто,Deimos→правильный URL) и одна обычная загрузка Deimos. Причинное сравнение на тех же6 primary-ответах:9→18, прежняя пара сохранена, контроль без вставки0. Из34 известных контекстов/33 текстов32 плана прежние; D20,D21 перепроиграны — sources/matches/IDs/stats/queue равны. Photo17, user-negative и D04seven планы не изменены. Финальные70 закрыты; N4 не открывался. Сам Deimos теперь tuning, не независимый holdout.
+
+**905Python PASS40.272s +58Node PASS**, внешние подключения в серверных тестах запрещены, существующий PDFium. Логи .runtime/wiki-paragraph-diversity-v4/{python-tests,node-tests}.log. Queue request/report durable, GET дважды равны; никакой сети в финальном повторе. Native UI: подсветка→полные18-словные выдержки/DeimosURL, reload сохраняет18/85.5, mobile319 overflow0, личный draft4370/consentFalse сохранены. Screenshot .runtime/wiki-paragraph-diversity-v4/deimos-fixed.png. CUA CLOSED «Проверил исправленный поиск Деймоса», siteTab3 deliverable на AFTER, viewport reset.
+
+Сайт перезапущен launcher14765 (.runtime/site-launcher.pid), scripts/start.py, ISTOK_MODEL_PROVIDER=local, disabled-marker сохранён; models unavailable, 8 queries /26 pages. Старые5602/5603 остановлены штатно. Расход этого этапа:6 новых бесплатныхT+5 anonymousWiki+13 normalFetcher/0₸. Final quota .runtime/wiki-paragraph-diversity-v4/quota-final.json:local615/provider608/1000/paygo0, защитный остаток285. Последняя проверка Codex15% remaining, reset credits0, consume не вызывался.
+
+Короткий отчёт docs/DEIMOS_SEARCH_FIX_2026-11-12.md. Артефакты data/private/web-evaluation/{deimos-user-check-v1,deimos-paragraph-diversity-v4} и .runtime/wiki-paragraph-diversity-v4. Все живые команды COMPLETE; **не перезапускать** run_queue.py / public probes ради восстановления. Frozen candidate_fixed.py и audit.json сохранены; исходный candidate.py имел только import-ошибку до оценки, сохранён для аудита. Следующая задача при новом поручении — A0056 short10 miss на сохранённых данных. Регистрация/оплата отложены; локальный Qwen — только разговор, не запускать. output/,tmp/ не трогать и не добавлять в Git.
+
+---
+
 # USER PHOTO FIX — 12 ноября 2026
 
 Пользователь проверил предложенные два текста и прислал скриншоты: положительный `ad7993d4927b1d03e80b65bfd7259f15` дал0/17, контрольный `32eda92ead6aaa48cb2642f4cd4ca024` —0/108. Реальная ошибка — URLневернулсяпоTavilyфразевнутривставки, Wikiпровериладвапересекающихсявступления. Исправлено в web_wiki_followup.select_post_queries: только при пересечении двух вторичных фраз внутри одного абзаца второй слот берёт первую eligible primary-фразу целиком из другого абзаца. Primary6/firstWiki/citation/B2-shrink/caps unchanged. Discovery policy `primary-mediawiki-post-v3-paragraph-clause`.

@@ -11,7 +11,7 @@ import math
 import re
 import time
 
-DISCOVERY_STRATEGY = 'primary-mediawiki-post-v3-paragraph-clause'
+DISCOVERY_STRATEGY = 'primary-mediawiki-post-v4-paragraph-clause'
 B1_DISCOVERY_STRATEGY = 'primary-mediawiki-post-v1'
 DEFAULT_SECONDARY_QUERY_POLICY = 'strict-em-dash-prefix-v2'
 UNCHANGED_SECONDARY_QUERY_POLICY = 'unchanged-v1'
@@ -91,10 +91,10 @@ def select_post_queries(text, primary_plan, *, secondary_query_policy=DEFAULT_SE
         return chosen
     if secondary_query_policy!=DEFAULT_SECONDARY_QUERY_POLICY:
         raise ValueError('Unknown secondary query policy')
-    # Repeating overlapping introduction windows leaves other paragraphs
+    # Taking both phrases from the introduction leaves other paragraphs
     # unchecked by the secondary search. Keep the first slot and use an
     # already planned phrase from a different paragraph for the second.
-    if len(chosen)==2 and max(q['start'] for q in chosen)<min(q['end'] for q in chosen):
+    if len(chosen)==2:
         from plagiarism.query_paragraphs import _paragraphs
         paragraphs=_paragraphs(text)
         def block(q):

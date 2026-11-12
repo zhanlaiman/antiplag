@@ -33,6 +33,22 @@ class WikiQueryDiversityTests(unittest.TestCase):
         chosen=post.select_post_queries(text,plan)
         self.assertEqual([q['primary_query_index'] for q in chosen],[0,1])
 
+    def test_separated_introduction_phrases_still_use_another_paragraph(self):
+        intro='Первая группа посетителей рассматривает рисунки и обсуждает устройство стенда. Затем школьники раскладывают карточки и готовят вопросы для следующей экскурсии.'
+        body='Историческое описание содержит сведения о первых опытах создания фотографических изображений.'
+        text=intro+'\n\n'+body
+        plan=[query(text,0,intro.index('.')),query(text,intro.index('Затем'),len(intro)-1),
+              query(text,len(intro)+2,len(text)-1)]
+        self.assertLessEqual(plan[0]['end'],plan[1]['start'])
+        chosen=post.select_post_queries(text,plan)
+        self.assertEqual([q['primary_query_index'] for q in chosen],[0,2])
+
+    def test_windows_line_endings_preserve_paragraph_boundaries(self):
+        text,plan=self.fixture();text=text.replace('\n\n','\r\n\r\n')
+        plan[2]['start']+=2;plan[2]['end']+=2
+        chosen=post.select_post_queries(text,plan)
+        self.assertEqual([q['primary_query_index'] for q in chosen],[0,2])
+
     def test_single_paragraph_keeps_overlapping_windows(self):
         text,plan=self.fixture();text=text.replace('\n\n','  ')
         chosen=post.select_post_queries(text,plan)
