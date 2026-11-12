@@ -172,6 +172,30 @@ function deferred() {
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+test('online beta isolates browser drafts and displays its real input limit', async () => {
+  const app = fixture({ view: 'home', stored: { 'istok.home-draft.v1': 'Локальный черновик' },
+    fetch: async url => url === '/api/session' ? json({ mode: 'local', beta: { id: 'guest-one', max_characters: 10000 } }) : undefined });
+  await settle();
+  assert.equal(app.evaluate('isBeta()'), true);
+  assert.equal(app.evaluate('state.homeText'), '');
+  assert.match(app.element('account-description').textContent, /Онлайн-бета/);
+  assert.equal(app.element('evaluation-nav').hidden, true);
+  assert.match(app.evaluate("textLengthError('x'.repeat(10001))"), /10.?000/);
+  app.element('home-text').value = 'Гостевой черновик';
+  await app.element('home-text').emit('input');
+  assert.equal(app.storage.get('istok.home-draft.v1'), 'Локальный черновик');
+  assert.ok([...app.storage.entries()].some(([key,value]) => key.includes('beta.guest-one') && value === 'Гостевой черновик'));
+});
+
+test('online beta reloads its workspace when the guest cookie changes', async () => {
+  let guest = 'first';
+  const app = fixture({ fetch: async url => url === '/api/session' ? json({ mode: 'local', beta: { id: guest, max_characters: 10000 } }) : undefined });
+  await settle();
+  guest = 'second';
+  await app.evaluate('refreshSession()');
+  assert.equal(app.reloads.length, 1);
+});
+
 function textFile(contents, name = 'article.txt') {
   const bytes = Buffer.from(contents, 'utf8');
   return { name, size: bytes.length, arrayBuffer: async () => Uint8Array.from(bytes).buffer };

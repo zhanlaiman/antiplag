@@ -40,6 +40,8 @@ function storageSet(key, value) {
 }
 
 function isSaas() { return state.session?.mode === 'saas'; }
+function isBeta() { return Boolean(state.session?.beta); }
+function checkTextLimit() { return isBeta() ? state.session.beta.max_characters : 200000; }
 function privateAccess() {
   return state.sessionReady && !state.sessionExpired && !state.sessionTransition
     && (!isSaas() || Boolean(state.session.user?.email_verified));
@@ -50,7 +52,7 @@ function authError(error) {
 }
 
 function hydrateSessionStorage() {
-  storageScope = isSaas() ? state.session.user ? `user.${encodeURIComponent(state.session.user.id)}` : 'guest' : 'local';
+  storageScope = isBeta() ? `beta.${state.session.beta.id}` : isSaas() ? state.session.user ? `user.${encodeURIComponent(state.session.user.id)}` : 'guest' : 'local';
   state.text = restoreDraft();
   try { state.homeText = storageGet(HOME_DRAFT_KEY) || ''; } catch { state.homeText = ''; }
   state.model = restoreModel();
@@ -182,7 +184,7 @@ function updateDraftStatus() {
   if (!status) return;
   status.textContent = state.draftSaved === false
     ? 'Черновик хранится только в открытой вкладке'
-    : isSaas() ? 'Черновик сохраняется в этом браузере для вашего аккаунта' : 'Черновик сохраняется на этом Mac';
+    : isBeta() ? 'Черновик сохраняется в этом браузере' : isSaas() ? 'Черновик сохраняется в этом браузере для вашего аккаунта' : 'Черновик сохраняется на этом Mac';
 }
 
 function updateReportFreshness() {
@@ -453,7 +455,7 @@ async function refreshSession() {
   const previous = state.session;
   const session = await api('/api/session');
   if (!['local', 'saas'].includes(session.mode)) throw new Error('Сервер вернул неизвестный режим рабочего пространства.');
-  if (previous && (previous.mode !== session.mode || (session.user && previous.user?.id !== session.user.id))) {
+  if (previous && (previous.mode !== session.mode || previous.beta?.id !== session.beta?.id || (session.user && previous.user?.id !== session.user.id))) {
     if (privateAccess()) saveDraft(state.text);
     state.sessionTransition = true;
     location.reload();
@@ -474,13 +476,13 @@ function updateAccountUI() {
   const name = document.querySelector('#account-name');
   const description = document.querySelector('#account-description');
   const logout = document.querySelector('#logout-button');
-  if (name) name.textContent = isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
-  if (description) description.textContent = isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
+  if (name) name.textContent = isBeta() ? 'Гостевое пространство' : isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
+  if (description) description.textContent = isBeta() ? 'Онлайн-бета · без регистрации' : isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
   if (logout) logout.hidden = !isSaas() || !user;
   const evaluation = document.querySelector('#evaluation-nav');
-  if (evaluation) evaluation.hidden = isSaas();
+  if (evaluation) evaluation.hidden = isSaas() || isBeta();
   const storageNote = document.querySelector('#workspace-storage-note');
-  if (storageNote) storageNote.textContent = isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
+  if (storageNote) storageNote.textContent = isBeta() ? 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
   updateQuotaUI();
 }
 
@@ -1060,7 +1062,7 @@ function updateCharacterCount() {
   if (wordCount) wordCount.textContent = `${number(state.text.trim() ? state.text.trim().split(/\s+/u).length : 0)} слов`;
 }
 function textLengthError(text) {
-  return chars(text).length > 200000 ? 'В тексте больше 200 000 знаков. Сократите его перед проверкой.' : '';
+  return chars(text).length > checkTextLimit() ? `В тексте больше ${number(checkTextLimit())} знаков. Сократите его перед проверкой.` : '';
 }
 
 function validateTextLength(target) {
@@ -1208,7 +1210,7 @@ function renderHome() {
             <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD</span></div>
             <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте текст вашей работы…"></textarea>
             <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
-            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До 200 000 знаков</span></div>
+            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? ' · 2 интернет-проверки в сутки' : ''}</span></div>
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>Текстовые файлы TXT и Markdown</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label>
             <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска источников.</span></label>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
@@ -1376,7 +1378,7 @@ function renderCheck() {
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
-            <span>${isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
+            <span>${isBeta() ? 'До 10 000 знаков · 2 интернет-проверки в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
           <div class="internet-options" id="internet-options" hidden>
             <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска страниц-источников.</label>
@@ -2537,7 +2539,7 @@ function renderSources() {
           <p class="field-help" id="source-text-import-hint" role="status" hidden></p>
         </div>
         <button class="button" type="submit">Добавить в библиотеку <span aria-hidden="true">+</span></button>
-        <p class="field-help">${isSaas() ? 'Источники сохраняются в вашем аккаунте и используются в следующих проверках.' : 'Источники сохраняются на вашем Mac и используются в следующих проверках.'}</p>
+        <p class="field-help">${isBeta() ? 'Источники сохраняются в гостевом пространстве этого браузера.' : isSaas() ? 'Источники сохраняются в вашем аккаунте и используются в следующих проверках.' : 'Источники сохраняются на вашем Mac и используются в следующих проверках.'}</p>
       </form>
     </section>
     <div class="section-heading source-list-heading">
@@ -2992,7 +2994,7 @@ bootstrap();
 setInterval(async () => {
   if (!state.sessionReady || state.sessionTransition) return;
   try {
-    if (isSaas()) await refreshSession();
+    if (isSaas() || isBeta()) await refreshSession();
     if (privateAccess()) await refreshStatus();
   } catch (error) {
     if (!privateAccess()) return;
