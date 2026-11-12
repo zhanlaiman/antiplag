@@ -54,13 +54,15 @@ def diagnostic_pilot_expenses(base, root):
     from scripts.unfamiliar_v2_accounting import collect as first_use_v2_expenses
     from scripts.short_paragraph_pilot_accounting import collect as short_paragraph_expenses
     from scripts.publication_pilot_accounting import collect as publication_expenses
+    from scripts.publication_query_delta_accounting import collect as publication_delta_expenses
     metadata_rows, metadata_hashes = metadata_pilot_expenses(base, root)
     format_rows, format_hashes = query_format_expenses(base, root)
     v2_rows, v2_hashes = first_use_v2_expenses(base, root)
     short_rows, short_hashes = short_paragraph_expenses(base, root)
     publication_rows, _, publication_hashes = publication_expenses(base, root)
-    return metadata_rows + format_rows + v2_rows + short_rows + publication_rows, {
-        **metadata_hashes, **format_hashes, **v2_hashes, **short_hashes, **publication_hashes}
+    publication_delta_rows, publication_delta_hashes = publication_delta_expenses(base, root)
+    return metadata_rows + format_rows + v2_rows + short_rows + publication_rows + publication_delta_rows, {
+        **metadata_hashes, **format_hashes, **v2_hashes, **short_hashes, **publication_hashes, **publication_delta_hashes}
 
 
 def source_pair_transitions(before, after):

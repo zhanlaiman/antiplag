@@ -143,24 +143,32 @@ class QueryFormatAccountingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'symlinks'):accounting.collect(self.base,self.root)
         self.assertEqual(accounting.collect(self.root/'absent',self.root),([],{}))
 
-    def test_summary_includes_all_four_collectors_without_other_reads(self):
+    def test_summary_includes_all_six_collectors_without_other_reads(self):
         from scripts import summarize_night_results as summary
         from scripts import unfamiliar_v2_accounting as first_use
         from scripts import short_paragraph_pilot_accounting as short_pilot
+        from scripts import publication_pilot_accounting as publication
+        from scripts import publication_query_delta_accounting as publication_delta
         metadata=[{'series':'metadata','query_attempts':18}]
         formats=[{'series':'format','query_attempts':6}]
         v2=[{'series':'first_use_v2','query_attempts':32}]
         short=[{'series':'short_paragraph','query_attempts':22}]
+        publications=[{'series':'publication','query_attempts':30}]
+        delta=[{'series':'publication_delta','query_attempts':1}]
         with patch.object(summary,'metadata_pilot_expenses',return_value=(metadata,{'metadata.json':'a'*64})) as a, \
              patch.object(accounting,'collect',return_value=(formats,{'format.json':'b'*64})) as b, \
              patch.object(first_use,'collect',return_value=(v2,{'v2.json':'c'*64})) as c, \
-             patch.object(short_pilot,'collect',return_value=(short,{'short.json':'d'*64})) as d:
+             patch.object(short_pilot,'collect',return_value=(short,{'short.json':'d'*64})) as d, \
+             patch.object(publication,'collect',return_value=(publications,[],{'publication.json':'e'*64})) as e, \
+             patch.object(publication_delta,'collect',return_value=(delta,{'delta.json':'f'*64})) as f:
             rows,hashes=summary.diagnostic_pilot_expenses(self.base,self.root)
-        self.assertEqual(rows,metadata+formats+v2+short);self.assertEqual(sum(r['query_attempts'] for r in rows),78)
-        self.assertEqual(hashes,{'metadata.json':'a'*64,'format.json':'b'*64,'v2.json':'c'*64,'short.json':'d'*64})
+        self.assertEqual(rows,metadata+formats+v2+short+publications+delta);self.assertEqual(sum(r['query_attempts'] for r in rows),109)
+        self.assertEqual(hashes,{'metadata.json':'a'*64,'format.json':'b'*64,'v2.json':'c'*64,'short.json':'d'*64,'publication.json':'e'*64,'delta.json':'f'*64})
         a.assert_called_once_with(self.base,self.root);b.assert_called_once_with(self.base,self.root)
         c.assert_called_once_with(self.base,self.root)
         d.assert_called_once_with(self.base,self.root)
+        e.assert_called_once_with(self.base,self.root)
+        f.assert_called_once_with(self.base,self.root)
 
 
 if __name__=='__main__':unittest.main()
