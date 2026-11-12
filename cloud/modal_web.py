@@ -9,7 +9,7 @@ REMOTE_ROOT='/opt/istok'
 APP_NAME='istok-web-beta'
 VOLUME_NAME='istok-web-beta-data'
 ORIGIN='https://zhanlaiman--istok-beta.us-east.modal.run'
-WEB_FILES=('index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
+WEB_FILES=('owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
            'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt')
 
 
@@ -59,7 +59,12 @@ def build_app(directory,key):
         .pip_install('pypdf==7.0.1','pypdfium2==5.14.0')
         .add_local_dir(directory,REMOTE_ROOT,copy=True)
         .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':'tavily','ISTOK_MODEL_PROVIDER':'local'}))
-    secret=modal.Secret.from_dict({'ISTOK_TAVILY_API_KEY':key})
+    secret_values={'ISTOK_TAVILY_API_KEY':key}
+    owner_path=ROOT/'.runtime/owner-credentials.json'
+    if owner_path.exists():
+        owner=json.loads(owner_path.read_text())
+        secret_values.update(ISTOK_OWNER_USERNAME=owner['username'],ISTOK_OWNER_SALT=owner['salt'],ISTOK_OWNER_DIGEST=owner['digest'])
+    secret=modal.Secret.from_dict(secret_values)
     app=modal.App(APP_NAME,include_source=False)
     web=app.function(name='web',image=image,secrets=[secret],volumes={'/state':volume},
         cpu=0.25,memory=512,min_containers=0,max_containers=1,buffer_containers=0,

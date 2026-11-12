@@ -104,6 +104,29 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(self.http('/api/session',cookie=cookie)[1]['beta']['daily_checks'],6)
         self.assertEqual(self.http('/api/web-check-jobs',{'request_id':'f'*32,'text':TEXT,'internet_consent':True},cookie)[0],429)
 
+    def test_owner_password_stable_workspace_and_no_guest_daily_limit(self):
+        from hashlib import pbkdf2_hmac
+        salt='12'*32
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,identifier=self.guest()
+            self.assertEqual(self.http('/api/owner/login',{'username':'owner','password':'wrong'},guest)[0],401)
+            status,_,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
+            self.assertEqual(status,200);owner=cookie.split(';')[0]
+            self.assertIn('HttpOnly',cookie)
+            session=self.http('/api/session',cookie=owner)[1]['beta']
+            self.assertTrue(session['owner']);self.assertEqual(session['id'],identifier)
+            for ch in '1234567':self.check(owner,ch*32)
+            other,_=self.guest()
+            status,_,again=self.http('/api/owner/login',{'username':'owner','password':'test-password'},other)
+            self.assertEqual(status,200)
+            self.assertEqual(self.http('/api/session',cookie=again.split(';')[0])[1]['beta']['id'],identifier)
+            forged=owner[:-1]+('0' if owner[-1]!='0' else '1')
+            self.assertFalse(self.http('/api/session',cookie=forged)[1]['beta']['owner'])
+            self.assertEqual(self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest,origin='https://evil.example')[0],403)
+            status,_,cleared=self.http('/api/owner/logout',{},owner)
+            self.assertEqual(status,200);self.assertIn('Max-Age=0',cleared)
+
     def test_invalid_cookie_creates_a_new_isolated_guest(self):
         cookie,_=self.guest();report=self.check(cookie,'1'*32)
         parts=SimpleCookie();parts.load(cookie);value=parts['istok_beta'].value
@@ -123,6 +146,18 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(self.service.beta.run_web(TEXT,'x'),{'ok':True})
             self.assertEqual(transport.call_args.args[0].limit,60)
             self.assertIn('wiki_searcher',run.call_args.kwargs)
+
+    def test_quota_timeout_retries_only_readonly_preflight(self):
+        account={'current_plan':'Researcher','plan_limit':1000,'plan_usage':615,'paygo_usage':0}
+        opener=Mock();opener.open.side_effect=[TimeoutError(),BytesIO(json.dumps({'account':account}).encode())]
+        with patch('cloud.web_beta.build_opener',return_value=opener),patch('cloud.web_beta.TavilySearch'), \
+                patch('cloud.web_beta.web_search.run',return_value={'ok':True}) as run:
+            self.assertEqual(self.service.beta.run_web(TEXT,'x'),{'ok':True})
+            self.assertEqual(opener.open.call_count,2);run.assert_called_once()
+        opener.open.side_effect=TimeoutError()
+        with patch('cloud.web_beta.build_opener',return_value=opener),patch('cloud.web_beta.TavilySearch') as transport:
+            with self.assertRaises(Exception):self.service.beta.run_web(TEXT,'x')
+            transport.assert_not_called()
 
     def test_secure_cookie_and_exact_origin_required(self):
         with self.assertRaises(ValueError):BetaRuntime(self.root/'invalid','http://public.example')

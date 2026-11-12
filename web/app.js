@@ -476,13 +476,13 @@ function updateAccountUI() {
   const name = document.querySelector('#account-name');
   const description = document.querySelector('#account-description');
   const logout = document.querySelector('#logout-button');
-  if (name) name.textContent = isBeta() ? 'Гостевое пространство' : isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
-  if (description) description.textContent = isBeta() ? 'Онлайн-бета · без регистрации' : isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
+  if (name) name.textContent = isBeta() ? state.session.beta.owner ? 'Владелец · Администратор' : 'Гостевое пространство' : isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
+  if (description) description.textContent = isBeta() ? state.session.beta.owner ? 'Вход владельца активен' : 'Онлайн-бета · без регистрации' : isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
   if (logout) logout.hidden = !isSaas() || !user;
   const evaluation = document.querySelector('#evaluation-nav');
   if (evaluation) evaluation.hidden = isSaas() || isBeta();
   const storageNote = document.querySelector('#workspace-storage-note');
-  if (storageNote) storageNote.textContent = isBeta() ? 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
+  if (storageNote) storageNote.textContent = isBeta() ? state.session.beta.owner ? 'Отчёты сохраняются в аккаунте владельца. Вход и выход: /owner.html' : 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
   updateQuotaUI();
 }
 
@@ -1210,7 +1210,7 @@ function renderHome() {
             <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD</span></div>
             <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте текст вашей работы…"></textarea>
             <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
-            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? ' · 6 интернет-проверок в сутки' : ''}</span></div>
+            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>Текстовые файлы TXT и Markdown</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label>
             <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска источников.</span></label>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
@@ -1378,7 +1378,7 @@ function renderCheck() {
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
-            <span>${isBeta() ? 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
+            <span>${isBeta() ? state.session.beta.owner ? 'До 10 000 знаков · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
           <div class="internet-options" id="internet-options" hidden>
             <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска страниц-источников.</label>

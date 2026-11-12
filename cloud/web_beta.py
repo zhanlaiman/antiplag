@@ -1,7 +1,7 @@
 """Bounded anonymous web beta; reuses the matcher and isolated tenant stores."""
 from contextlib import closing
 from datetime import datetime,timezone
-from hashlib import sha256
+from hashlib import sha256,pbkdf2_hmac
 import hmac
 from http.cookies import SimpleCookie,CookieError
 from http.server import ThreadingHTTPServer
@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import time
 from urllib.parse import urlsplit
 from urllib.request import Request,build_opener
 
@@ -90,6 +91,44 @@ class BetaRuntime:
         self.persist()
         return identifier,cookie.output(header='').strip()
 
+    def owner_identity(self,headers):
+        try:
+            cookie=SimpleCookie();cookie.load(headers.get('Cookie',''))
+            value=cookie['istok_owner'].value;guest,expiry,nonce,signature=value.split('.')
+            message='owner.'+'.'.join((guest,expiry,nonce))
+            expected=hmac.new(self.key,message.encode(),sha256).hexdigest()
+            if (re.fullmatch(r'[a-f0-9]{64}',guest) and int(expiry)>time.time()
+                    and hmac.compare_digest(expected,signature)):return guest
+        except (KeyError,ValueError,CookieError):pass
+        return None
+
+    def owner_login(self,body,guest):
+        username=os.environ.get('ISTOK_OWNER_USERNAME','');salt=os.environ.get('ISTOK_OWNER_SALT','')
+        digest=os.environ.get('ISTOK_OWNER_DIGEST','')
+        if not username or not salt or not digest:raise access.AccessError('Вход владельца ещё не настроен.','owner_unconfigured',503)
+        password=body.get('password','');login=body.get('username','')
+        if not isinstance(password,str) or len(password)>256 or not isinstance(login,str):raise ValueError('Некорректный вход')
+        with closing(self.connect()) as db,db:
+            db.execute('CREATE TABLE IF NOT EXISTS owner_attempts(at REAL)')
+            db.execute('DELETE FROM owner_attempts WHERE at<?',(time.time()-900,))
+            if db.execute('SELECT count(*) FROM owner_attempts').fetchone()[0]>=20:
+                raise access.AccessError('Слишком много попыток. Повторите через 15 минут.','owner_rate_limit',429)
+            db.execute('INSERT INTO owner_attempts VALUES (?)',(time.time(),))
+        self.persist()
+        candidate=pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(salt),600000).hex()
+        if not (hmac.compare_digest(login.encode(),username.encode()) and hmac.compare_digest(candidate,digest)):
+            raise access.AccessError('Неверный логин или пароль.','owner_login_failed',401)
+        with closing(self.connect()) as db,db:
+            db.execute('CREATE TABLE IF NOT EXISTS owner_account(id INTEGER PRIMARY KEY CHECK(id=1),guest TEXT NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO owner_account VALUES (1,?)',(guest,))
+            guest=db.execute('SELECT guest FROM owner_account WHERE id=1').fetchone()[0]
+            db.execute('DELETE FROM owner_attempts')
+        expiry=str(int(time.time())+7*86400);nonce=secrets.token_hex(16)
+        value='.'.join((guest,expiry,nonce))
+        signature=hmac.new(self.key,('owner.'+value).encode(),sha256).hexdigest()
+        self.persist()
+        return 'istok_owner='+value+'.'+signature+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+('; Secure' if self.secure else '')
+
     def trusted(self,headers,method):
         host=headers.get('Host','')
         forwarded=(host in {'127.0.0.1:8000','localhost:8000'} and headers.get('X-Forwarded-Host')==self.host)
@@ -112,7 +151,7 @@ class BetaRuntime:
             except FileNotFoundError:pass
         if used>256*1024*1024:raise access.AccessError('Хранилище бесплатной беты заполнено.','beta_storage_limit',429)
 
-    def admit_check(self,guest,identifier,text):
+    def admit_check(self,guest,identifier,text,*,owner=False):
         if not isinstance(identifier,str) or not re.fullmatch(r'[a-f0-9]{32}',identifier):
             raise ValueError('Нужен идентификатор запроса из 32 шестнадцатеричных знаков.')
         fingerprint=sha256(text.encode()).hexdigest()
@@ -122,7 +161,7 @@ class BetaRuntime:
             if old:
                 if old[0]!=fingerprint:raise access.AccessError('Идентификатор уже использован для другого текста.','request_conflict',409)
                 return
-            if db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=?',(guest,day)).fetchone()[0]>=DAILY_CHECKS:
+            if not owner and db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=?',(guest,day)).fetchone()[0]>=DAILY_CHECKS:
                 raise access.AccessError(f'В бете доступны {DAILY_CHECKS} интернет-проверок в сутки для этого браузера. Общая бесплатная квота ограничена.','beta_check_limit',429)
             db.execute('INSERT INTO checks VALUES (?,?,?,?)',(guest,identifier,fingerprint,day))
         self.persist()
@@ -131,7 +170,13 @@ class BetaRuntime:
         # No paid fallback: confirm the included allowance before any search.
         request=Request('https://api.tavily.com/usage',headers={'Authorization':'Bearer '+key_for('tavily')})
         try:
-            with build_opener(auth_provider.NoRedirect()).open(request,timeout=12) as response:account=json.load(response)['account']
+            # Retry only the read-only quota endpoint; never duplicate a search.
+            for attempt in range(3):
+                try:
+                    with build_opener(auth_provider.NoRedirect()).open(request,timeout=12) as response:account=json.load(response)['account']
+                    break
+                except (TimeoutError,OSError):
+                    if attempt==2:raise
             usage=account.get('plan_usage');paid=account.get('paygo_usage');needed=len(web_search.plan_queries(text))
             if (account.get('current_plan')!='Researcher' or account.get('plan_limit')!=1000
                     or type(usage) not in (int,float) or not 0<=usage<=900-needed
@@ -156,7 +201,8 @@ class BetaHandler(server.Handler):
             try:
                 if not self.trusted_request():
                     self.send_json({'error':'Запрос разрешён только с сайта Истока.'},403);return
-                self.guest,cookie=self.server.beta.identity(self.headers)
+                self.owner=self.server.beta.owner_identity(self.headers)
+                self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
                 if cookie:self.response_headers.append(('Set-Cookie',cookie))
                 self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
                 if method not in {'GET','HEAD'}:self.server.beta.mutation(self.guest)
@@ -170,9 +216,15 @@ class BetaHandler(server.Handler):
 
     def route(self,method,path,body):
         beta=self.server.beta
+        if method=='POST' and path=='/api/owner/login':
+            cookie=beta.owner_login(body,self.guest);self.response_headers.append(('Set-Cookie',cookie))
+            return {'ok':True}
+        if method=='POST' and path=='/api/owner/logout':
+            self.response_headers.append(('Set-Cookie','istok_owner=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'+('; Secure' if beta.secure else '')))
+            return {'ok':True}
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
-                'persistent':True,'daily_checks':DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
+                'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
         allowed=(method=='GET' and (path in {'/api/status','/api/sources','/api/source-packs','/api/reports'}
                 or re.fullmatch(r'/api/(?:reports|jobs|report-exports)/[a-f0-9]{32}',path))
             or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo'}
@@ -188,7 +240,7 @@ class BetaHandler(server.Handler):
         if method=='POST' and path=='/api/web-check-jobs':
             if body.get('internet_consent') is not True:raise access.AccessError('Нужно согласие на интернет-поиск.','internet_consent_required',400)
             text=server.field(body,'text',MAX_CHARACTERS);identifier=body.get('request_id')
-            beta.admit_check(self.guest,identifier,text)
+            beta.admit_check(self.guest,identifier,text,owner=bool(self.owner))
             store,jobs=self.tenant.store,self.tenant.jobs
             saas.ensure_job_identifier(store,identifier)
             remote_id=sha256((self.guest+'\0'+identifier).encode()).hexdigest()[:32]
