@@ -53,12 +53,14 @@ def diagnostic_pilot_expenses(base, root):
     from scripts.query_format_accounting import collect as query_format_expenses
     from scripts.unfamiliar_v2_accounting import collect as first_use_v2_expenses
     from scripts.short_paragraph_pilot_accounting import collect as short_paragraph_expenses
+    from scripts.publication_pilot_accounting import collect as publication_expenses
     metadata_rows, metadata_hashes = metadata_pilot_expenses(base, root)
     format_rows, format_hashes = query_format_expenses(base, root)
     v2_rows, v2_hashes = first_use_v2_expenses(base, root)
     short_rows, short_hashes = short_paragraph_expenses(base, root)
-    return metadata_rows + format_rows + v2_rows + short_rows, {
-        **metadata_hashes, **format_hashes, **v2_hashes, **short_hashes}
+    publication_rows, _, publication_hashes = publication_expenses(base, root)
+    return metadata_rows + format_rows + v2_rows + short_rows + publication_rows, {
+        **metadata_hashes, **format_hashes, **v2_hashes, **short_hashes, **publication_hashes}
 
 
 def source_pair_transitions(before, after):
@@ -340,7 +342,7 @@ def build():
     hashes.update(batch_record_hashes)
     final_selected, final_hashes = final_selected_summary(before)
     hashes.update(final_hashes)
-    return {"schema_version": 1, "scope": "30 DEV plus eight separately reserved query-first-use cases; final collection unopened",
+    return {"schema_version": 1, "scope": "Explicit DEV runs and separately reserved first-use cohorts; final collection unopened",
         "network_calls_by_this_script": 0, "store_writes": 0,
         "case_counts": case_counts,
         "original_30": before["summary"], "saved_matcher_replay_30": replay_compare,
