@@ -3478,6 +3478,12 @@ body:not(.home-view) .editor-header { background:#fcfdf9; }
 body:not(.home-view) .button:not(.secondary) { background:#285b43; }
 body:not(.home-view) .button.secondary { background:#fff; border-color:#d8e3cf; }
 .web-stats .coverage-status { font-size:clamp(1.1rem,3vw,1.75rem); }
+@media (max-width:480px) {
+  .web-stats { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .web-stats > .stat-card:last-child { grid-column:1 / -1; }
+  .check-modes { width:100%; }
+  .mode-tab { flex:1; min-width:0; padding-inline:12px; }
+}
 .home-source-comparison { margin-block:18px; }
 .web-score-label { margin-block:12px; }
 #comparison-area,#home-fragments { scroll-margin-block-start:1rem; }

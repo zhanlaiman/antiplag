@@ -47,6 +47,7 @@ DEFAULT_URL_STRATEGY = PATH_URL_STRATEGY
 DEFAULT_NAMED_REFERENCES = True
 DEFAULT_ZERO_FALLBACK = True
 DEFAULT_WIKI_FOLLOWUP = True
+DEFAULT_RELATED_FALLBACK = True
 ZERO_FALLBACK_POLICY = "initial-zero-extra-twelve-v1"
 ZERO_FALLBACK_EXTRA_URLS = 12
 ZERO_FALLBACK_SECONDS = 300
@@ -256,6 +257,7 @@ def status():
             "max_primary_queries": MAX_QUERIES, "max_secondary_queries": 2 if wiki_followup else 0,
             "secondary_provider": "mediawiki" if wiki_followup else None,
             "wiki_followup_enabled": wiki_followup,
+            "related_fallback_enabled": os.environ.get("ISTOK_WEB_RELATED_FALLBACK", "1" if DEFAULT_RELATED_FALLBACK else "0") == "1",
             "max_urls": 26 if wiki_followup else MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if zero_fallback else MAX_URLS,
             "max_initial_urls": MAX_URLS, "zero_fallback_enabled": zero_fallback,
             "error": None if configured else error}
@@ -493,7 +495,8 @@ def _rank_url_paths(ordered, text):
 
 
 def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query_strategy=None, url_strategy=None,
-        use_named_references=None, use_zero_fallback=None, use_wiki_followup=None, wiki_searcher=None):
+        use_named_references=None, use_zero_fallback=None, use_wiki_followup=None, wiki_searcher=None,
+        use_related_fallback=None):
     """Produce a report payload, preserving every failure and the bounded scope.
 
     This is a first lexical web search, not a guarantee over every internet page.
@@ -501,6 +504,14 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     """
     started = time.monotonic()
     custom_io = searcher is not None or fetcher is not None
+    if use_related_fallback is None:
+        configured = os.environ.get("ISTOK_WEB_RELATED_FALLBACK")
+        if configured not in (None, "0", "1"):
+            raise ValueError("Неверная настройка чтения альтернативных ссылок.")
+        enabled = DEFAULT_RELATED_FALLBACK if configured is None else configured == "1"
+        use_related_fallback = enabled and (not custom_io or wiki_searcher is not None)
+    if type(use_related_fallback) is not bool:
+        raise ValueError("Неверная настройка чтения альтернативных ссылок.")
     if use_wiki_followup is None:
         configured = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP")
         if configured not in (None, "0", "1"):
@@ -618,6 +629,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     urls_attempted = 0
     attempted_urls = []
     link_discoveries, linked_urls = [], set()
+    related_parent_pages = []
     priority_link_replacements = 0
     priority_link_credit, priority_link_urls = 1, set()
     confirmed_matches, fully_covered = [], False
@@ -729,6 +741,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                     urls.append(related)
                     linked_urls.add(related)
                     link_discoveries.append({"parent_url": final, "url": related, "basis": "input_anchor_overlap"})
+                    if use_related_fallback:
+                        related_parent_pages.append({"url": final, "links": fetched.get("links", [])})
         except (RuntimeError, OSError, ValueError, KeyError) as error:
             code = getattr(error, "code", "fetch_error")
             errors.append({"stage": "fetch", "url": url, "code": code,
@@ -819,6 +833,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         result, _ = append_post_wiki(text, result, queries, primary_urls=urls,
             attempted_urls=attempted_urls, final_aliases=final_urls, request_id=request_id,
             started_at=started, secondary_searcher=wiki_searcher, fetcher=fetcher, progress=progress)
+    if use_related_fallback:
+        from plagiarism.web_related_fallback import append_related
+        result = append_related(text, result, related_parent_pages, fetcher=fetcher, started_at=started, progress=progress)
+    result["web"]["related_fallback_enabled"] = use_related_fallback
     if progress:
         progress("Сохраняем проверку уникальности", len(ordered), len(ordered), phase="saving")
     return result

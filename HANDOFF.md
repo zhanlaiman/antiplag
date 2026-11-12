@@ -1,4 +1,24 @@
-# LOCAL BETA CHECK — 12 ноября 2026
+# SEARCH UPDATE — 12 ноября 2026, рабочая локальная версия
+
+Продолжение поиска по новой просьбе пользователя завершено. Пользователь уточнил: достаточно работающей версии, идеальное качество сейчас не требуется; регистрацию и оплату оставить на потом. Финальные70 закрыты, бюджет0₸, модели/GPU/установки не запускались. Обсуждение локального Qwen на ноутбуке — только вопрос, пользователь прямо исключил работу над ним.
+
+Выбран и включён `post-check-two-tied-source-links-v2`: до2 дополнительных ссылок с равной оценкой после всей прежней проверки, внутри старых26попыток/300секунд. Все прежние sources/matches/IDs/порядок попыток сохраняются. Код plagiarism/web_related_fallback.py SHA ef571a7b703d8e0a5d00433b64e6f2c35e774f03c3a53406b352b9f54aa069e9. Интеграция в web_search.py, DEFAULT_RELATED_FALLBACK=True; rollback ISTOK_WEB_RELATED_FALLBACK=0. Custom IO без Wiki-адаптера требует явного use_related_fallback=True, аналогично ограничению автоматического включения Wiki.
+
+Результат: DEV30 283/283 и18/18 без изменений; три известные искусственные вставки10/60→50/60, полные1/3→2/3. A0041 получил40/40; A0056 остаётся0/10. 68контекстов/33уникальныхтекста, потерь прежних слов/пар/IDs0,3новые уникальные exact-пары просмотрены и корректны. Более широкий вариант давал те же40слов при56extraattempts; выбранный —26/68 (13/34 current). 68actualproductionreports полностью совпали с frozen runtime winner. Newunknownbody0, D04seven unchanged. Сравнения data/private/web-evaluation/related-fallback-ties-v2 и related-fallback-production-v1. Вариант qualifier-tie отклонён:0gain. Все исследования приватные, финальные70 не открывались.
+
+Рабочие ссылки: помогло http://127.0.0.1:8766/#check/42da5abfa0c8bedc2f562cade73fbe83 ; ограничение http://127.0.0.1:8766/#check/31c22e8576a9e6d91a7ceddbf11c0e6f . Оба через normalHTTP/Jobs/mainStore/currentdefaults, GET-first, reopen2x equal, API0/GET0 во время создания отчётов. A0041:637/640raw,40/40insert,10pages/14attempts,partial,7/8knownreplies; Wiki2UNKNOWN сохранён, не ретраить. A0056:598raw,0/10insert,10pages/13attempts. Внутренние failedqueuev1/v2 сохранены; исправлялись только cache fixtures (independent views и оригинальный Photo fetched_at), product core не менялся. Последний успешный A0041 queuev3.
+
+**895Python PASS40.984s**, существующий PDFium, внешние соединения запрещены; **58NodePASS**, JSsyntax3 иdiffcheckPASS. Логи .runtime/search-finish-python.log и search-finish-node.log. Дополнительно CSS мобильной статистики:2колонки и статус на всю ширину, вкладки помещаются; native319px overflow0. UI A0041→click обе40словныевыдержки/PhotoURL, A0056 partial, D05zero «Не установлена», reloadсохраняет. Draft4370безизменений/неотправлен. Screenshot .runtime/search-finish/A0041-proof.png. CUA phase CLOSED «Проверил исправленный поиск и отчёты», siteTab3 отмечен deliverable A0041; viewport reset. Модели недоступны в UI.
+
+Сайт перезапущен: launcher2714 (.runtime/site-launcher.pid), scripts/start.py, ISTOK_MODEL_PROVIDER=local, existing local-inference-disabled. Health8766 configured/relatedFallbackTrue/8queries/26pages/modelAvailableFalse. Старые launcher94493/server94494 штатно остановлены.
+
+Расход этого продолжения: **0Tavily/0Wiki**, 25ordinaryFetcherопераций/41wireHTTP (включая robots),0₸. Полный monthlylocal591/provider590/paygo0 на11:04Алматы; protective900 позволяет ещё309попыток. Codex last16% remaining,0free resets; consume не вызывался. .runtime/search-finish/finance-final.json. N4 только reserved metadata SHA7c0e0c8b919b8af7ee86707e1bd1eeda7820c3857fd74f5457862c344c11837e; исходные страницы/тексты не открыты,30Tpreflight разрешён, но новые запросы не запускались после уточнения пользователя о достаточной рабочей версии.
+
+Короткий отчёт docs/SEARCH_UPDATE_2026-11-12.md. Следующая причина при новой работе — исходныйURLдля10словA0056: целаяфразавставкиестьвплане,URLотсутствует. Не добавлять output/,tmp/,.runtime/,data/private/ в Git. Публичный хостинг/регистрацию/оплату не подключать в этой задаче.
+
+---
+
+# Предыдущий LOCAL BETA CHECK — 12 ноября 2026
 
 По новой просьбе пользователя завершена оставшаяся проверка текущей локальной версии, без возобновления поисковых экспериментов. Backend b832d2d сохранён, frontend основан на c9b0a9f; обе CTA теперь прокручивают непосредственно к home-check-form. На экране шириной319 форма начинается на84px, поле на145px вместо прежних435/495px. Черновики4370 и756 знаков сохранены, согласия не включались.
 
