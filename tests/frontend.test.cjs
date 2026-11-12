@@ -1088,6 +1088,29 @@ function webReport(text = 'Учебный текст', partial = false) {
       errors: partial ? [{ message: 'Учебная страница недоступна', url: 'https://example.test/unavailable' }] : [] } };
 }
 
+test('finished web checks distinguish zero matches from limited source coverage on both screens', async () => {
+  const report = webReport('Самостоятельный текст', true);
+  report.stats = { total_words: 570, matched_words: 0, uniqueness_percent: null };
+  report.matches = [];
+  report.web.sources_checked = 13;
+  report.issues = [{ kind: 'partial_web_check', message: 'Проверка по интернету неполная.' }];
+  for (const surface of ['home', 'check']) {
+    const app = fixture({ view: surface + '/' + report.id, fetch(url) {
+      if (url === '/api/reports/' + report.id) return json({ report });
+    } });
+    await settle();
+    const html = app.element(surface === 'home' ? 'home-report-result' : 'report-area').innerHTML;
+    assert.ok(html.includes('Совпадений не найдено'));
+    assert.ok(html.includes('Проверка завершена'));
+    assert.ok(html.includes('На 13 проверенных страницах'));
+    assert.ok(html.includes('часть источников недоступна'));
+    assert.ok(!html.includes('Проверка завершена не полностью'));
+    assert.ok(!html.includes('Проверка по интернету неполная'));
+    assert.ok(!html.includes('100%'));
+    assert.equal(app.evaluate('webUniqueness(state.' + (surface === 'home' ? 'homeReport' : 'report') + ')'), 'Не установлена');
+  }
+});
+
 test('saved-data web reports distinguish replayed replies and pages from fresh network activity', async () => {
   const app = fixture();
   await settle();

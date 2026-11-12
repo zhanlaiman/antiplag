@@ -958,7 +958,7 @@ function renderHomeResult() {
   setReportAddress('home', report);
   const selected = report.matches.find(match => match.id === state.homeMatch) || report.matches[0];
   area.innerHTML = `<section class="home-result-card">
-    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webUniqueness(report)}</h2><p>${webCheckComplete(report) ? 'уникальность по найденным страницам' : 'проверка неполная · окончательный процент не установлен'}</p></div><a href="#check/${escapeHTML(report.id)}" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
+    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webResultTitle(report)}</h2><p>${webResultDescription(report)}</p></div><a href="#check/${escapeHTML(report.id)}" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
     <p id="home-report-stale" class="warning" hidden>Это отчёт для предыдущего текста. Новая правка в поле сохранена отдельно.</p>
     ${webStatsHTML(report)}
     ${selected ? `<div class="card"><h3>Совпадения в вашем тексте</h3><div class="annotated-text">${annotatedText(report, selected.id)}</div>
@@ -1571,6 +1571,17 @@ function webUniqueness(report) {
     ? `Не выше ${upper.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%` : 'Не установлена';
 }
 
+function webResultTitle(report) {
+  return hasWebSources(report) && report.stats?.matched_words === 0 && report.stats?.total_words > 0
+    && !report.matches?.length ? 'Совпадений не найдено' : webUniqueness(report);
+}
+
+function webResultDescription(report) {
+  if (!hasWebSources(report)) return 'Проверка завершена · источники прочитать не удалось · уникальность не установлена';
+  return webCheckComplete(report) ? 'Проверка завершена · уникальность по найденным страницам'
+    : 'Проверка завершена · часть источников недоступна или не проверена · окончательный процент не установлен';
+}
+
 function webStatsHTML(report) {
   const stats = report.stats || {};
   const checked = webSourceCount(report);
@@ -1580,7 +1591,7 @@ function webStatsHTML(report) {
   return `<div class="stats-row web-stats">
     <div class="stat-card"><strong>${percent}</strong><span>слов с подтверждёнными дословными совпадениями${validWords ? ` · ${number(stats.matched_words)} из ${number(stats.total_words)}` : ''}</span></div>
     <div class="stat-card"><strong>${Number.isInteger(checked) ? number(checked) : '—'}</strong><span>страниц прочитано</span></div>
-    <div class="stat-card"><strong class="coverage-status">${webCheckComplete(report) ? 'Завершена' : 'Неполная'}</strong><span>проверка найденных страниц</span></div></div>`;
+    <div class="stat-card"><strong class="coverage-status">Завершена</strong><span>${webCheckComplete(report) ? 'найденные страницы проверены' : hasWebSources(report) ? 'часть источников не проверена' : 'источники прочитать не удалось'}</span></div></div>`;
 }
 
 function showComparison(selector) {
@@ -1617,14 +1628,16 @@ function webCoverageHTML(report) {
   const mixed = web.hybrid_reply_provenance && typeof web.hybrid_reply_provenance === 'object';
   const savedPages = replay && report.offline_replay.fresh_page_load_attempts === 0;
   return `<section class="card web-coverage">
-    <h3>${webCheckComplete(report) ? 'Проверка найденных страниц завершена' : 'Проверка завершена не полностью'}</h3>
+    <h3>Проверка завершена</h3>
+    ${hasWebSources(report) && report.stats?.matched_words === 0 && !report.matches?.length ? `<p>На ${number(webSourceCount(report))} проверенных страницах дословных совпадений не найдено.</p>` : ''}
+    ${!webCheckComplete(report) ? `<p>${hasWebSources(report) ? 'Часть источников недоступна или осталась непроверенной из-за ограничений поиска и загрузки.' : 'Прочитать источники не удалось. Подтвердить уникальность текста пока нельзя.'}</p>` : ''}
     ${replay ? `<p class="warning">Повтор сохранённых данных: используется прежняя поисковая выдача.${savedPages ? ' Источники проверены по сохранённым снимкам.' : ''}</p>` : mixed ? '<p class="warning">Часть поисковой выдачи взята из сохранённых данных.</p>' : ''}
     <p>${replay ? 'Использовано сохранённых поисковых ответов' : mixed ? 'Обработано поисковых ответов' : 'Поисковых запросов выполнено'} ${number(web.queries_completed)} из ${number(web.queries_planned)}.
       ${savedPages ? 'Проверено снимков страниц' : 'Проверено страниц'} ${number(web.sources_checked)}. ${replay || mixed ? 'Обработано адресов' : 'Попыток загрузки'} ${number(web.urls_attempted)}.</p>
     ${web.post_wiki_enabled ? `<p class="field-help">Дополнительный поиск по русской Википедии: ${number(web.post_wiki_queries_completed)} из ${number(web.post_wiki_queries_planned)} запросов. Подсветка строится только по тексту прочитанных страниц.</p>` : ''}
     <p class="field-help">Уникальность — доля слов без найденных дословных совпадений в загруженных страницах. Поисковые сниппеты не используются как доказательство. Оценка Qwen в этот процент не входит.</p>
-    ${web.status !== 'complete' && Number.isFinite(report.stats?.uniqueness_upper_bound_percent) ? '<p class="field-help">По найденным совпадениям указана верхняя граница уникальности. Проверка остальных страниц неполная, окончательный процент не установлен.</p>' : ''}
-    ${web.errors?.length ? `<details><summary>Не удалось проверить · ${number(web.errors.length)}</summary><ul>${web.errors.map(error => `<li>${escapeHTML(typeof error === 'string' ? error : error.message || 'Источник недоступен')} ${typeof error === 'object' ? safeLink(error.url) : ''}</li>`).join('')}</ul></details>` : ''}
+    ${web.status !== 'complete' && Number.isFinite(report.stats?.uniqueness_upper_bound_percent) ? '<p class="field-help">По найденным совпадениям указана верхняя граница уникальности. Не все источники удалось проверить, окончательный процент не установлен.</p>' : ''}
+    ${web.errors?.length ? `<details><summary>Причины ограничений · ${number(web.errors.length)}</summary><ul>${web.errors.map(error => `<li>${escapeHTML(typeof error === 'string' ? error : error.message || 'Источник недоступен')} ${typeof error === 'object' ? safeLink(error.url) : ''}</li>`).join('')}</ul></details>` : ''}
     <ul class="field-help">${(web.limitations || ['Оценка относится к найденным доступным страницам, а не ко всему интернету.']).map(value => `<li>${escapeHTML(value)}</li>`).join('')}</ul>
   </section>`;
 }
@@ -1655,14 +1668,14 @@ function renderReport() {
         <button class="text-button" id="download-report" type="button">↓ Данные JSON</button>
       </div>
     </div>
-    ${webReport ? `<p class="web-score-label"><strong>${webUniqueness(report)}</strong> · ${webCheckComplete(report) ? 'уникальность по найденным страницам' : 'проверка неполная · окончательный процент не установлен'}</p>${webStatsHTML(report)}` : `
+    ${webReport ? `<p class="web-score-label"><strong>${webResultTitle(report)}</strong> · ${webResultDescription(report)}</p>${webStatsHTML(report)}` : `
     <div class="stats-row">
       <div class="stat-card"><strong>${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%</strong><span>текста с лексическими совпадениями</span></div>
       <div class="stat-card"><strong>${number(matches.length)}</strong><span>найдено фрагментов</span></div>
       <div class="stat-card"><strong>${number(stats.source_count)}</strong><span>источников с совпадениями</span></div>
     </div>`}
     ${webReport ? webCoverageHTML(report) : ''}
-    ${(report.issues || []).map(issue => `<div class="warning">${escapeHTML(typeof issue === 'string' ? issue : issue.message || JSON.stringify(issue))}</div>`).join('')}
+    ${(report.issues || []).filter(issue => !webReport || issue?.kind !== 'partial_web_check').map(issue => `<div class="warning">${escapeHTML(typeof issue === 'string' ? issue : issue.message || JSON.stringify(issue))}</div>`).join('')}
     ${matches.length ? `
       <div class="report-grid">
         <div class="card">
