@@ -8,7 +8,7 @@ ROOT=Path(__file__).resolve().parents[1]
 REMOTE_ROOT='/opt/istok'
 APP_NAME='istok-web-beta'
 VOLUME_NAME='istok-web-beta-data'
-ORIGIN='https://zhanlaiman--istok-beta.modal.run'
+ORIGIN='https://zhanlaiman--istok-beta.us-east.modal.run'
 WEB_FILES=('index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
            'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt')
 
@@ -47,8 +47,8 @@ def serve_beta():
     import modal
     from cloud.web_beta import create_server
     os.environ.update(ISTOK_PDF_ALTERNATIVE_ENGINE='pdfium',ISTOK_PDFIUM_PYTHON=sys.executable)
-    volume=modal.Volume.from_name('istok-web-beta-data')
-    service=create_server(Path('/state'),'https://zhanlaiman--istok-beta.modal.run',persist=volume.commit)
+    volume=modal.Volume.from_name(VOLUME_NAME)
+    service=create_server(Path('/state'),ORIGIN,persist=volume.commit)
     Thread(target=service.serve_forever,name='istok-http',daemon=True).start()
 
 
@@ -81,10 +81,11 @@ def main():
     import modal
     with modal.enable_output():
         app,web=build_app(directory,key);app.deploy(environment_name='main',strategy='recreate')
-    receipt={'app':APP_NAME,'url':web.web_url,'source_manifest':manifest,'CPU_only':True,
+    url=web.get_web_url()
+    receipt={'app':APP_NAME,'url':url,'source_manifest':manifest,'CPU_only':True,
              'GPU':None,'private_data_uploaded':False,'volume':VOLUME_NAME}
     path=ROOT/'.runtime/web-deploy/deployment.json';path.write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n');path.chmod(0o600)
-    print(json.dumps({'app':APP_NAME,'url':web.web_url,'volume':VOLUME_NAME},ensure_ascii=False))
+    print(json.dumps({'app':APP_NAME,'url':url,'volume':VOLUME_NAME},ensure_ascii=False))
 
 
 if __name__=='__main__':main()

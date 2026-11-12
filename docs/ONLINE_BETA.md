@@ -1,6 +1,6 @@
 # Онлайн-бета «Истока»
 
-Цель размещения: `https://zhanlaiman--istok-beta.modal.run`. До появления `.runtime/web-deploy/deployment.json` и проверки URL публикация не подтверждена.
+Адрес размещения: `https://zhanlaiman--istok-beta.us-east.modal.run`. До появления `.runtime/web-deploy/deployment.json` и проверки URL публикация не подтверждена.
 
 Python-сервер размещается отдельным App `istok-web-beta` в Modal, только CPU: 0,25 ядра, 512 MiB, один контейнер, масштабирование к нулю. Постоянный Volume v2 — `istok-web-beta-data`. Простой может дать холодный старт при следующем посещении. Ноутбук для работы опубликованного App не нужен.
 
