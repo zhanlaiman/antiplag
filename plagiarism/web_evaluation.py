@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from plagiarism.matching import literal_equivalent
 from plagiarism.pdf_evidence import PrimarySupport
+from plagiarism.html_evidence import HTMLSupport, declares_html, POLICY as HTML_EVIDENCE_POLICY
 
 
 SCENARIOS = frozenset({"copy", "short_insertion", "multiple_sources", "quote", "paraphrase",
@@ -156,13 +157,27 @@ def _report(report, case):
                 primary_id = source["representation_of"]
                 primary = sources.get(primary_id)
                 _require(primary is not None and not primary.get("representation_of"),
-                         "У дополнительного текста PDF отсутствует первичный снимок.")
-                _require(primary["canonical_url"] == url, "Дополнительный текст ссылается на другой PDF.")
-                if primary_id not in primary_support:
-                    primary_support[primary_id] = PrimarySupport(primary["text"], primary_id)
-                proof = primary_support[primary_id].evidence(match)
-                _require(proof is not None and match.get("pdf_spacing_evidence") == proof,
-                         "Дополнительная PDF-выдержка не подтверждена первичным текстом.")
+                         "У дополнительного текста страницы отсутствует первичный снимок.")
+                _require(primary["canonical_url"] == url, "Дополнительный текст ссылается на другую страницу.")
+                if declares_html(source):
+                    _require(isinstance(source.get("provenance"), dict), "Некорректное происхождение HTML-снимка.")
+                    _require(source.get("provenance", {}).get("evidence_policy") == HTML_EVIDENCE_POLICY,
+                             "Неизвестная политика дополнительного HTML-снимка.")
+                    _require(len(sources) <= 100 and sum(not s.get("representation_of") and s["canonical_url"] == url for s in sources.values()) == 1,
+                             "Неоднозначная физическая HTML-страница или превышен лимит снимков.")
+                    _require(sum(bool(s.get("representation_of")) and s["canonical_url"] == url and declares_html(s) for s in sources.values()) == 1,
+                             "Неоднозначные дополнительные HTML-снимки физической страницы.")
+                    _require(sum(s.get("representation_of") == primary_id and s.get("provenance", {}).get("evidence_policy") == HTML_EVIDENCE_POLICY for s in sources.values()) == 1,
+                             "Неоднозначный дополнительный HTML-снимок.")
+                    proof = HTMLSupport(primary, source).evidence(match)
+                    _require(proof is not None and match.get("html_semantic_notes_evidence") == proof,
+                             "Дополнительная HTML-выдержка не подтверждена первичным снимком.")
+                else:
+                    if primary_id not in primary_support:
+                        primary_support[primary_id] = PrimarySupport(primary["text"], primary_id)
+                    proof = primary_support[primary_id].evidence(match)
+                    _require(proof is not None and match.get("pdf_spacing_evidence") == proof,
+                             "Дополнительная PDF-выдержка не подтверждена первичным текстом.")
             signature = (url, *target, *original)
             if match["kind"] == "exact" and signature not in seen:
                 valid.append({"url": url, "target_span": target, "source_span": original})

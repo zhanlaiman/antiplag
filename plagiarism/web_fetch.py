@@ -25,6 +25,7 @@ MAX_ROBOTS_REDIRECTS = 5
 REQUEST_TIMEOUT = 8
 TOTAL_TIMEOUT = 20
 HTML_EXTRACTION_VERSION = "html-parser-v2-implied-ends"
+HTML_NOTES_EXTRACTION_VERSION = "html-parser-v3-semantic-notes"
 _DNS_SLOTS = BoundedSemaphore(4)
 _REDIRECTS = {301, 302, 303, 307, 308}
 
@@ -232,7 +233,10 @@ class _TextExtractor(HTMLParser):
 
 
 class Fetcher:
-    def __init__(self, resolver=None, connector=None, clock=None):
+    def __init__(self, resolver=None, connector=None, clock=None, semantic_notes=True):
+        if type(semantic_notes) is not bool:
+            raise TypeError("semantic_notes must be a bool")
+        self.semantic_notes = semantic_notes
         self.resolver = resolver or _resolver
         self.connector = connector or _connector
         self.clock = clock or time.monotonic
@@ -459,6 +463,7 @@ class Fetcher:
             supplemental_texts = []
             optional_status = None
             links = []
+            html_semantic_view = None
             if mime == "application/pdf":
                 from plagiarism.pdf_source import PDFError, extract_pdf
                 try:
@@ -499,6 +504,37 @@ class Fetcher:
                 text = _normalize_whitespace("".join(parser.pieces))
                 title = _normalize_whitespace("".join(parser.title))[:300] or title
                 links = [{"url": urljoin(target["url"], link["url"]), "text": link["text"]} for link in parser.links]
+                # The complete original extraction above is authoritative for
+                # title/links and all original validity/complexity boundaries.
+                if self.semantic_notes:
+                    from .html_notes import HTMLNotesError, mask_semantic_notes
+                    if not text or "\0" in text:
+                        raise FetchError("На странице не найден доступный текст.", "empty_text")
+                    if len(text) > MAX_TEXT_CHARACTERS:
+                        raise FetchError("Извлечённый текст превышает 200000 символов.", "text_too_large")
+                    try:
+                        self._remaining(deadline)
+                        masked, marker_ranges, note_audit = mask_semantic_notes(decoded, void_tags=_TextExtractor.VOID)
+                        self._remaining(deadline)
+                        if masked != decoded and not note_audit["ancestry_uncertain"]:
+                            cleaned = _TextExtractor()
+                            for offset in range(0, len(masked), 16384):
+                                self._remaining(deadline)
+                                cleaned.feed(masked[offset:offset + 16384])
+                            cleaned.close()
+                            candidate = _normalize_whitespace("".join(cleaned.pieces))
+                            # web.run requires at least35characters. Removing
+                            # notes must not turn a formerly usable source short.
+                            if len(candidate.strip()) >= 35 and candidate != text:
+                                from .html_evidence import build_derivation, digest, POLICY, VIEW_ID
+                                proof = build_derivation(text, candidate, marker_ranges, sha256(body).hexdigest())
+                                html_semantic_view = {"id": VIEW_ID, "policy": POLICY,
+                                    "text": candidate, "text_sha256": digest(candidate),
+                                    "extraction": HTML_NOTES_EXTRACTION_VERSION,
+                                    "raw_html_sha256": sha256(body).hexdigest(), "derivation": proof}
+                    except (HTMLNotesError, ValueError, AssertionError):
+                        # Uncertain optional inspection retains original text.
+                        pass
             else:
                 decoded, encoding = self._decode(body, headers["Content-Type"])
                 text = _normalize_whitespace(decoded)
@@ -513,6 +549,8 @@ class Fetcher:
                     "encoding": encoding, "bytes_read": wire, "decoded_bytes": len(body),
                     "robots_url": target["origin"] + "/robots.txt",
                     "extraction": pdf["extraction"] if pdf else HTML_EXTRACTION_VERSION if mime == "text/html" else "plain-v1",
+                    **({"html_semantic_view": html_semantic_view,
+                        "raw_html_sha256": sha256(body).hexdigest()} if html_semantic_view else {}),
                     **({"pdf_pages": pdf["page_count"], "pdf_parser_version": pdf["parser_version"]} if pdf else {}),
                     **({"supplemental_texts": supplemental_texts, "optional_status": optional_status,
                         "raw_pdf_sha256": sha256(body).hexdigest()} if pdf and optional_status is not None else {})}

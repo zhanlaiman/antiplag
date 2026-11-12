@@ -108,7 +108,9 @@ def append_post_wiki(text, legacy_report, primary_plan, *, primary_urls,
     """
     from plagiarism import web_search as web
     from plagiarism.matching import _tokens
-    from plagiarism.pdf_evidence import analyze_with_supplements
+    from plagiarism.html_evidence_merge import analyze_with_supplements
+    from plagiarism.html_evidence import POLICY as HTML_EVIDENCE_POLICY
+    from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY
     from plagiarism.web_evaluation import _report
     from plagiarism.web_fetch import FetchError
 
@@ -356,6 +358,10 @@ def append_post_wiki(text, legacy_report, primary_plan, *, primary_urls,
         post_wiki_attempted_urls=list(audit['extra_attempted_urls']),post_wiki_max_extra_pages=2,
         max_page_attempts=26,attempted_urls=new_attempts,urls_attempted=len(new_attempts),
         sources_checked=len(now_read),supplemental_text_views=len(views),
+        pdf_text_views=sum(s.get('provenance',{}).get('evidence_policy')==PDF_EVIDENCE_POLICY for s in views),
+        html_text_views=sum(s.get('provenance',{}).get('evidence_policy')==HTML_EVIDENCE_POLICY for s in views),
+        pdf_evidence_policy=PDF_EVIDENCE_POLICY if any(s.get('provenance',{}).get('evidence_policy')==PDF_EVIDENCE_POLICY for s in views) else None,
+        html_evidence_policy=HTML_EVIDENCE_POLICY if any(s.get('provenance',{}).get('evidence_policy')==HTML_EVIDENCE_POLICY for s in views) else None,
         discovered_urls=discovered,urls_discovered=data.get('urls_discovered',len(full_primary))+raw_results,
         urls_found=data.get('urls_found',len(full_primary))+novel_urls,
         urls_supported=data.get('urls_supported',len(full_primary))+novel_urls,

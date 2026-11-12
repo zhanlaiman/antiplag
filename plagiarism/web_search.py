@@ -22,7 +22,9 @@ from uuid import uuid4
 from plagiarism.auth_provider import NoRedirect
 from plagiarism.matching import MATCHER_VERSION, MAX_TEXT_CHARS, MIN_WORDS, _tokens, analyze
 from plagiarism.search_credentials import key_for, selected_provider
-from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY, analyze_with_supplements
+from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY
+from plagiarism.html_evidence_merge import analyze_with_supplements
+from plagiarism.html_evidence import POLICY as HTML_EVIDENCE_POLICY, source_view
 from plagiarism.input_references import extract_named_references
 from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 
@@ -397,6 +399,8 @@ def _word_coverage(text, matches):
 
 def _supplemental_source_views(source, fetched):
     """Keep one bounded, independently stored view of the same physical PDF."""
+    if fetched.get("content_type") == "text/html":
+        return source_view(source, fetched)
     if fetched.get("content_type") != "application/pdf":
         return []
     values = fetched.get("supplemental_texts", [])
@@ -786,7 +790,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "attempted_urls": attempted_urls[:max_page_attempts], "skipped_urls": skipped_urls[:30],
         "urls_attempted": urls_attempted, "urls_deduplicated": duplicates, "sources_checked": len(sources),
         "supplemental_text_views": len(supplements),
-        "pdf_evidence_policy": PDF_EVIDENCE_POLICY if supplements else None,
+        "pdf_text_views": sum(s.get("provenance", {}).get("evidence_policy") == PDF_EVIDENCE_POLICY for s in supplements),
+        "html_text_views": sum(s.get("provenance", {}).get("evidence_policy") == HTML_EVIDENCE_POLICY for s in supplements),
+        "pdf_evidence_policy": PDF_EVIDENCE_POLICY if any(s.get("provenance", {}).get("evidence_policy") == PDF_EVIDENCE_POLICY for s in supplements) else None,
+        "html_evidence_policy": HTML_EVIDENCE_POLICY if any(s.get("provenance", {}).get("evidence_policy") == HTML_EVIDENCE_POLICY for s in supplements) else None,
         "optional_pdf_status": optional_pdf_status,
         "urls_outside_limit": outside_limit, "urls_rejected": rejected_urls, "errors": errors,
         "elapsed_seconds": round(time.monotonic() - started, 3), "score_basis": "exact_word_coverage",
