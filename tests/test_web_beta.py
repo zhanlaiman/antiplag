@@ -138,13 +138,13 @@ class WebBetaTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception,'бесплатную квоту'):self.service.beta.run_web(TEXT,'x')
             transport.assert_not_called()
 
-    def test_verified_quota_uses_a_sixty_query_budget_and_existing_pipeline(self):
+    def test_verified_quota_uses_a_180_query_budget_and_existing_pipeline(self):
         account={'current_plan':'Researcher','plan_limit':1000,'plan_usage':615,'paygo_usage':0}
         opener=Mock();opener.open.return_value=BytesIO(json.dumps({'account':account}).encode())
         with patch('cloud.web_beta.build_opener',return_value=opener),patch('cloud.web_beta.TavilySearch') as transport, \
                 patch('cloud.web_beta.web_search.run',return_value={'ok':True}) as run:
             self.assertEqual(self.service.beta.run_web(TEXT,'x'),{'ok':True})
-            self.assertEqual(transport.call_args.args[0].limit,60)
+            self.assertEqual(transport.call_args.args[0].limit,180)
             self.assertIn('wiki_searcher',run.call_args.kwargs)
 
     def test_quota_timeout_retries_only_readonly_preflight(self):

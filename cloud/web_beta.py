@@ -24,7 +24,7 @@ from plagiarism.tenants import TenantRegistry
 
 COOKIE='istok_beta'
 MAX_CHARACTERS=10000
-MONTHLY_SEARCHES=60
+MONTHLY_SEARCHES=180
 DAILY_CHECKS=6
 
 
