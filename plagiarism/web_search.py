@@ -24,6 +24,7 @@ from plagiarism.matching import MATCHER_VERSION, MAX_TEXT_CHARS, MIN_WORDS, _tok
 from plagiarism.search_credentials import key_for, selected_provider
 from plagiarism.pdf_evidence import POLICY as PDF_EVIDENCE_POLICY, analyze_with_supplements
 from plagiarism.input_references import extract_named_references
+from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +37,7 @@ HYBRID_STRATEGY = "hybrid-paragraph-v1"
 CITATION_STRATEGY = "hybrid-citation-v2"
 COVERAGE_STRATEGY = "hybrid-paragraph-v3"
 DENSE_STRATEGY = "hybrid-citation-v4-dense"
-DEFAULT_QUERY_STRATEGY = DENSE_STRATEGY
+DEFAULT_QUERY_STRATEGY = PARAGRAPH_STRATEGY
 DOMAIN_URL_STRATEGY = "domain-round-robin-v1"
 BALANCED_URL_STRATEGY = "hybrid-domain-query-v2"
 PATH_URL_STRATEGY = "hybrid-input-path-v3"
@@ -199,13 +200,17 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
-    if strategy == DENSE_STRATEGY:
-        return _dense_queries(text, limit)
+    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY):
+        planned = _dense_queries(text, limit)
+        if strategy == PARAGRAPH_STRATEGY:
+            return paragraph_redundancy_queries(text, planned,
+                (query["query"] for query in _citation_queries(text)), limit=limit)
+        return planned
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
     if strategy == COVERAGE_STRATEGY:
@@ -682,7 +687,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 if url in priority_link_urls and linked_coverage["matched_words"] > previous_link_words:
                     priority_link_credit = 1
                 fully_covered = linked_coverage["matched_words"] == linked_coverage["total_words"]
-            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY) and url not in linked_urls and not fully_covered:
+            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY) and url not in linked_urls and not fully_covered:
                 page_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)

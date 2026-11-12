@@ -101,7 +101,7 @@ class WebZeroFallbackTests(unittest.TestCase):
             self.assertEqual(len(pages.calls), 24)
             self.assertEqual(len(search.calls), 6)
             self.assertEqual(report['stats']['matched_words'], 18)
-            self.assertEqual(report['web']['query_strategy'], web.DENSE_STRATEGY)
+            self.assertEqual(report['web']['query_strategy'], web.PARAGRAPH_STRATEGY)
             self.assertEqual(report['web']['url_strategy'], web.PATH_URL_STRATEGY)
             self.assertIs(report['web']['named_references_enabled'], True)
             self.assertIs(report['web']['zero_fallback_enabled'], True)
