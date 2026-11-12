@@ -7,7 +7,8 @@ import re
 POLICY = "html-semantic-notes-independent-v1"
 VIEW_ID = "html-notes-v1"
 VIEW_EXTRACTION = "html-parser-v3-semantic-notes"
-PRIMARY_EXTRACTION = "html-parser-v2-implied-ends"
+PRIMARY_EXTRACTION = "html-parser-v4-edit-controls"
+PRIMARY_EXTRACTIONS = ("html-parser-v2-implied-ends", PRIMARY_EXTRACTION)
 MAX_COMBINED = 200_000
 MAX_MARKERS = 512
 MAX_PROOF_BYTES = 65_536
@@ -89,7 +90,7 @@ def valid_derivation(primary, clean, value):
             "eligible_marker_units", "accepted_raw_ranges", "mask_ranges_sha256", "removed_primary_spans", "removed_units"}
     try:
         if (not isinstance(value, dict) or set(value) != keys or value["policy"] != POLICY or type(value["version"]) is not int or value["version"] != 1
-                or value["primary_extraction"] != PRIMARY_EXTRACTION or value["view_extraction"] != VIEW_EXTRACTION
+                or value["primary_extraction"] not in PRIMARY_EXTRACTIONS or value["view_extraction"] != VIEW_EXTRACTION
                 or len(primary) + len(clean) > MAX_COMBINED or len(clean.strip()) < 35 or "\0" in primary + clean
                 or value["primary_text_sha256"] != digest(primary) or value["view_text_sha256"] != digest(clean)
                 or not all(isinstance(value[k], str) and HEX.fullmatch(value[k]) for k in ("raw_html_sha256", "mask_ranges_sha256"))
@@ -117,10 +118,11 @@ def source_view(primary, fetched):
     if fetched.get("content_type") != "text/html" or not isinstance(value, dict): return []
     text = value.get("text"); raw = fetched.get("raw_html_sha256"); proof = value.get("derivation")
     if (value.get("id") != VIEW_ID or value.get("policy") != POLICY or value.get("extraction") != VIEW_EXTRACTION
-            or fetched.get("extraction") != PRIMARY_EXTRACTION or not isinstance(text, str)
+            or fetched.get("extraction") not in PRIMARY_EXTRACTIONS or not isinstance(text, str)
             or len(primary["text"]) + len(text) > MAX_TEXT_CHARS or value.get("text_sha256") != digest(text)
             or not isinstance(raw, str) or not HEX.fullmatch(raw) or value.get("raw_html_sha256") != raw
-            or not valid_derivation(primary["text"], text, proof) or proof["raw_html_sha256"] != raw): return []
+            or not valid_derivation(primary["text"], text, proof) or proof["raw_html_sha256"] != raw
+            or proof["primary_extraction"] != fetched["extraction"]): return []
     return [{"id": primary["id"] + "-" + VIEW_ID, "representation_of": primary["id"], "title": primary["title"], "url": primary["url"], "text": text,
         "provenance": {**primary.get("provenance", {}), "text_sha256": digest(text), "evidence_policy": POLICY,
             "extraction": VIEW_EXTRACTION, "raw_html_sha256": raw, "html_derivation": proof}}]

@@ -11,7 +11,7 @@ import math
 import re
 import time
 
-DISCOVERY_STRATEGY = 'primary-mediawiki-post-v4-paragraph-clause'
+DISCOVERY_STRATEGY = 'primary-mediawiki-post-v5-uncovered'
 B1_DISCOVERY_STRATEGY = 'primary-mediawiki-post-v1'
 DEFAULT_SECONDARY_QUERY_POLICY = 'strict-em-dash-prefix-v2'
 UNCHANGED_SECONDARY_QUERY_POLICY = 'unchanged-v1'
@@ -111,6 +111,35 @@ def select_post_queries(text, primary_plan, *, secondary_query_policy=DEFAULT_SE
     return shrink_queries(text,primary_plan,chosen)[0]
 
 
+def _prefer_uncovered_query(text,primary_plan,chosen,covered_starts):
+    """Reuse slot two for missing text when its current phrase is fully grounded."""
+    from plagiarism.matching import _tokens
+    from plagiarism.web_search import _citation_queries
+    chosen=deepcopy(chosen)
+    if len(chosen)!=2 or not covered_starts:
+        return chosen
+    tokens=_tokens(text)
+    def window(q):
+        return [t for t in tokens if q['start']<=t.start and t.end<=q['end']]
+    second=window(chosen[1])
+    if not second or not all(t.start in covered_starts for t in second):
+        return chosen
+    protected={q['query'] for q in _citation_queries(text)}
+    for i,q in enumerate(primary_plan):
+        if q['query'] in protected or i==chosen[0]['primary_query_index']:
+            continue
+        words=window(q)
+        if len(words)>=6 and not any(t.start in covered_starts for t in words):
+            offset=(len(words)-6)//2
+            words=words[offset:offset+6]
+            changed={**deepcopy(q),'primary_query_index':i,'start':words[0].start,'end':words[-1].end,
+                'query':'"'+' '.join(t.value[:40] for t in words)+'"'}
+            if changed['query']!=chosen[0]['query']:
+                chosen[1]=changed
+            break
+    return chosen
+
+
 def append_post_wiki(text, legacy_report, primary_plan, *, primary_urls,
                      attempted_urls, final_aliases, request_id, started_at,
                      secondary_searcher, fetcher, clock=None, progress=None,
@@ -203,6 +232,8 @@ def append_post_wiki(text, legacy_report, primary_plan, *, primary_urls,
     if provider != 'mediawiki':
         raise ValueError('Only the public MediaWiki secondary provider is allowed')
     chosen = select_post_queries(text,primary_plan,secondary_query_policy=secondary_query_policy)
+    if secondary_query_policy==DEFAULT_SECONDARY_QUERY_POLICY:
+        chosen = _prefer_uncovered_query(text,primary_plan,chosen,old_coverage)
     policy = DISCOVERY_STRATEGY if secondary_query_policy==DEFAULT_SECONDARY_QUERY_POLICY else B1_DISCOVERY_STRATEGY
     original_chosen = select_post_queries(text,primary_plan,secondary_query_policy=UNCHANGED_SECONDARY_QUERY_POLICY)
     audit = {'policy':policy,'secondary_query_policy':secondary_query_policy,

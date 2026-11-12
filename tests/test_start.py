@@ -8,6 +8,25 @@ from scripts import start
 
 
 class StartTests(unittest.TestCase):
+    def test_web_only_ignores_cloud_and_saas_environment_and_disables_models(self):
+        with TemporaryDirectory() as directory:
+            root=Path(directory);runtime=root/'.runtime';runtime.mkdir()
+            (runtime/'cloud-models.json').write_text('{}')
+            app=Mock();app.wait.return_value=0
+            with patch.object(start,'ROOT',root), patch.object(start.shutil,'which') as which, \
+                    patch.object(start,'ollama_running') as probe, \
+                    patch.object(start.subprocess,'Popen',return_value=app) as popen, \
+                    patch.dict(start.os.environ,{'ISTOK_MODEL_PROVIDER':'modal','ISTOK_APP_MODE':'saas',
+                        'ISTOK_RUNTIME_DIR':'/other/project/runtime'},clear=True), \
+                    patch('builtins.print'):
+                self.assertEqual(start.main(web_only=True),0)
+            which.assert_not_called();probe.assert_not_called()
+            self.assertTrue((runtime/'local-inference-disabled').is_file())
+            self.assertEqual(popen.call_args.args[0][0],start.sys.executable)
+            self.assertEqual(popen.call_args.kwargs['env']['ISTOK_MODEL_PROVIDER'],'local')
+            self.assertEqual(popen.call_args.kwargs['env']['ISTOK_APP_MODE'],'local')
+            self.assertEqual(popen.call_args.kwargs['env']['ISTOK_RUNTIME_DIR'],str(runtime))
+
     def test_existing_pdf_parser_configuration_reaches_site_without_model_startup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

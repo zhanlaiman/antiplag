@@ -55,7 +55,7 @@ class IndependentHTMLTests(unittest.TestCase):
                 self.assertEqual(old[key], new[key], key)
         self.assertEqual(len(fo.requests), len(fn.requests))
         self.assertEqual(len(fn.requests), 2)
-        self.assertEqual(new['extraction'], 'html-parser-v2-implied-ends')
+        self.assertEqual(new['extraction'], 'html-parser-v4-edit-controls')
         self.assertEqual(new['html_semantic_view']['text'].split('\n')[0], WORDS)
 
     def test_no_ID_target_gains_full_ten_span_without_deleting_old_nine(self):

@@ -38,13 +38,15 @@ def ollama_running():
         return False
 
 
-def main():
+def main(*, web_only=False):
     runtime = ROOT / ".runtime"
     runtime.mkdir(exist_ok=True)
+    if web_only:
+        (runtime / "local-inference-disabled").touch(exist_ok=True)
     child = None
     log = None
     cloud_configured = (runtime / "cloud-models.json").is_file()
-    provider = os.environ.get("ISTOK_MODEL_PROVIDER", "modal" if cloud_configured else "local")
+    provider = "local" if web_only else os.environ.get("ISTOK_MODEL_PROVIDER", "modal" if cloud_configured else "local")
     local_inference_disabled = (runtime / "local-inference-disabled").exists() or provider == "modal"
     if local_inference_disabled:
         print("Автозапуск локальной Ollama отключён. Запускается только сайт.", flush=True)
@@ -75,6 +77,11 @@ def main():
         if cloud_python.is_file():
             python = str(cloud_python)
         app_options["env"] = environment
+    if web_only:
+        app_options["env"] = {**app_options.get("env", os.environ),
+                              "ISTOK_MODEL_PROVIDER": "local", "ISTOK_APP_MODE": "local",
+                              "ISTOK_RUNTIME_DIR": str(runtime)}
+        print("Бета: только сайт на этом Mac, локальные и облачные модели отключены.", flush=True)
     app = subprocess.Popen([python, str(ROOT / "server.py"), "--port", "8766"], **app_options)
     try:
         return app.wait()
@@ -91,4 +98,7 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse
+    parser = argparse.ArgumentParser(description="Запуск Истока")
+    parser.add_argument("--web-only", action="store_true", help="Только локальный сайт, без Ollama и Modal")
+    raise SystemExit(main(web_only=parser.parse_args().web_only))

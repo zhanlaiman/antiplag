@@ -24,7 +24,7 @@ MAX_REDIRECTS = 3
 MAX_ROBOTS_REDIRECTS = 5
 REQUEST_TIMEOUT = 8
 TOTAL_TIMEOUT = 20
-HTML_EXTRACTION_VERSION = "html-parser-v2-implied-ends"
+HTML_EXTRACTION_VERSION = "html-parser-v4-edit-controls"
 HTML_NOTES_EXTRACTION_VERSION = "html-parser-v3-semantic-notes"
 _DNS_SLOTS = BoundedSemaphore(4)
 _REDIRECTS = {301, 302, 303, 307, 308}
@@ -188,11 +188,15 @@ class _TextExtractor(HTMLParser):
         if tag == "a":
             self.anchor = None
         style = values.get("style") or ""
+        edit_control = tag == "span" and "mw-editsection" in (values.get("class") or "").split()
         ignored = (tag in self.SKIP or "hidden" in values or str(values.get("aria-hidden", "")).lower() == "true"
+                   or edit_control
                    or bool(re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", style, re.I))
                    or values.get("role") in {"navigation", "banner", "contentinfo", "search"}
                    or bool(re.search(r"(?:^|\s)(?:cookie-banner|cookie-consent|site-header|site-footer)(?:\s|$)",
                                      (values.get("class") or "") + " " + (values.get("id") or ""), re.I)))
+        if edit_control and not any(frame[1] for frame in self.stack):
+            self._word_boundary()
         if tag == "a" and not ignored and not any(frame[1] for frame in self.stack) and len(self.links) < 1024:
             href = values.get("href", "")
             if href and len(href) <= 4096:
