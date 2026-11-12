@@ -25,6 +25,15 @@ def covered_words(text, start, end, exact_matches):
 
 def main():
     key = json.loads((MATERIALS / "key.json").read_text())
+    negative_sources = {}
+    for case in key["cases"]:
+        for evidence in case["expected_evidence"]:
+            path = MATERIALS / evidence["source_snapshot_path"]
+            body = path.read_text()
+            assert sha256(body.encode()).hexdigest() == evidence["source_text_sha256"]
+            negative_sources[evidence["source_id"]] = {
+                "id": evidence["source_id"], "title": evidence["source_id"],
+                "url": evidence["source_urls"][0], "text": body}
     rows = []
     for case in key["cases"]:
         text = (MATERIALS / case["input_path"]).read_text()
@@ -37,7 +46,9 @@ def main():
             if not any(s["id"] == evidence["source_id"] for s in sources):
                 sources.append({"id": evidence["source_id"], "title": evidence["source_id"],
                                 "url": evidence["source_urls"][0], "text": body})
-        result = analyze(text, sources)
+        # Controls must see real comparison pages; an empty source list proves nothing.
+        comparison_sources = sources if case["expected_evidence"] else list(negative_sources.values())
+        result = analyze(text, comparison_sources)
         details = []
         for evidence in case["expected_evidence"]:
             start, end = evidence["target_span"]
@@ -49,7 +60,7 @@ def main():
                             "expected_words": gold_words, "exact_words": found_words,
                             "fully_highlighted": found_words == gold_words if gold_words else False})
         rows.append({"id": case["id"], "scenario": case["scenario"],
-                     "synthetic": case["synthetic"], "source_snapshots": len(sources),
+                     "synthetic": case["synthetic"], "source_snapshots": len(comparison_sources),
                      "expected": details, "matched_pairs": len(result["matches"]),
                      "matched_characters": result["stats"]["matched_characters"],
                      "unexpected_pairs_need_review": (len(result["matches"]) if not details else None)})
@@ -62,7 +73,8 @@ def main():
                "lexical_words_expected": sum(e["expected_words"] for e in lexical),
                "negative_controls": len(negatives),
                "negative_controls_with_matches": sum(row["matched_pairs"] > 0 for row in negatives),
-               "false_highlights_confirmed": 0,
+               "negative_source_pool_size": len(negative_sources),
+               "false_highlights_confirmed": None,
                "false_highlights_reviewed": 0,
                "limitations": "Known gold source snapshots were supplied directly to the matcher. This does not test search, URL selection, or live source readability. Annotation is unreviewed."}
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
