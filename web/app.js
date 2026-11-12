@@ -1174,7 +1174,7 @@ function renderHome() {
             <p class="landing-eyebrow"><span></span> ПРОВЕРКА ЗАИМСТВОВАНИЙ В ИНТЕРНЕТЕ</p>
             <h1 class="landing-title" aria-label="Проверьте уникальность текста">Проверьте текст.<br>Найдите <span>исток.</span></h1>
             <p class="landing-description">От совпавшей фразы — к её источнику. Проверяйте статьи, курсовые и исследования с отчётом, который можно проверить самому.</p>
-            <div class="landing-actions"><a class="landing-button" href="#home" data-home-scroll="home-check">Проверить текст <span aria-hidden="true">↗</span></a><a class="landing-text-link" href="#home" data-home-scroll="home-how">Как это работает <span aria-hidden="true">→</span></a></div>
+            <div class="landing-actions"><a class="landing-button" href="#home" data-home-scroll="home-check-form">Проверить текст <span aria-hidden="true">↗</span></a><a class="landing-text-link" href="#home" data-home-scroll="home-how">Как это работает <span aria-hidden="true">→</span></a></div>
             <p class="landing-formats">Вставьте текст или загрузите TXT / MD</p>
             <div class="landing-benefits"><span><i aria-hidden="true">✓</i> Подсветка совпадений</span><span><i aria-hidden="true">✓</i> Ссылки на источники</span><span><i aria-hidden="true">✓</i> Сохранённый отчёт</span></div>
           </div>
@@ -1242,7 +1242,7 @@ function renderHome() {
           <details id="home-scope"><summary>Какие ограничения есть у проверки?<span aria-hidden="true">+</span></summary><p>Закрытые сайты, переводы и глубокие пересказы могут остаться незамеченными. За проверку выполняется до <strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span class="sr-only">${maxQueries}</span> поисковых запросов и до <strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span class="sr-only">${maxUrls}</span> попыток чтения страниц. Исток сохраняет найденные совпадения и показывает недоступные источники.</p></details>
         </div>
       </section>
-      <section class="landing-final"><div><p class="landing-label">ОТ ТЕКСТА — К ЯСНОСТИ</p><h2>Проверьте то,<br>что важно вам.</h2></div><a class="landing-button" href="#home" data-home-scroll="home-check">Перейти к проверке <span aria-hidden="true">↗</span></a></section>
+      <section class="landing-final"><div><p class="landing-label">ОТ ТЕКСТА — К ЯСНОСТИ</p><h2>Проверьте то,<br>что важно вам.</h2></div><a class="landing-button" href="#home" data-home-scroll="home-check-form">Перейти к проверке <span aria-hidden="true">↗</span></a></section>
       <footer class="home-footer"><a class="home-brand" href="#home" data-home-scroll="home-top">исток<span class="home-brand-dot">.</span></a><span>У каждого совпадения есть источник</span><div><a href="#history">История</a><a href="#check">Рабочее пространство ↗</a></div></footer>
     </div>`;
   const field = document.querySelector('#home-text');
