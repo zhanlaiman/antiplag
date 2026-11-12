@@ -11,7 +11,7 @@ import math
 import re
 import time
 
-DISCOVERY_STRATEGY = 'primary-mediawiki-post-v2-clause'
+DISCOVERY_STRATEGY = 'primary-mediawiki-post-v3-paragraph-clause'
 B1_DISCOVERY_STRATEGY = 'primary-mediawiki-post-v1'
 DEFAULT_SECONDARY_QUERY_POLICY = 'strict-em-dash-prefix-v2'
 UNCHANGED_SECONDARY_QUERY_POLICY = 'unchanged-v1'
@@ -91,6 +91,23 @@ def select_post_queries(text, primary_plan, *, secondary_query_policy=DEFAULT_SE
         return chosen
     if secondary_query_policy!=DEFAULT_SECONDARY_QUERY_POLICY:
         raise ValueError('Unknown secondary query policy')
+    # Repeating overlapping introduction windows leaves other paragraphs
+    # unchecked by the secondary search. Keep the first slot and use an
+    # already planned phrase from a different paragraph for the second.
+    if len(chosen)==2 and max(q['start'] for q in chosen)<min(q['end'] for q in chosen):
+        from plagiarism.query_paragraphs import _paragraphs
+        paragraphs=_paragraphs(text)
+        def block(q):
+            return next((i for i,p in enumerate(paragraphs)
+                if p['start']<=q['start'] and q['end']<=p['end']),None)
+        first=block(chosen[0])
+        if first is not None and block(chosen[1])==first:
+            eligible=[{**deepcopy(q),'primary_query_index':i} for i,q in enumerate(primary_plan)
+                      if q['query'] not in protected]
+            replacement=next((q for q in eligible[2:]
+                if block(q) is not None and block(q)!=first),None)
+            if replacement is not None:
+                chosen[1]=replacement
     return shrink_queries(text,primary_plan,chosen)[0]
 
 

@@ -20,6 +20,12 @@ def write(path, value):
 
 class PublicationFirstUseTests(unittest.TestCase):
     def setUp(self):
+        # These are newly authored fake runs against the current production
+        # policy. Keep the real historical driver's pinned version untouched.
+        from plagiarism.web_wiki_followup import DISCOVERY_STRATEGY
+        current_policy = patch.object(pilot, "DISCOVERY", DISCOVERY_STRATEGY)
+        current_policy.start()
+        self.addCleanup(current_policy.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

@@ -1,4 +1,20 @@
-# SEARCH UPDATE — 12 ноября 2026, рабочая локальная версия
+# USER PHOTO FIX — 12 ноября 2026
+
+Пользователь проверил предложенные два текста и прислал скриншоты: положительный `ad7993d4927b1d03e80b65bfd7259f15` дал0/17, контрольный `32eda92ead6aaa48cb2642f4cd4ca024` —0/108. Реальная ошибка — URLневернулсяпоTavilyфразевнутривставки, Wikiпровериладвапересекающихсявступления. Исправлено в web_wiki_followup.select_post_queries: только при пересечении двух вторичных фраз внутри одного абзаца второй слот берёт первую eligible primary-фразу целиком из другого абзаца. Primary6/firstWiki/citation/B2-shrink/caps unchanged. Discovery policy `primary-mediawiki-post-v3-paragraph-clause`.
+
+Новый рабочий отчёт http://127.0.0.1:8766/#check/d986735274082a81d9ee73e27ebdb29a :17/17вставки,17/109total,17physicalpages/26attempts,partial/upper84.5/finalNull, PhotoWiki source. NormalHTTP/Jobs/mainStore/defaults;6freshFREEBasic+2cachedWiki. Исторический исходный0/17 не переписан. Независимый offline counterfactual на **тех же6freshTответах** и фактических снимках:0→17, after source/match/stats exact normalqueue parity; network0. Артефакты data/private/web-evaluation/user-photo-wiki-diversity-v1/{summary,full-report,counterfactual-summary}.json. Прогон COMPLETE, request e818045a299d4217a62559f3789b7827, не повторять fresh_queue.py. Сбой был только в итоговом summary ('sources' отсутствуют в публичном API): полные snapshots восстановлены через Store.get уже существующего отчёта, без POST/APIretry.
+
+Локальный контроль all34 contexts/33 inputs:31 secondaryplans unchanged,3changed(D29,D30,pairedD30) actualreplay0loss/allsource-match-ID-stats-queue equal; negative userplan unchanged. 3новые anonymousWiki пробы(2negativeDEV→[],1Photo→correctURL), реальногоTживого6. Финальные70 закрыты. Обновлён тестовый fixturepolicy текущей production; исторический scripts/run_publication_first_use.py и старые артефакты не менялись.
+
+**903Python PASS42.114s +58Node PASS**, PDFiumexisting/externalconnectionsdenied. Logs .runtime/wiki-overlap-diversity-v1/python-tests-final.log,node-tests.log. NativeUI new17report→click correct excerpts/PhotoURL, reload17/84.5 retained,overflow0,draft4370unchanged. Screenshot .runtime/wiki-overlap-diversity-v1/user-photo-fixed.png. CUA CLOSED «Исправил обнаружение вставки из Википедии»; siteTab3 deliverable newreport,viewportreset.
+
+Сайт перезапущен launcher5602/.runtime/site-launcher.pid с modelproviderlocal, disabledmarkerpreserved,8queries/26pages/modelUnavailable. Старые2714/2715остановлены. Расходэтогоэтапа6T+3Wiki+26normalFetcheroperations/0₸; localmonthly609/provider590/paygo0 на11:38Алматы, защитныйостаток291. Codexremaining15%,freeReset0,consumeневызывался. Предложение пользователя делать90→65→95отчислазапусков обсуждено: **искусственные проценты не реализованы**, оценка только по подтверждённым совпадениям и охвату.
+
+Короткий отчёт docs/USER_PHOTO_FIX_2026-11-12.md. Обсуждение локального Qwen — только консультация; пользователь отдельно запретил работу над ним. Регистрация/оплата отложены, N4 остаётся metadata-only/unread, финальные70 sealed. Не добавлять output/,tmp/,.runtime/,data/private/ в Git.
+
+---
+
+# Предыдущий SEARCH UPDATE — 12 ноября 2026, рабочая локальная версия
 
 Продолжение поиска по новой просьбе пользователя завершено. Пользователь уточнил: достаточно работающей версии, идеальное качество сейчас не требуется; регистрацию и оплату оставить на потом. Финальные70 закрыты, бюджет0₸, модели/GPU/установки не запускались. Обсуждение локального Qwen на ноутбуке — только вопрос, пользователь прямо исключил работу над ним.
 
