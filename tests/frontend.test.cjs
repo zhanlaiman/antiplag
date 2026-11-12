@@ -86,8 +86,8 @@ class FixtureElement {
 
   removeEventListener(name, callback) { this.listeners.get(name)?.delete(callback); }
 
-  async emit(name) {
-    const event = { type: name, target: this, currentTarget: this, preventDefault() {} };
+  async emit(name, extra = {}) {
+    const event = { type: name, target: this, currentTarget: this, preventDefault() {}, ...extra };
     await Promise.all([...this.listeners.get(name) || []].map(callback => callback(event)));
   }
 
@@ -1338,4 +1338,36 @@ test('an explicit zero read count overrides a stale percentage on both report sc
     const html = app.element(surface === 'home' ? 'home-report-result' : 'report-area').innerHTML;
     assert.ok(html.includes('Не установлена') && !html.includes('100%'));
   }
+});
+
+
+test('homepage file drop imports locally without consent, requests, or changing the workspace draft', async () => {
+  const app = fixture({ view: 'home', stored: { 'istok.draft.v1': 'Личный черновик', 'istok.home-draft.v1': 'Прежний текст главной' } });
+  await settle();
+  await app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [textFile('Новый текст из файла 😀')] } });
+  assert.equal(app.element('home-text').value, 'Новый текст из файла 😀');
+  assert.equal(app.storage.get('istok.home-draft.v1'), 'Новый текст из файла 😀');
+  assert.equal(app.storage.get('istok.draft.v1'), 'Личный черновик');
+  assert.equal(app.evaluate('state.homeConsent'), false);
+  assert.equal(app.element('home-check-button').disabled, true);
+});
+
+test('homepage rejects multiple or unsupported dropped files and preserves a newer edit during reading', async () => {
+  const app = fixture({ view: 'home', stored: { 'istok.home-draft.v1': 'Сохранённый текст' } });
+  await settle();
+  await app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [textFile('Первый'), textFile('Второй')] } });
+  assert.equal(app.element('home-text').value, 'Сохранённый текст');
+  assert.match(app.element('home-check-error').textContent, /один/);
+  await app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [textFile('Файл', 'article.pdf')] } });
+  assert.equal(app.element('home-text').value, 'Сохранённый текст');
+  assert.match(app.element('home-check-error').textContent, /\.txt/);
+  const reading = deferred();
+  const dropping = app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [{ name: 'article.txt', size: 30, arrayBuffer: () => reading.promise }] } });
+  await settle();
+  app.element('home-text').value = 'Правка во время чтения';
+  await app.element('home-text').emit('input');
+  reading.resolve(Uint8Array.from(Buffer.from('Поздний файл')).buffer);
+  await dropping;
+  assert.equal(app.element('home-text').value, 'Правка во время чтения');
+  assert.equal(app.storage.get('istok.home-draft.v1'), 'Правка во время чтения');
 });

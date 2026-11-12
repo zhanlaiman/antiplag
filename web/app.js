@@ -1161,58 +1161,89 @@ function renderHome() {
   const maxQueries = Number.isInteger(webStatus().max_queries) ? webStatus().max_queries : 6;
   const maxUrls = Number.isInteger(webStatus().max_urls) ? webStatus().max_urls : 12;
   main.innerHTML = `
-    <div class="home-page home-v2">
+    <div class="home-page home-v3" id="home-top">
       <header class="home-nav">
-        <a class="home-brand" href="#home" aria-label="Исток, главная">исток<span class="home-brand-dot">.</span></a>
-        <nav aria-label="Главная навигация"><a href="#home" data-home-scroll="home-check">Проверить текст</a><a href="#home" data-home-scroll="home-how">Как это работает</a><a href="#home" data-home-scroll="home-scope">Что входит в оценку</a></nav>
-        <a class="home-nav-cta" href="#check">Рабочее пространство ↗</a>
+        <a class="home-brand" href="#home" data-home-scroll="home-top" aria-label="Исток, главная"><span class="home-logo" aria-hidden="true">и</span>исток<span class="home-brand-dot">.</span></a>
+        <nav aria-label="Главная навигация"><a href="#home" data-home-scroll="home-how">Как это работает</a><a href="#home" data-home-scroll="home-features">Возможности</a><a href="#home" data-home-scroll="home-faq">Вопросы</a></nav>
+        <a class="home-nav-cta" href="#check">Рабочее пространство <span aria-hidden="true">↗</span></a>
       </header>
-      <section class="home-v2-hero" id="home-check">
-        <div class="home-orbit home-orbit-one" aria-hidden="true"></div><div class="home-orbit home-orbit-two" aria-hidden="true"></div>
-        <div class="home-v2-copy">
-          <p class="home-kicker">Исток · проверка текста с источниками</p>
-          <h1 class="home-v2-title" aria-label="Проверьте уникальность текста"><span data-reveal>Проверьте</span><span data-reveal>уникальность</span><span data-reveal>текста<span class="home-title-dot" aria-hidden="true">.</span></span></h1>
-          <p class="home-v2-description">Найдите страницы с совпадениями.<br>Сверьте фрагменты. Сохраните ссылки.</p>
-          <p class="home-v2-status" id="home-search-status">${webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету'}</p>
-          ${state.text.trim() ? '<p class="home-existing-draft">Есть черновик в рабочем пространстве. <a href="#check">Продолжить его ↗</a></p>' : ''}
+
+      <section class="landing-hero">
+        <div class="landing-hero-inner">
+          <div class="landing-copy">
+            <p class="landing-eyebrow"><span></span> ПРОВЕРКА ЗАИМСТВОВАНИЙ В ИНТЕРНЕТЕ</p>
+            <h1 class="landing-title" aria-label="Проверьте уникальность текста">Проверьте текст.<br>Найдите <span>исток.</span></h1>
+            <p class="landing-description">От совпавшей фразы — к её источнику. Проверяйте статьи, курсовые и исследования с отчётом, который можно проверить самому.</p>
+            <div class="landing-actions"><a class="landing-button" href="#home" data-home-scroll="home-check">Проверить текст <span aria-hidden="true">↗</span></a><a class="landing-text-link" href="#home" data-home-scroll="home-how">Как это работает <span aria-hidden="true">→</span></a></div>
+            <p class="landing-formats">Вставьте текст или загрузите TXT / MD</p>
+            <div class="landing-benefits"><span><i aria-hidden="true">✓</i> Подсветка совпадений</span><span><i aria-hidden="true">✓</i> Ссылки на источники</span><span><i aria-hidden="true">✓</i> Сохранённый отчёт</span></div>
+          </div>
+          <div class="landing-preview" aria-label="Учебный пример оформления отчёта">
+            <div class="preview-grid" aria-hidden="true"></div>
+            <div class="preview-note"><span class="preview-check" aria-hidden="true">✓</span><div><strong>У каждого совпадения — источник</strong><span>Сверяйте обе выдержки рядом</span></div></div>
+            <div class="preview-paper-back" aria-hidden="true"></div>
+            <div class="preview-document">
+              <div class="preview-toolbar"><span class="preview-file-icon" aria-hidden="true">T</span><span>Город и среда.txt</span><span class="preview-example">Пример отчёта</span></div>
+              <div class="preview-doc-body"><p class="preview-doc-kicker">ИССЛЕДОВАНИЕ · ГОРОДСКАЯ СРЕДА</p><h2>Город начинается<br>с общих пространств</h2><div class="preview-text-lines" aria-hidden="true"><i></i><i></i></div><p class="preview-highlight">Городские сады помогают жителям выращивать овощи рядом с домом.</p><p class="preview-doc-paragraph">Общие пространства становятся местом встреч, обмена опытом и новых городских привычек.</p><div class="preview-text-lines short" aria-hidden="true"><i></i><i></i></div></div>
+              <div class="preview-doc-footer"><span><i aria-hidden="true"></i> Совпадение выделено в тексте</span><span>01 / 01</span></div>
+            </div>
+            <div class="preview-source"><div class="preview-source-top"><span class="preview-source-icon" aria-hidden="true">↗</span><span>СРАВНЕНИЕ С ИСТОЧНИКОМ</span><span class="preview-source-tag">Дословно</span></div><strong>Городские сады</strong><p>Городские сады помогают жителям выращивать овощи рядом с домом.</p><span class="preview-source-caption">Учебный пример · не результат проверки</span></div>
+          </div>
         </div>
-        <form class="home-checker" id="home-check-form">
-          <div class="home-checker-heading"><label for="home-text">Ваш текст</label><label class="home-file-button">Загрузить TXT / MD<input id="home-file" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label></div>
-          <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте статью, заметку или абзац, который хотите проверить…"></textarea>
-          <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
-          <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>С пробелами</span></div>
-          <label class="home-consent"><input id="home-consent" type="checkbox">Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска источников.</label>
-          <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
-          <p class="home-quota" id="home-quota" hidden></p>
-          <p class="home-connect-note" id="home-search-unavailable" ${webConfigured() ? 'hidden' : ''}>Интернет-поиск пока не подключён к этому экземпляру. Кнопка станет доступна после подключения сервиса.</p>
-          <a class="home-setup-link" id="home-setup-search" href="/setup-search.html" ${isSaas() || webConfigured() ? 'hidden' : ''}>Подключить поисковый сервис ↗</a>
-          <p class="home-check-progress" id="home-check-progress" role="status" hidden></p>
-          <p class="inline-error" id="home-check-error" role="alert"></p>
-          <a class="home-secondary-check" id="home-library-link" href="#check">Или открыть проверку по своей библиотеке ↗</a>
-        </form>
+      </section>
+
+      <section class="landing-how landing-section" id="home-how">
+        <div class="landing-section-heading"><div><p class="landing-label">КАК ЭТО РАБОТАЕТ</p><h2>От текста к источнику.<br>За три шага.</h2></div><p>Процент — только начало.<br>Самое важное — увидеть, что совпало.</p></div>
+        <div class="landing-steps">
+          <article><div class="step-top"><span>01</span><span aria-hidden="true">↗</span></div><h3>Добавьте текст</h3><p>Вставьте материал в поле или загрузите текстовый файл. Черновик сохранится в браузере.</p></article>
+          <article><div class="step-top"><span>02</span><span aria-hidden="true">⌕</span></div><h3>Найдите совпадения</h3><p>Исток найдёт возможные источники и сравнит ваш текст с доступными страницами.</p></article>
+          <article><div class="step-top"><span>03</span><span aria-hidden="true">▤</span></div><h3>Откройте источник</h3><p>Нажмите на подсветку, сравните две выдержки и сохраните отчёт со ссылками.</p></article>
+        </div>
+      </section>
+
+      <section class="landing-check-section" id="home-check">
+        <div class="landing-check-layout landing-section">
+          <div class="landing-check-copy"><p class="landing-label">НАЧНИТЕ ПРОВЕРКУ</p><h2>Ваш текст.<br>Его источники.</h2><p>Добавьте материал, который хотите проверить. Результат появится здесь — с выделенными фрагментами и ссылками.</p><div class="landing-check-note"><span aria-hidden="true">↗</span><p>Уже работаете над документом?<br><a href="#check">Открыть рабочее пространство</a></p></div><p class="home-v2-status" id="home-search-status">${webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету'}</p>${state.text.trim() ? '<p class="home-existing-draft">Ваш черновик на месте. <a href="#check">Продолжить работу ↗</a></p>' : ''}</div>
+          <form class="home-checker" id="home-check-form">
+            <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD</span></div>
+            <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте текст вашей работы…"></textarea>
+            <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
+            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До 200 000 знаков</span></div>
+            <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>Текстовые файлы TXT и Markdown</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label>
+            <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска источников.</span></label>
+            <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
+            <p class="home-quota" id="home-quota" hidden></p>
+            <p class="home-connect-note" id="home-search-unavailable" ${webConfigured() ? 'hidden' : ''}>Интернет-поиск пока не подключён к этому экземпляру. Кнопка станет доступна после подключения сервиса.</p>
+            <a class="home-setup-link" id="home-setup-search" href="/setup-search.html" ${isSaas() || webConfigured() ? 'hidden' : ''}>Подключить поисковый сервис ↗</a>
+            <p class="home-check-progress" id="home-check-progress" role="status" hidden></p><p class="inline-error" id="home-check-error" role="alert"></p>
+            <a class="home-secondary-check" id="home-library-link" href="#check">Сравнить со своей библиотекой <span aria-hidden="true">→</span></a>
+          </form>
+        </div>
       </section>
       <div id="home-report-result" class="home-report-result" hidden></div>
-      <div class="home-process-ribbon" aria-hidden="true"><div>Найти страницу <span>↗</span> Сверить текст <span>↗</span> Открыть источник <span>↗</span> Найти страницу <span>↗</span></div></div>
-      <section class="home-v2-how home-section" id="home-how">
-        <div class="home-section-heading"><p class="home-section-label" data-reveal>От текста к источнику</p><h2 data-reveal>Сначала совпадения.<br>Потом процент.</h2></div>
-        <div class="home-process-rows">
-          <article data-reveal><span>01</span><div><h3>Ищем страницы</h3><p>Составляем поисковые фразы из текста и получаем адреса возможных источников.</p></div></article>
-          <article data-reveal><span>02</span><div><h3>Сверяем содержимое</h3><p>Загружаем доступные страницы. Проверяем совпадения по их тексту, а не по поисковому сниппету.</p></div></article>
-          <article data-reveal><span>03</span><div><h3>Показываем, что совпало</h3><p>В отчёте остаются фрагменты, ссылки и результат проверки. Его можно скачать для чтения.</p></div></article>
+
+      <section class="landing-features landing-section" id="home-features">
+        <div class="landing-section-heading"><div><p class="landing-label">БОЛЬШЕ, ЧЕМ ПРОЦЕНТ</p><h2>Всё, чтобы разобраться<br>в каждом совпадении.</h2></div><p>Проверка с понятным результатом<br>и возможностью вернуться к нему.</p></div>
+        <div class="landing-feature-grid">
+          <article class="feature-main"><div class="feature-symbol" aria-hidden="true">⌕</div><h3>Поиск по открытым страницам</h3><p>Находите совпадения в статьях, публикациях и других доступных материалах. У каждой находки есть ссылка.</p><div class="feature-source-list" aria-hidden="true"><span><i>W</i> Энциклопедии <b>↗</b></span><span><i>▤</i> Научные публикации <b>↗</b></span><span><i>↗</i> Открытые материалы <b>↗</b></span></div></article>
+          <article><div class="feature-symbol" aria-hidden="true">⇄</div><h3>Две выдержки рядом</h3><p>Ваш фрагмент и текст источника — в одном месте. Видно, откуда взялось совпадение.</p></article>
+          <article><div class="feature-symbol" aria-hidden="true">↓</div><h3>История и выгрузка</h3><p>Открывайте сохранённые результаты и скачивайте отчёт для чтения.</p></article>
+          <article class="feature-library"><div class="feature-symbol" aria-hidden="true">▤</div><h3>Своя библиотека</h3><p>Сравнивайте текст с собственными материалами отдельно от интернет-поиска.</p><a href="#sources">Открыть библиотеку <span aria-hidden="true">↗</span></a><small>Ваших материалов: <strong id="home-library-count">${number(state.sources.length)}</strong></small></article>
         </div>
       </section>
-      <section class="home-v2-scope home-section" id="home-scope">
-        <div data-reveal><p class="home-section-label">Понятные границы</p><h2>Процент со ссылками.<br>И с объяснением.</h2><p class="home-scope-copy">Уникальность — доля слов без найденных дословных совпадений на доступных страницах. Закрытые сайты, переводы и глубокие пересказы могут остаться незамеченными. Если часть поиска не завершилась, мы покажем это в отчёте.</p></div>
-        <div class="home-search-limits" data-reveal>
-          <div role="group" aria-label="До ${maxQueries} поисковых запросов за проверку"><small>До</small><strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span>поисковых запросов за проверку</span></div>
-          <div role="group" aria-label="До ${maxUrls} страниц для сверки"><small>До</small><strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span>страниц для сверки текста</span></div>
+
+      <section class="landing-faq landing-section" id="home-faq">
+        <div><p class="landing-label">ВОПРОСЫ И ОТВЕТЫ</p><h2>Важное<br>о проверке.</h2><p>Чтобы результат был понятным<br>с первого взгляда.</p></div>
+        <div class="landing-faq-list">
+          <details open><summary>С чем сравнивается мой текст?<span aria-hidden="true">+</span></summary><p>С доступными страницами в интернете. Отдельно можно сравнить материал со своей библиотекой. Закрытые коллекции вузов в интернет-проверку не входят.</p></details>
+          <details><summary>Что означает процент уникальности?<span aria-hidden="true">+</span></summary><p>Это доля слов без найденных дословных совпадений на прочитанных страницах. Если проверка неполная, мы покажем ограничение, а окончательный процент останется неустановленным.</p></details>
+          <details><summary>Какие файлы можно загрузить?<span aria-hidden="true">+</span></summary><p>Сейчас доступны TXT и Markdown (.md). Текст из других форматов можно скопировать в поле проверки.</p></details>
+          <details><summary>Что происходит с текстом после проверки?<span aria-hidden="true">+</span></summary><p>Черновик сохраняется в вашем браузере, а результат — в истории. Для поиска источников короткие фразы из текста передаются внешним поисковым сервисам только после вашего согласия.</p></details>
+          <details id="home-scope"><summary>Какие ограничения есть у проверки?<span aria-hidden="true">+</span></summary><p>Закрытые сайты, переводы и глубокие пересказы могут остаться незамеченными. За проверку выполняется до <strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span class="sr-only">${maxQueries}</span> поисковых запросов и до <strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span class="sr-only">${maxUrls}</span> попыток чтения страниц. Исток сохраняет найденные совпадения и показывает недоступные источники.</p></details>
         </div>
-        <p class="home-processing-note">Для интернет-проверки поисковые фрагменты передаются внешним поисковым сервисам. Смысловая сверка с Qwen — отдельный дополнительный инструмент.</p>
       </section>
-      <section class="home-v2-library home-section" data-reveal>
-        <p class="home-section-label">Для собственных материалов</p><h2>Есть своя библиотека?</h2><p>Сравнивайте текст с выбранными публикациями отдельно от интернет-поиска. В вашем рабочем пространстве <strong id="home-library-count">${number(state.sources.length)}</strong> материалов.</p><a href="#sources">Открыть библиотеку ↗</a>
-      </section>
-      <footer class="home-footer"><a class="home-brand" href="#home">исток<span class="home-brand-dot">.</span></a><span>У каждого совпадения есть источник</span><a href="#home" data-home-scroll="home-check">К проверке ↑</a></footer>
+      <section class="landing-final"><div><p class="landing-label">ОТ ТЕКСТА — К ЯСНОСТИ</p><h2>Проверьте то,<br>что важно вам.</h2></div><a class="landing-button" href="#home" data-home-scroll="home-check">Перейти к проверке <span aria-hidden="true">↗</span></a></section>
+      <footer class="home-footer"><a class="home-brand" href="#home" data-home-scroll="home-top">исток<span class="home-brand-dot">.</span></a><span>У каждого совпадения есть источник</span><div><a href="#history">История</a><a href="#check">Рабочее пространство ↗</a></div></footer>
     </div>`;
   const field = document.querySelector('#home-text');
   field.value = state.homeText;
@@ -1226,6 +1257,30 @@ function renderHome() {
   document.querySelector('#home-consent').addEventListener('change', event => { state.homeConsent = event.target.checked; updateHomeControls(); });
   document.querySelector('#home-file').addEventListener('change', async event => {
     try { await readTextFile(event.target, field); } catch (error) { document.querySelector('#home-check-error').textContent = error.message; }
+  });
+  const dropZone = document.querySelector('#home-drop-zone');
+  for (const name of ['dragenter', 'dragover']) dropZone.addEventListener(name, event => {
+    event.preventDefault();
+    dropZone.classList.toggle('is-dragover', true);
+  });
+  for (const name of ['dragleave', 'drop']) dropZone.addEventListener(name, event => {
+    event.preventDefault();
+    dropZone.classList.toggle('is-dragover', false);
+  });
+  dropZone.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    document.querySelector('#home-file').click();
+  });
+  dropZone.addEventListener('drop', async event => {
+    const files = event.dataTransfer?.files;
+    if (!files?.length) return;
+    if (files.length !== 1) {
+      document.querySelector('#home-check-error').textContent = 'Выберите один текстовый файл.';
+      return;
+    }
+    try { await readTextFile({ files, value: '' }, field); }
+    catch (error) { document.querySelector('#home-check-error').textContent = error.message; }
   });
   document.querySelector('#home-check-form').addEventListener('submit', event => {
     event.preventDefault();
@@ -2852,6 +2907,7 @@ function renderView() {
     renderAuthScreen();
     return;
   }
+  const previousView = state.view;
   const savedReport = /^#(home|check)\/([a-f0-9]{32})$/.exec(location.hash);
   const requested = savedReport ? savedReport[1] : location.hash.slice(1) || 'home';
   state.view = viewNames[requested] ? requested : 'home';
@@ -2872,6 +2928,7 @@ function renderView() {
   else if (state.view === 'sources') renderSources();
   else if (state.view === 'evaluation') renderEvaluation();
   else renderHistory();
+  if (state.view !== previousView && !savedReport) window.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
   if (restoreId) restoreLinkedReport(requested, restoreId, state.viewRevision);
   updateProcessingLabels();
   updateModelActionControls();
