@@ -83,13 +83,16 @@ class QueryFormatAccountingTests(unittest.TestCase):
 
     def test_equal_totals_cannot_hide_different_job_marker(self):
         path=self.add_calls()[0]
-        for other in list(self.directory.glob('*-search.json'))[1:]:other.unlink()
+        marker_job=json.loads(path.read_text())['case_id']
+        for other in self.directory.glob('*-search.json'):
+            if other != path:other.unlink()
         self.add_reports()
-        first_key=next(iter(self.run['configuration']['jobs']))
+        reported_job=next(key for key in self.run['configuration']['jobs'] if key != marker_job)
         for key in self.run['configuration']['jobs']:
-            p=self.directory/(key+'.json');r=json.loads(p.read_text());r['web']['queries_attempted']=0 if key==first_key else int(key==list(self.run['configuration']['jobs'])[1]);write(p,r)
+            p=self.directory/(key+'.json');r=json.loads(p.read_text());r['web']['queries_attempted']=int(key==reported_job);write(p,r)
         row=accounting.collect(self.base,self.root)[0][0]
         self.assertEqual(row['query_attempts'],row['queries_in_completed_reports'])
+        self.assertEqual({item['job'] for item in row['accounting_mismatches']},{marker_job,reported_job})
         self.assertFalse(row['provider_accounting_complete']);self.assertIsNone(row['total_basic_credits'])
 
     def test_wrong_query_case_index_call_id_and_depth_are_rejected(self):
