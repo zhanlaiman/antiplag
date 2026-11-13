@@ -81,11 +81,18 @@ class BetaRuntime:
         self.database=self.root/'beta.sqlite3'
         with closing(self.connect()) as db:
             db.executescript('CREATE TABLE IF NOT EXISTS guests(id TEXT PRIMARY KEY,month TEXT NOT NULL);'
+                'CREATE TABLE IF NOT EXISTS active_guests(id TEXT NOT NULL,month TEXT NOT NULL,PRIMARY KEY(id,month));'
                 'CREATE TABLE IF NOT EXISTS rates(guest TEXT,day TEXT,count INTEGER NOT NULL,PRIMARY KEY(guest,day));'
                 'CREATE TABLE IF NOT EXISTS checks(guest TEXT,id TEXT,fingerprint TEXT,day TEXT,PRIMARY KEY(guest,id));'
                 'CREATE TABLE IF NOT EXISTS unstarted_checks(guest TEXT,id TEXT,PRIMARY KEY(guest,id));'
                 'CREATE TABLE IF NOT EXISTS site_import_calls(guest TEXT NOT NULL,id TEXT PRIMARY KEY,day TEXT NOT NULL,month TEXT NOT NULL);'
                 'CREATE TABLE IF NOT EXISTS quota_guard(id INTEGER PRIMARY KEY CHECK(id=1),retry_at REAL NOT NULL);')
+        # Only spaces with actual prior actions enter the new admission count.
+        # Historic cookie-less status polls stay in the legacy audit table.
+        with closing(self.connect()) as db,db:
+            for table in ('rates','checks'):
+                db.execute('INSERT OR IGNORE INTO active_guests SELECT DISTINCT guest,substr(day,1,7) FROM '+table)
+        self.default_source_count=sum(pack["source_count"] for pack in server.source_packs.list_packs())
         self.api_keys=APIKeys(self.database,persist)
         self.tenants=DurableTenants(self.root/'tenants',persist)
         self.correction_quota=CorrectionQuota(self.database,persist)
@@ -156,18 +163,31 @@ class BetaRuntime:
             expected=hmac.new(self.key,identifier.encode(),sha256).hexdigest()
             if re.fullmatch(r'[a-f0-9]{64}',identifier) and hmac.compare_digest(expected,signature):return identifier,None
         except (CookieError,KeyError,ValueError):pass
-        month=datetime.now(timezone.utc).strftime('%Y-%m');identifier=secrets.token_hex(32)
-        with closing(self.connect()) as db,db:
-            db.execute('BEGIN IMMEDIATE')
-            if db.execute('SELECT count(*) FROM guests WHERE month=?',(month,)).fetchone()[0]>=100:
-                raise access.AccessError('На этот месяц места в бесплатной бете закончились.','beta_capacity',429)
-            db.execute('INSERT INTO guests VALUES (?,?)',(identifier,month))
+        identifier=secrets.token_hex(32)
         signature=hmac.new(self.key,identifier.encode(),sha256).hexdigest();cookie=SimpleCookie()
         cookie[COOKIE]=identifier+'.'+signature;cookie[COOKIE]['path']='/';cookie[COOKIE]['httponly']=True
         cookie[COOKIE]['samesite']='Lax';cookie[COOKIE]['max-age']=90*86400
         if self.secure:cookie[COOKIE]['secure']=True
-        self.persist()
         return identifier,cookie.output(header='').strip()
+
+    def admit_space(self,guest):
+        month=datetime.now(timezone.utc).strftime('%Y-%m')
+        with closing(self.connect()) as db,db:
+            if db.execute('SELECT 1 FROM active_guests WHERE id=? AND month=?',(guest,month)).fetchone():return
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM active_guests WHERE id=? AND month=?',(guest,month)).fetchone():return
+            if db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0]>=100:
+                raise access.AccessError('На этот месяц места в бесплатной бете закончились.','beta_capacity',429)
+            db.execute('INSERT INTO active_guests VALUES (?,?)',(guest,month))
+            db.execute('INSERT OR IGNORE INTO guests VALUES (?,?)',(guest,month))
+        self.persist()
+
+    def status_counts(self,guest):
+        path=self.root/'tenants'/guest/'istok.sqlite3'
+        if not path.exists():return {'sources':self.default_source_count,'reports':0}
+        with closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)) as db:
+            return {'sources':db.execute("SELECT count(*) FROM sources WHERE NOT EXISTS (SELECT 1 FROM trash WHERE kind='source' AND trash.id=sources.id)").fetchone()[0],
+                'reports':db.execute("SELECT count(*) FROM records WHERE kind='report' AND NOT EXISTS (SELECT 1 FROM trash WHERE kind='report' AND trash.id=records.id)").fetchone()[0]}
 
     def owner_identity(self,headers):
         try:
@@ -374,7 +394,10 @@ class BetaHandler(server.Handler):
                     self.owner=self.server.beta.owner_identity(self.headers)
                     self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
                 if cookie:self.response_headers.append(('Set-Cookie',cookie))
-                self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
+                self.tenant=None
+                if not (method=='GET' and path in {'/api/session','/api/status'}):
+                    self.server.beta.admit_space(self.guest)
+                    self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
                 if method not in {'GET','HEAD'}:self.server.beta.mutation(self.guest)
             except access.AccessError as error:
                 payload={'error':str(error),'code':error.code}
@@ -429,6 +452,8 @@ class BetaHandler(server.Handler):
         if method=='POST' and path=='/api/owner/logout':
             self.response_headers.append(('Set-Cookie','istok_owner=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'+('; Secure' if beta.secure else '')))
             return {'ok':True}
+        if method=='GET' and path=='/api/status' and self.tenant is None:
+            return server.status_payload(beta.status_counts(self.guest))
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES,

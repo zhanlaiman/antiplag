@@ -157,6 +157,42 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(self.http('/api/session',cookie=cookie)[1]['beta']['daily_checks'],6)
         self.assertEqual(self.http('/api/web-check-jobs',{'request_id':'f'*32,'text':TEXT,'internet_consent':True},cookie)[0],429)
 
+    def test_cookieless_status_polls_do_not_allocate_tenants_or_consume_admissions(self):
+        for _ in range(110):
+            self.assertEqual(self.http('/api/session')[0],200)
+            self.assertEqual(self.http('/api/status')[0],200)
+        with self.service.beta.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM guests').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],0)
+        self.assertEqual(list((self.root/'tenants').glob('*/istok.sqlite3')),[])
+        cookie,_=self.guest()
+        self.assertEqual(self.http('/api/sources',cookie=cookie)[0],200)
+        with self.service.beta.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],1)
+        self.assertEqual(len(list((self.root/'tenants').glob('*/istok.sqlite3'))),1)
+        self.assertEqual(self.calls,[])
+
+    def test_legacy_empty_rows_do_not_block_new_spaces_and_active_cap_remains_atomic(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from plagiarism.access import AccessError
+        from datetime import datetime,timezone
+        month=datetime.now(timezone.utc).strftime('%Y-%m')
+        with self.service.beta.connect() as db:
+            db.executemany('INSERT INTO guests VALUES (?,?)',[(f'{i:064x}',month) for i in range(100)])
+            db.commit()
+        self.stop();self.start()
+        def reserve(index):
+            try:self.service.beta.admit_space(f'{index+100:064x}');return True
+            except AccessError:return False
+        with ThreadPoolExecutor(max_workers=8) as pool:accepted=list(pool.map(reserve,range(110)))
+        self.assertEqual(sum(accepted),100)
+        self.assertEqual(self.http('/api/session')[0],200)
+        self.assertEqual(self.http('/api/status')[0],200)
+        cookie,_=self.guest();self.assertEqual(self.http('/api/sources',cookie=cookie)[0],429)
+        with self.service.beta.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],100)
+            self.assertEqual(db.execute('SELECT count(*) FROM guests').fetchone()[0],200)
+        self.assertEqual(self.calls,[])
+
     def test_site_preview_requires_consent_and_durable_limits_without_search(self):
         alice,_=self.guest();before=self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining']
         body={'request_id':'c'*32,'url':'https://example.org/','site_consent':True,'limit':3}

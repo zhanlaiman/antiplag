@@ -63,6 +63,22 @@ def judge_candidate(store, record, candidate, model):
     return {**judgment, "id": saved["id"]}
 
 
+def status_payload(counts):
+    model_status = llm.status()
+    embedding_model = model_status.get("embedding_model", os.environ.get("ISTOK_EMBED_MODEL", retrieval.EMBEDDING_MODEL))
+    embedding_models = model_status.get("embedding_models", [])
+    embedding = {"model": embedding_model, "models": embedding_models,
+                 "available": embedding_model in embedding_models or embedding_model + ":latest" in embedding_models}
+    if model_status.get("provider") == "modal":
+        embedding.update(provider="modal", configured=model_status.get("configured", False),
+                         can_submit=model_status.get("can_submit", False),
+                         last_success_at=model_status.get("last_success_at"),
+                         synthetic_only=model_status.get("synthetic_only", True),
+                         local_inference_disabled=model_status.get("local_inference_disabled", False))
+    return {"model": model_status, "embedding": embedding, "counts": counts, "scope": "local_library",
+            "web": web_search.status()}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Istok/0.1"
 
@@ -333,19 +349,7 @@ class Handler(BaseHTTPRequestHandler):
             return {"feedback": runtime.learning.submit(account_id, report["id"], pair_id, payload,
                         body["consent_version"], consent=body["consent"])}
         if method == "GET" and path == "/api/status":
-            model_status = llm.status()
-            embedding_model = model_status.get("embedding_model", os.environ.get("ISTOK_EMBED_MODEL", retrieval.EMBEDDING_MODEL))
-            embedding_models = model_status.get("embedding_models", [])
-            embedding = {"model": embedding_model, "models": embedding_models,
-                         "available": embedding_model in embedding_models or embedding_model + ":latest" in embedding_models}
-            if model_status.get("provider") == "modal":
-                embedding.update(provider="modal", configured=model_status.get("configured", False),
-                                 can_submit=model_status.get("can_submit", False),
-                                 last_success_at=model_status.get("last_success_at"),
-                                 synthetic_only=model_status.get("synthetic_only", True),
-                                 local_inference_disabled=model_status.get("local_inference_disabled", False))
-            return {"model": model_status, "embedding": embedding, "counts": store.counts(), "scope": "local_library",
-                    "web": web_search.status()}
+            return status_payload(store.counts())
         if method == "GET" and path == "/api/sources":
             return {"sources": store.sources()}
         if method == "GET" and path == "/api/source-packs":
