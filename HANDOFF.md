@@ -1,3 +1,29 @@
+# ДОМЕН ДОСТУПЕН НОВЫМ ПОСЕТИТЕЛЯМ — 14 ноября 00:37 Алматы
+
+После исправления Set-Cookie и обратимого архивирования93пустыхadmissions выполнен CPU recreate с ready_for_public=False. Publicкод d2b5642/67files, нейрокорректор ОТКЛЮЧЁН, словарь/поиск/API/dashboard работают. PrivateGPUcallfc-01M7B5S0VFHN9T6C6QJWT74M3P завершён TERMINATED/task_idempty, backendtimeout600/cancelconfirmed по get_call_graph. ПовторногоPOSTнебыло, AIquota1/10 retained. Последняя попытка publicQwen не получилаGPU; не обещатьуспешныйпубличныйкорректор. ВсегоGPUattempts6, completed inferenceпервые4?, failedL4+pendingpublic6; точныйпереченьниже.
+
+Новая сессия domain-repair.cookies: ТРИ GET/api/session HTTP200, однаidentity, SetCookieтолькопервый; AIenabledfalse; search36/180/remain144. domain-admission-proof.json. CUA22 reload послеrecreate открылстарыйlibraryreport4257... и тужеguesthistory; ownfailedQwennotification dismissed, синтетическийчерновикочищен, homepage#home оставленDeliverable. domain-final-ready.png отправлен пользователюсрабочейссылкой. CUAphaseCLOSED «Подтвердил рабочий сайт на домене». CUAresetраньшеобнулилстарыеhandles; сейчасготовыdashboardTab10,hostingTab15,readyDomainTab22,fs import. BrowserID2reuse. Текущий вкладка22useroutputсохранять.
+
+Capacityrepair изменилVolumeизвременногоCPUhelper; старыйwebmountсначалавидел100, послеrecreateправильно7+newguest. Не повторятьrepairскриптбезновойдиагностики. Все103SQLitebackup+guestkeyвproduction-ai-before-admission-repair.zip SHAverified, всеquickcheckOK. guest_admission_archives хранитобратимыестрочки, ниоднаtenantDBнеудалена. Поисковыйledgerбайт-в-байтпрежний. После завершенияещёнужны свежийbackup/restore cархивомadmission+AIledger иownerhash.
+
+Publicapp.js/style.css hashматчпослеdeploy; первыйprivacyGET hashmismatchнеизолирован, последующийcurlprivacyidentical(source diffempty). Повторить толькоцелевые4assets ипринадобностиall67 черезточныйpublishedimageCPUfunction(Modalcontainerexecвсёещёtokenvalidationfailed). CLI HEAD получает501потомуHandlerнемаетdo_HEAD —этоизвестно, неиспользоватьHEADкакGETдоступность. GET200работает, холодныйстарт/проксиочередьпослерекреатазадерживали3–9сек.
+
+До04:24ещё~3ч47. Следующее: проверитьGPUavailabilityprivateбезновыхплатныхресурсов; полноценныйQwenpublicоставлятьoffдоподтверждённогосмока. Доделать ограниченныйпакетныйимпорт/URLпоpaidматрицееслиуспеваем, затемfulltests/backuprestore/opsdocsактуализацияиGitbundle/push. Никакихtext.ruпрогонов/Telegram. T90/Wiki41/reference12/cash0/Codex5%used/reset0 unchanged. output/tmp untouched.
+
+---
+
+# ПУБЛИКАЦИЯ QWEN И ИСПРАВЛЕНИЕ ВХОДА — 14 ноября 00:32 Алматы
+
+CPU опубликован d2b5642, 67 файлов. Квитанции deployment-ai.json и ai-staged.json, staged matches HEAD67. Private Qwen source receipt matches. Публичный GPU smoke через CUA22 отправлен ровно один раз в00:22, raw request_id4da802383e084b9fa1e9fecc8c91aa0f, private callfc-01M7B5S0VFHN9T6C6QJWT74M3P. Пока PENDING без task_id; не повторять POST. Backend get600 должен отменить неизвестный исход; квота1из10 занята. Всего новых GPUattempts6 с этим публичным, inferenceпубличныйещёнеподтверждён. CUA текущая фаза не завершена: ждать окончание/ошибку, потом completion_summary.
+
+Обнаружен beta_capacity429 для новых cookies: из-за уже исправленного Worker Set-Cookie bug гостевых строк стало100 (postfeaturesbackup было8). Выполнена onlineSQLite backup всех103DB+guestkey в приватный production-ai-before-admission-repair.zip, всеSHA/quickcheckOK. 93 новых пустых пространства локально сверены с ТОЧНЫМИ32canonicalpublicsources, единственная tenant-bootstrap, нет reports/jobs/AI/dict/trash/reviews/POSTrates/checks/API/owner. Базовые8ID защищены. maintenance-snapshot.py diagnosticsconfirmed_empty0 из-за неправильной исходной проверки pack_id (нет такого поля); НЕ использовать этот0 как итог. Правильная localпроверка capacity-repair-reviewed.json confirmed93. Затем repair-empty-admissions.py заново сверил все признаки В ТРАНЗАКЦИИ на сервере, архивировал только гостевые строки в guest_admission_archives; таблицы tenants/квоты/отчёты НЕудалены. Итог100→7, search-budget byte-identical. capacity-repair-result.json содержит обратный INSERT из архива. Это одноразовое устранение последствий ошибочных cookies, лимит100 не повышен и180searchне сброшен. Сейчас 3GET новойсессии cookiejar proof exec73456 pending; проверить. Старые cookies сохраняют доступ.
+
+Modal container exec стабильно token validation failed дажеpython--version при validSDKtoken/list/deploy/volumereadработают. Не ротировать токен вслепую. Для резервнойкопии использован приватный временный CPU SDK function, стандартнаябиблиотека, безGPU/секретовпубличныхendpoint. Tempapps snapshot и admission-repair завершаются app.run. Live webcodehash ещё нужны; staticGET после deploy timeout, а session429 был именноcapacity (неModalквота).
+
+Deadline04:24Алматы. Денежныйрасход0, включённыеcredits27.55 доэтогоэтапа. Codex5%used/reset0. T90/Wiki41/reference12 unchanged. output/tmp untouched. Новые файлы docsQwen иREADME закоммичены d2b5642; описанияпубликации/матрицу надо актуализировать ПОСЛЕ actualQwenresult. Не выдаватьпубличныйQwenзауспешнопроверенныйпокапокаPENDING.
+
+---
+
 # ДОМЕН ПРОВЕРЕН ПОСЛЕ ИСПРАВЛЕНИЯ COOKIE — 14 ноября 00:17 Алматы
 
 Worker0729de09 уже опубликован: fetch cache:no-store (cf.cacheTtl:0 удалён, он удалял Set-Cookie). StrictHTTPSapex/www200, 3GETsameidentity/DYNAMIC/SetCookieonlyfirst, domain-ready-proof.json. CUA22newdomain syntheticlibraryreport4257c02b31f945528e0b1bd064059614: reload then JSONexact equals before, daily6/month144 unchanged/search0. Пользователю дана рабочая ссылка.
