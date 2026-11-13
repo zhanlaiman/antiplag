@@ -2881,7 +2881,7 @@ async function renderDataDashboard(filters = {}) {
       <section class="card data-controls"><div><h2>Резервная копия</h2><p>ZIP содержит все ваши отчёты, тексты источников, отметки и корзину. Храните архив в безопасном месте.</p><a class="button secondary" href="/api/data-export" download="istok-personal-data.zip">↓ Скачать мои данные</a></div><p class="field-help">Корзина скрывает запись, но сохраняет её для восстановления. Она не освобождает место и квоту проверок. Автоматической очистки нет. Черновики в браузере в архив не входят.</p></section>
       <section class="card data-records"><div class="data-toolbar"><h2>Записи</h2><label>Найти<input id="data-query" type="search" placeholder="Текст, название или адрес"></label><label>Показать<select id="data-kind"><option value="all">Все записи</option><option value="report">Отчёты</option><option value="source">Источники</option><option value="trash">Корзина</option></select></label></div><p class="field-help">На экране — до ${number(data.listed_reports_limit)} последних отчётов. В архив входят все.</p><div id="data-list"></div><p id="data-list-status" class="field-help" role="status"></p></section>
       <section class="card data-dictionary"><details><summary>Мой словарь корректора</summary><p class="field-help">Имена и термины, которые словарь пропускает при проверке. До 2000 слов. Удалённое слово можно снова добавить.</p><form id="dictionary-form" class="data-toolbar"><label>Добавить слово<input id="dictionary-word" maxlength="40" required autocomplete="off"></label><button id="dictionary-add" class="button secondary small" type="submit">Добавить</button></form><div id="dictionary-list"><p>Загружаем словарь…</p></div></details></section>
-      ${state.session?.beta?.owner ? '<section class="card" id="owner-statistics"><h2>Статистика сайта</h2><p>Загружаем сводные числа…</p></section>' : ''}`;
+      ${state.session?.beta?.owner ? '<section class="card" id="owner-statistics"><h2>Статистика сайта</h2><p>Загружаем сводные числа…</p></section><section class="card data-api" id="api-key-manager"><h2>Доступ через API</h2><p>Загружаем ключи…</p></section>' : ''}`;
     document.querySelector('#data-query').value = typeof filters.query === 'string' ? filters.query : '';
     document.querySelector('#data-kind').value = ['all', 'report', 'source', 'trash'].includes(filters.kind) ? filters.kind : 'all';
     let entries = [...data.reports.map(item => ({ ...item, kind: 'report', label: item.preview || 'Отчёт без текста' })),
@@ -2941,6 +2941,7 @@ async function renderDataDashboard(filters = {}) {
     });
     loadDictionary().catch(error => { if (current()) document.querySelector('#dictionary-list').innerHTML = `<p class="inline-error">${escapeHTML(error.message)}</p>`; });
     if (state.session?.beta?.owner) {
+      renderAPIKeys(current).catch(error => { if (current()) document.querySelector('#api-key-manager').innerHTML = `<h2>Доступ через API</h2><p class="inline-error">${escapeHTML(error.message)}</p>`; });
       try {
         const statistics = await api('/api/owner/statistics');
         if (!current()) return;
@@ -2952,6 +2953,48 @@ async function renderDataDashboard(filters = {}) {
     if (current()) main.innerHTML = heading('Мои данные', 'Не удалось загрузить панель.', '', 'Панель управления') + `<p class="inline-error">${escapeHTML(error.message)}</p><button class="button secondary" id="retry-data" type="button">Повторить</button>`;
     document.querySelector('#retry-data')?.addEventListener('click', renderDataDashboard);
   }
+}
+
+async function renderAPIKeys(current) {
+  const area = document.querySelector('#api-key-manager');
+  const permissions = [['reports:read', 'Читать отчёты и статусы'], ['sources:read', 'Читать библиотеку'], ['sources:write', 'Добавлять источники и переносить их в корзину'], ['checks:write', 'Запускать интернет-проверки'], ['quota:read', 'Читать остатки квоты']];
+  const drawList = async () => {
+    const {keys} = await api('/api/api-keys');
+    if (!current()) return;
+    const list = area.querySelector('#api-key-list');
+    list.innerHTML = keys.length ? keys.map((key, index) => `<article class="data-row"><div><h3>${escapeHTML(key.label)}</h3><p>${escapeHTML(key.scopes.map(scope => permissions.find(item => item[0] === scope)?.[1] || scope).join(' · '))}</p><small>${key.revoked_at ? 'Отозван' : new Date(key.expires_at) <= new Date() ? 'Истёк' : `До ${escapeHTML(date(key.expires_at))}`}</small></div>${!key.revoked_at && new Date(key.expires_at) > new Date() ? `<button class="text-button" type="button" data-revoke-key="${index}">Отозвать</button>` : ''}</article>`).join('') : '<p class="subtle">Ключей пока нет.</p>';
+    list.querySelectorAll('[data-revoke-key]').forEach(button => button.addEventListener('click', () => busy(button, 'Отзываем', async () => {
+      await api(`/api/api-keys/${keys[Number(button.dataset.revokeKey)].id}/revoke`, {});
+      if (current()) { area.querySelector('#api-created-token').replaceChildren(); await drawList(); }
+    })));
+  };
+  area.innerHTML = `<details><summary>Доступ через API</summary><p class="field-help">Ключ даёт выбранный доступ к вашим данным без входа в браузер. До трёх активных ключей. Поисковые запросы расходуют ту же общую квоту сайта. <a href="/api-guide.html" target="_blank" rel="noopener">Инструкция API</a>.</p><form id="api-key-form"><div class="data-toolbar"><label>Название ключа<input name="label" maxlength="80" required autocomplete="off" placeholder="Моя интеграция"></label><label>Срок<select name="days"><option value="7">7 дней</option><option value="30" selected>30 дней</option><option value="90">90 дней</option></select></label></div><fieldset class="api-key-scopes"><legend>Разрешения</legend>${permissions.map(([scope, label]) => `<label><input type="checkbox" name="scope" value="${scope}" ${['reports:read', 'quota:read'].includes(scope) ? 'checked' : ''}>${label}</label>`).join('')}</fieldset><button class="button secondary small" id="api-create-key" type="submit">Создать ключ</button><p class="field-help" id="api-key-feedback" role="status"></p></form><div id="api-created-token"></div><div id="api-key-list"></div></details>`;
+  area.querySelector('#api-key-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    busy(area.querySelector('#api-create-key'), 'Создаём', async () => {
+      const feedback = area.querySelector('#api-key-feedback');
+      feedback.textContent = '';
+      try {
+        const created = await api('/api/api-keys', {label: form.elements.label.value.trim(), days: Number(form.elements.days.value), scopes: [...form.querySelectorAll('[name="scope"]:checked')].map(input => input.value)});
+        if (!current()) return;
+        const output = area.querySelector('#api-created-token');
+        output.innerHTML = '<p>Сохраните ключ сейчас: повторно он не показывается. Не вставляйте его в адрес ссылки и не публикуйте.</p><label class="api-secret-label">Новый ключ<input id="api-secret" type="password" readonly autocomplete="off" spellcheck="false"></label><div class="proofread-actions"><button class="button secondary small" type="button" id="api-copy-token">Скопировать</button><button class="text-button" type="button" id="api-hide-token">Закрыть ключ</button></div>';
+        output.querySelector('#api-secret').value = created.token;
+        output.querySelector('#api-copy-token').addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(created.token); feedback.textContent = 'Ключ скопирован.'; }
+          catch { output.querySelector('#api-secret').select(); feedback.textContent = 'Нажмите ⌘C или Ctrl+C для копирования выбранного ключа.'; }
+        });
+        output.querySelector('#api-hide-token').addEventListener('click', () => { output.replaceChildren(); feedback.textContent = 'Ключ закрыт. При потере отзовите его и создайте новый.'; });
+        form.elements.label.value = '';
+        await drawList();
+      } catch (error) {
+        if (current()) feedback.textContent = `${error.message} При потере ответа обновите список: созданный ключ можно отозвать. Не повторяйте создание вслепую.`;
+        throw error;
+      }
+    });
+  });
+  await drawList();
 }
 
 async function renderHistory() {

@@ -66,7 +66,7 @@ def _dictionary(words):
 
 
 def check(text, ignored=()):
-    if not isinstance(text, str) or not text.strip() or len(text) > MAX_CHARACTERS:
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_CHARACTERS or any(0xD800<=ord(c)<=0xDFFF for c in text):
         raise ValueError('Для корректора нужен текст от 1 до 10 000 знаков.')
     if not LOCK.acquire(blocking=False):
         raise ValueError('Корректор занят. Попробуйте через несколько секунд.')

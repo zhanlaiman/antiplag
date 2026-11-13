@@ -224,6 +224,7 @@ class Handler(BaseHTTPRequestHandler):
                  "/motion.js": "motion.js", "/motion.css": "motion.css",
                  "/setup-search.html": "setup-search.html", "/setup-search.js": "setup-search.js"}
         files["/privacy.html"] = "privacy.html"
+        files["/api-guide.html"] = "api-guide.html"
         files["/dictionary-license.txt"] = "dictionary-license.txt"
         files["/rtf-license.txt"] = "rtf-license.txt"
         files["/owner.html"] = "owner.html"

@@ -23,6 +23,7 @@ from plagiarism.search_credentials import key_for
 from plagiarism.search_mediawiki import MediaWikiSearch
 from plagiarism.search_tavily import TavilySearch
 from plagiarism.tenants import TenantRegistry
+from plagiarism.client_api import APIKeys,require_scope
 
 COOKIE='istok_beta'
 MAX_CHARACTERS=10000
@@ -73,6 +74,7 @@ class BetaRuntime:
                 'CREATE TABLE IF NOT EXISTS checks(guest TEXT,id TEXT,fingerprint TEXT,day TEXT,PRIMARY KEY(guest,id));'
                 'CREATE TABLE IF NOT EXISTS unstarted_checks(guest TEXT,id TEXT,PRIMARY KEY(guest,id));'
                 'CREATE TABLE IF NOT EXISTS quota_guard(id INTEGER PRIMARY KEY CHECK(id=1),retry_at REAL NOT NULL);')
+        self.api_keys=APIKeys(self.database,persist)
         self.tenants=DurableTenants(self.root/'tenants',persist)
         self.runner=runner or self.run_web
         self.persist()
@@ -143,6 +145,11 @@ class BetaRuntime:
         if host!=self.host and not forwarded:return False
         origin=headers.get('Origin')
         return origin==self.origin if method not in {'GET','HEAD'} else origin in (None,self.origin)
+
+    def trusted_api(self,headers):
+        host=headers.get('Host','')
+        forwarded=(host in {'127.0.0.1:8000','localhost:8000'} and headers.get('X-Forwarded-Host')==self.host)
+        return (host==self.host or forwarded) and headers.get('Origin') in (None,self.origin)
 
     def mutation(self,guest):
         day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -269,21 +276,36 @@ class BetaRuntime:
 
 
 class BetaHandler(server.Handler):
-    def trusted_request(self):return self.server.beta.trusted(self.headers,self.command)
+    def trusted_request(self):
+        if getattr(self,'api_token',None) and urlsplit(self.path).path.startswith('/api/v1/'):
+            return self.server.beta.trusted_api(self.headers)
+        return self.server.beta.trusted(self.headers,self.command)
 
     def _dispatch(self,method,leases):
         path=urlsplit(self.path).path
+        self.api_token=None
         if path.startswith('/api/') or path.startswith('/reports/'):
             try:
-                if not self.trusted_request():
-                    self.send_json({'error':'Запрос разрешён только с сайта Истока.'},403);return
-                self.owner=self.server.beta.owner_identity(self.headers)
-                self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
+                if path.startswith('/api/v1/'):
+                    if not self.server.beta.trusted_api(self.headers):
+                        raise access.AccessError('Неверный адрес или источник запроса API.','api_origin_forbidden',403)
+                    if len(self.headers.get_all('Authorization') or [])!=1:
+                        raise access.AccessError('Нужен один заголовок Authorization.','api_auth_required',401)
+                    self.api_token=self.server.beta.api_keys.authenticate(self.headers.get('Authorization'))
+                    self.guest=self.api_token['guest'];self.owner=self.guest;cookie=None
+                else:
+                    if not self.trusted_request():
+                        self.send_json({'error':'Запрос разрешён только с сайта Истока.'},403);return
+                    self.owner=self.server.beta.owner_identity(self.headers)
+                    self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
                 if cookie:self.response_headers.append(('Set-Cookie',cookie))
                 self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
                 if method not in {'GET','HEAD'}:self.server.beta.mutation(self.guest)
             except access.AccessError as error:
-                self.send_json({'error':str(error),'code':error.code},error.status);return
+                payload={'error':str(error),'code':error.code}
+                if getattr(error,'retry_after',None) is not None:
+                    payload['retry_after']=error.retry_after;self.response_headers.append(('Retry-After',str(error.retry_after)))
+                self.send_json(payload,error.status);return
         return super()._dispatch(method,leases)
 
     def static(self,path):
@@ -292,6 +314,35 @@ class BetaHandler(server.Handler):
 
     def route(self,method,path,body):
         beta=self.server.beta
+        if path.startswith('/api/v1/'):
+            if not self.api_token:raise access.AccessError('Нужен ключ API.','api_auth_required',401)
+            routes={('GET','/api/v1/reports'):('reports:read','/api/reports'),
+                    ('GET','/api/v1/sources'):('sources:read','/api/sources'),
+                    ('POST','/api/v1/sources'):('sources:write','/api/sources'),
+                    ('POST','/api/v1/checks'):('checks:write','/api/web-check-jobs')}
+            if method=='GET' and path=='/api/v1/quota':
+                require_scope(self.api_token,'quota:read')
+                return {'quota':beta.remaining(self.guest,owner=True),'max_characters':MAX_CHARACTERS,'monthly_search_queries':MONTHLY_SEARCHES}
+            match=re.fullmatch(r'/api/v1/(reports|jobs)/([a-f0-9]{32})',path)
+            if method=='GET' and match:
+                require_scope(self.api_token,'reports:read')
+                return self.route(method,'/api/'+match.group(1)+'/'+match.group(2),body)
+            source=re.fullmatch(r'/api/v1/sources/([^/]{1,100})',path)
+            if method=='DELETE' and source:
+                require_scope(self.api_token,'sources:write')
+                return self.route(method,'/api/sources/'+source.group(1),body)
+            target=routes.get((method,path))
+            if not target:raise KeyError(path)
+            require_scope(self.api_token,target[0])
+            return self.route(method,target[1],body)
+        if path=='/api/api-keys' or re.fullmatch(r'/api/api-keys/[a-f0-9]{32}/revoke',path):
+            if not self.owner or self.api_token:
+                raise access.AccessError('Управлять ключами может владелец после входа на сайт.','owner_required',403)
+            if method=='GET' and path=='/api/api-keys':return {'keys':beta.api_keys.list(self.guest)}
+            if method=='POST' and path=='/api/api-keys':
+                return beta.api_keys.create(self.guest,body.get('label'),body.get('scopes'),body.get('days',30))
+            if method=='POST' and path.endswith('/revoke'):return beta.api_keys.revoke(self.guest,path.split('/')[-2])
+            raise KeyError(path)
         if method=='POST' and path=='/api/owner/login':
             cookie=beta.owner_login(body,self.guest);self.response_headers.append(('Set-Cookie',cookie))
             return {'ok':True}

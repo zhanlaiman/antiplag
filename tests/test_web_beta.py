@@ -37,14 +37,15 @@ class WebBetaTests(unittest.TestCase):
     def tearDown(self):
         self.stop();self.environment.stop();self.directory.cleanup()
 
-    def http(self,path,body=None,cookie=None,origin='http://beta.example',host='beta.example'):
+    def http(self,path,body=None,cookie=None,origin='http://beta.example',host='beta.example',authorization=None,method=None):
         connection=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
         headers={'Host':host}
         if cookie:headers['Cookie']=cookie
         if origin:headers['Origin']=origin
+        if authorization:headers['Authorization']=authorization
         if body is not None:headers['Content-Type']='application/json'
         try:
-            connection.request('POST' if body is not None else 'GET',path,None if body is None else json.dumps(body).encode(),headers)
+            connection.request(method or ('POST' if body is not None else 'GET'),path,None if body is None else json.dumps(body).encode(),headers)
             response=connection.getresponse();raw=response.read()
             return response.status,json.loads(raw) if raw else {},response.getheader('Set-Cookie')
         finally:connection.close()
@@ -188,6 +189,53 @@ class WebBetaTests(unittest.TestCase):
         parts=SimpleCookie();parts.load(cookie);value=parts['istok_beta'].value
         forged='istok_beta='+value.split('.')[0]+'.'+'0'*64
         self.assertEqual(self.http('/api/reports/'+report,cookie=forged)[0],404)
+
+    def test_owner_api_key_scope_isolation_idempotency_restart_and_revocation(self):
+        from hashlib import pbkdf2_hmac
+        salt='34'*32
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,_=self.guest();other,_=self.guest()
+            self.assertEqual(self.http('/api/api-keys',cookie=guest)[0],403)
+            _,_,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
+            owner=cookie.split(';')[0]
+            fields={'label':'Read-only fixture','scopes':['reports:read','quota:read']}
+            self.assertEqual(self.http('/api/api-keys',fields,owner,origin=None)[0],403)
+            status,result,_=self.http('/api/api-keys',fields,owner)
+            self.assertEqual(status,200,result);read='Bearer '+result['token'];key_id=result['key']['id']
+            listing=self.http('/api/api-keys',cookie=owner)[1]
+            self.assertNotIn(result['token'],json.dumps(listing));self.assertNotIn('digest',json.dumps(listing))
+            report=self.check(owner,'8'*32)
+            self.assertEqual(self.http('/api/v1/reports/'+report,origin=None,authorization=read)[0],200)
+            self.assertEqual(self.http('/api/v1/reports',cookie=owner,origin=None)[0],401)
+            self.assertEqual(self.http('/api/v1/reports',origin='https://evil.example',authorization=read)[0],403)
+            self.assertEqual(self.http('/api/v1/reports',host='evil.example',origin=None,authorization=read)[0],403)
+            self.assertEqual(self.http('/api/v1/checks',{'request_id':'9'*32,'text':TEXT,'internet_consent':True},origin=None,authorization=read)[0],403)
+            other_report=self.check(other,'7'*32)
+            self.assertEqual(self.http('/api/v1/reports/'+other_report,origin=None,authorization=read)[0],404)
+            self.assertEqual(self.http('/api/v1/owner/statistics',origin=None,authorization=read)[0],404)
+            self.assertEqual(self.http('/api/api-keys',cookie=other,authorization=read)[0],403)
+            fields={'label':'Write fixture','scopes':['checks:write','reports:read','quota:read']}
+            status,write_key,_=self.http('/api/api-keys',fields,owner);self.assertEqual(status,200)
+            write='Bearer '+write_key['token'];request_id='9'*32
+            body={'request_id':request_id,'text':TEXT,'internet_consent':True}
+            self.assertEqual(self.http('/api/v1/checks',{**body,'internet_consent':False},origin=None,authorization=write)[0],400)
+            self.assertEqual(self.http('/api/v1/checks',body,origin=None,authorization=write)[0],200)
+            for _ in range(100):
+                job=self.http('/api/v1/jobs/'+request_id,origin=None,authorization=write)[1]['job']
+                if job['status'] in {'complete','failed'}:break
+                time.sleep(.01)
+            self.assertEqual(job['status'],'complete',job)
+            before=self.http('/api/v1/quota',origin=None,authorization=write)[1]
+            self.stop();self.start()
+            reused=self.http('/api/v1/checks',body,origin=None,authorization=write)
+            self.assertEqual(reused[0],200);self.assertEqual(reused[1]['job']['status'],'complete')
+            self.assertEqual(self.http('/api/v1/quota',origin=None,authorization=write)[1],before)
+            self.assertEqual(len(self.calls),3)
+            self.assertEqual(self.http('/api/api-keys/'+key_id+'/revoke',{},other)[0],403)
+            self.assertEqual(self.http('/api/api-keys/'+key_id+'/revoke',{},owner)[0],200)
+            self.assertEqual(self.http('/api/v1/reports',origin=None,authorization=read)[0],401)
+            self.assertEqual(self.http('/api/v1/reports',origin=None,authorization=write)[0],200)
 
     def test_failed_free_quota_preflight_sends_no_search(self):
         with patch('cloud.web_beta.build_opener',side_effect=TimeoutError),patch('cloud.web_beta.TavilySearch') as transport:
