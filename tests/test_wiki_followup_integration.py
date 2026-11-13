@@ -98,7 +98,7 @@ class WikiFollowupIntegrationTests(unittest.TestCase):
                 patch("plagiarism.search_mediawiki.MediaWikiSearch", return_value=Search(events, "wiki", [NEW])):
             report = web.run(TEXT, request_id="public-default")
         self.assertTrue(report["web"]["post_wiki_enabled"])
-        self.assertEqual(report["web"]["query_strategy"], web.PARAGRAPH_STRATEGY)
+        self.assertEqual(report["web"]["query_strategy"], web.DEFAULT_QUERY_STRATEGY)
         self.assertTrue(any(event[0] == "wiki" for event in events))
         self.assertEqual(report["web"]["sources_checked"], 1)
 

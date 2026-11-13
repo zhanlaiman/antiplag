@@ -45,6 +45,35 @@ class ParagraphQueryTests(unittest.TestCase):
         self.assertEqual(result[1:], planned[1:])
         self.assertEqual(result[0]["query"], '"' + " ".join(SHORT) + '"')
 
+    def test_optional_short_donor_keeps_one_query_for_its_paragraph_and_covers_new_one(self):
+        text, planned = fixture()
+        text = text.replace(" " + " ".join(["violet"] * 20), "")
+        original = deepcopy(planned)
+        self.assertEqual(paragraph_redundancy_queries(text, planned, ()), planned)
+        result = paragraph_redundancy_queries(text, planned, (), include_short_paragraphs=True)
+        self.assertEqual(result[0], planned[0])
+        self.assertEqual(result[2], planned[2])
+        self.assertEqual(result[1]["query"], '"' + " ".join(SHORT) + '"')
+        self.assertEqual(len(result), len(planned))
+        self.assertEqual(planned, original)
+        self.assertEqual(text[result[1]["start"]:result[1]["end"]], " ".join(SHORT))
+        self.assertEqual(paragraph_redundancy_queries(text, planned, {q['query'] for q in planned},
+                         include_short_paragraphs=True), planned)
+        self.assertEqual(paragraph_redundancy_queries(text, planned, (), limit=5,
+                         include_short_paragraphs=True), planned)
+
+    def test_short_paragraph_strategy_keeps_the_same_six_query_ceiling_and_legacy_plan(self):
+        from plagiarism.web_search import plan_queries, DEFAULT_QUERY_STRATEGY
+        from plagiarism.query_paragraphs import SHORT_PARAGRAPH_STRATEGY
+        text = " ".join(A + B + C) + "\n\n" + " ".join(SHORT)
+        baseline = plan_queries(text, strategy=PARAGRAPH_STRATEGY)
+        candidate = plan_queries(text, strategy=SHORT_PARAGRAPH_STRATEGY)
+        self.assertEqual(DEFAULT_QUERY_STRATEGY, SHORT_PARAGRAPH_STRATEGY)
+        self.assertEqual(plan_queries(text), candidate)
+        self.assertEqual(len(candidate), len(baseline))
+        self.assertLessEqual(len(candidate), 6)
+        self.assertTrue(any(text[q['start']:q['end']] == " ".join(SHORT) for q in candidate))
+
     def test_all_protected_queries_remain_unchanged(self):
         text, planned = fixture()
         self.assertEqual(paragraph_redundancy_queries(text, planned, {q["query"] for q in planned}), planned)

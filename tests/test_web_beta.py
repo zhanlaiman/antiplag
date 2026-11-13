@@ -191,11 +191,13 @@ class WebBetaTests(unittest.TestCase):
             db.executemany('INSERT INTO guests VALUES (?,?)',[(f'{i:064x}',month) for i in range(100)])
             db.commit()
         self.stop();self.start()
+        self.assertEqual(self.service.beta.owner_statistics()['counts']['guests_this_month'],0)
         def reserve(index):
             try:self.service.beta.admit_space(f'{index+100:064x}');return True
             except AccessError:return False
         with ThreadPoolExecutor(max_workers=8) as pool:accepted=list(pool.map(reserve,range(110)))
         self.assertEqual(sum(accepted),100)
+        self.assertEqual(self.service.beta.owner_statistics()['counts']['guests_this_month'],100)
         self.assertEqual(self.http('/api/session')[0],200)
         self.assertEqual(self.http('/api/status')[0],200)
         cookie,_=self.guest();self.assertEqual(self.http('/api/sources',cookie=cookie)[0],429)

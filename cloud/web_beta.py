@@ -325,7 +325,7 @@ class BetaRuntime:
         day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
         with closing(self.connect()) as db:
             counts['checks_today']=db.execute('SELECT count(*) FROM checks WHERE day=? AND NOT EXISTS(SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id)',(day,)).fetchone()[0]
-            counts['guests_this_month']=db.execute('SELECT count(*) FROM guests WHERE month=?',(day[:7],)).fetchone()[0]
+            counts['guests_this_month']=db.execute('SELECT count(*) FROM active_guests WHERE month=?',(day[:7],)).fetchone()[0]
         return {'counts':counts,'quota':self.remaining('',owner=True),'monthly_limit':MONTHLY_SEARCHES,
                 'storage_limit_bytes':256*1024*1024,'as_of':datetime.now(timezone.utc).isoformat()}
 

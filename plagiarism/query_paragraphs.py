@@ -10,6 +10,7 @@ import re
 from plagiarism.matching import _tokens
 
 PARAGRAPH_STRATEGY = "hybrid-citation-v5-paragraph-redundancy"
+SHORT_PARAGRAPH_STRATEGY = "hybrid-citation-v6-paragraph-coverage"
 
 
 def _paragraphs(text):
@@ -29,7 +30,8 @@ def _paragraphs(text):
     return result
 
 
-def paragraph_redundancy_queries(text, dense_plan, protected_queries, *, limit=6):
+def paragraph_redundancy_queries(text, dense_plan, protected_queries, *, limit=6,
+                                include_short_paragraphs=False):
     """Return a new plan using the frozen short-paragraph redundancy rule.
 
     Only the six-query ceiling was evaluated. A smaller requested limit keeps
@@ -62,7 +64,7 @@ def paragraph_redundancy_queries(text, dense_plan, protected_queries, *, limit=6
     for index, item in enumerate(planned):
         if item["query"] in protected:
             continue
-        if any(len(paragraph["tokens"]) > 40 and contained(item, paragraph)
+        if any((include_short_paragraphs or len(paragraph["tokens"]) > 40) and contained(item, paragraph)
                and sum(contained(other, paragraph) for other in planned) >= 2
                for paragraph in paragraphs):
             redundancy = max((Fraction(len(words[index] & other), max(1, len(words[index])))
