@@ -121,7 +121,7 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check', turnstile } 
   initial.innerHTML = documentHTML;
   const location = { hash: `#${view}`, reload() { reloads.push(true); } };
   const context = vm.createContext({
-    document, location, console, TextDecoder, Uint8Array, Event, Blob, crypto: webcrypto,
+    document, location, console, btoa: value => Buffer.from(value,'binary').toString('base64'), TextDecoder, Uint8Array, Event, Blob, crypto: webcrypto,
     URL: class extends URL {
       static createObjectURL(blob) { const url = `blob:fixture-${blobs.size}`; blobs.set(url, blob); return url; }
       static revokeObjectURL(url) { blobs.delete(url); }
@@ -1405,9 +1405,9 @@ test('homepage rejects multiple or unsupported dropped files and preserves a new
   await app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [textFile('Первый'), textFile('Второй')] } });
   assert.equal(app.element('home-text').value, 'Сохранённый текст');
   assert.match(app.element('home-check-error').textContent, /один/);
-  await app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [textFile('Файл', 'article.pdf')] } });
+  await app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [textFile('Файл', 'article.exe')] } });
   assert.equal(app.element('home-text').value, 'Сохранённый текст');
-  assert.match(app.element('home-check-error').textContent, /\.txt/);
+  assert.match(app.element('home-check-error').textContent, /TXT.*DOCX.*PDF/);
   const reading = deferred();
   const dropping = app.element('home-drop-zone').emit('drop', { dataTransfer: { files: [{ name: 'article.txt', size: 30, arrayBuffer: () => reading.promise }] } });
   await settle();
@@ -1443,4 +1443,56 @@ test('beta owner logout uses beta endpoint and keeps the current draft', async (
   assert.equal(app.element('logout-button').hidden,false);
   await app.element('logout-button').emit('click');
   assert.equal(logout,1);assert.equal(app.reloads.length,1);
+});
+
+test('DOCX import sends only to the application and leaves search consent unset', async () => {
+  const imports=[];const searches=[];
+  const app=fixture({view:'home',fetch:async(url,body)=>{
+    if(url==='/api/import-document'){imports.push(body);return json({text:'Извлечённый основной текст',format:'DOCX',notes:['Проверьте порядок абзацев.']});}
+    if(url==='/api/web-check-jobs'){searches.push(body);throw new Error('Unexpected search');}
+  }});
+  await settle();
+  await app.element('home-drop-zone').emit('drop',{dataTransfer:{files:[textFile('binary fixture','work.docx')]}});
+  assert.equal(imports.length,1);assert.equal(Buffer.from(imports[0].data,'base64').toString(),'binary fixture');
+  assert.equal(app.element('home-text').value,'Извлечённый основной текст');
+  assert.equal(app.evaluate('state.homeConsent'),false);assert.equal(searches.length,0);
+  assert.equal(app.element('home-text-import-hint').hidden,false);
+});
+
+test('document response cannot overwrite a newer draft and corrupt files preserve text', async () => {
+  const delayed=deferred();let fail=false;
+  const app=fixture({view:'home',fetch:async url=>url==='/api/import-document' ? fail ? json({error:'Документ повреждён'},400) : delayed.promise : undefined});
+  await settle();
+  const dropping=app.element('home-drop-zone').emit('drop',{dataTransfer:{files:[textFile('PDF bytes','work.pdf')]}});
+  await settle();app.element('home-text').value='Новая правка';await app.element('home-text').emit('input');
+  delayed.resolve(json({text:'Старый ответ',notes:[]}));await dropping;
+  assert.equal(app.element('home-text').value,'Новая правка');
+  fail=true;await app.element('home-drop-zone').emit('drop',{dataTransfer:{files:[textFile('broken','work.pdf')]}});
+  assert.equal(app.element('home-text').value,'Новая правка');assert.match(app.element('home-check-error').textContent,/повреждён/);
+});
+
+test('local statistics counts Unicode words and flags mixed scripts without changing the draft', async () => {
+  const app=fixture();await settle();
+  app.element('check-text').value='Кофе кофе коФе. стoл 😀';await app.element('check-text').emit('input');
+  const stats=app.evaluate('textStatistics(state.text)');
+  assert.equal(stats.words,4);assert.equal(stats.frequent[0][0],'кофе');assert.equal(stats.frequent[0][1],3);
+  assert.equal(stats.mixed[0],'стoл');assert.match(app.element('text-statistics-content').innerHTML,/не является оценкой плагиата/);
+  assert.equal(app.evaluate('state.text'),'Кофе кофе коФе. стoл 😀');
+});
+
+test('document processing disables checking and oversized uploads never leave the browser', async () => {
+  const delayed=deferred();let imports=0;
+  const app=fixture({view:'home',fetch:async url=>{
+    if(url==='/api/status')return json({web:{configured:true},model:{available:false},counts:{sources:0,reports:0}});
+    if(url==='/api/import-document'){imports++;return delayed.promise;}
+  }});
+  await settle();app.element('home-text').value='Текст до загрузки';await app.element('home-text').emit('input');
+  app.evaluate('state.homeConsent=true; updateHomeControls()');assert.equal(app.element('home-check-button').disabled,false);
+  const dropping=app.element('home-drop-zone').emit('drop',{dataTransfer:{files:[textFile('document','work.docx')]}});
+  await settle();assert.equal(app.element('home-check-button').disabled,true);
+  delayed.resolve(json({text:'Готовый текст',notes:[]}));await dropping;assert.equal(app.element('home-check-button').disabled,false);
+  const large={...textFile('too large','work.pdf'),size:1048577};
+  await app.element('home-drop-zone').emit('drop',{dataTransfer:{files:[large]}});
+  assert.equal(imports,1);assert.equal(app.element('home-text').value,'Готовый текст');
+  assert.match(app.element('home-check-error').textContent,/1 МиБ/);
 });

@@ -3588,3 +3588,7 @@ body:not(.home-view) .button.secondary { background:#fff; border-color:#d8e3cf; 
   .home-v3 .home-nav { flex-wrap:wrap; }
   .home-v3 .home-nav-cta { flex-basis:100%; justify-content:center; }
 }
+.home-checker-heading { flex-wrap:wrap; gap:8px; }
+.text-statistics { margin-top:16px; }
+.text-statistics summary { cursor:pointer; font-weight:600; }
+.text-statistics p { overflow-wrap:anywhere; }

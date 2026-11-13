@@ -566,6 +566,7 @@ function updateQuotaUI() {
   if (button) button.disabled = Boolean(button.dataset.busy) || !privateAccess()
     || Boolean(isSaas() && entry?.status !== 'complete' && length > quotaRemaining())
     || Boolean(entry && entry.status !== 'complete')
+    || documentReading('check-text')
     || Boolean(internetMode() && (!webConfigured() || !state.internetConsent || pendingWeb));
   updateHomeControls();
 }
@@ -922,6 +923,7 @@ async function modelRequest(path, body, context = {}) {
 }
 
 async function startWebCheck({ text = state.text, consent = state.internetConsent, surface = 'check' } = {}) {
+  if (documentReading(surface === 'home' ? 'home-text' : 'check-text')) throw new Error('Дождитесь извлечения текста документа.');
   if (!webConfigured()) throw new Error('Проверка по интернету ещё не подключена. Подключите поисковый сервис перед запуском.');
   if (!text.trim()) throw new Error('Вставьте текст для проверки.');
   if (textLengthError(text)) throw new Error(textLengthError(text));
@@ -947,7 +949,7 @@ function updateHomeControls() {
   const pending = pendingModelRequest('/api/web-check', { text: state.homeText, internet_consent: true });
   const length = chars(state.homeText).length;
   button.disabled = Boolean(button.dataset.busy) || !webConfigured() || !state.homeConsent || !state.homeText.trim()
-    || Boolean(pending) || Boolean(isSaas() && length > quotaRemaining());
+    || documentReading('home-text') || Boolean(pending) || Boolean(isSaas() && length > quotaRemaining());
   const count = document.querySelector('#home-character-count');
   if (count) count.textContent = `${number(length)} знаков`;
   const status = document.querySelector('#home-search-status');
@@ -1073,11 +1075,36 @@ function scopeAside() {
     </div>`;
 }
 
+function documentReading(id) { return fileReadTokens.get(document.getElementById(id))?.active === true; }
+
+function wordUnit(count) { const last=count%10, pair=count%100; return pair>=11 && pair<=14 ? 'слов' : last===1 ? 'слово' : last>=2 && last<=4 ? 'слова' : 'слов'; }
+
+function textStatistics(text) {
+  const words = text.match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:[-'’][\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*/gu) || [];
+  const counts = new Map();
+  for (const word of words) { const key=word.normalize('NFKC').toLocaleLowerCase('ru'); counts.set(key,(counts.get(key)||0)+1); }
+  return { characters:chars(text).length, nonSpaceCharacters:chars(text.replace(/\s/gu,'')).length, words:words.length,
+    frequent:[...counts].filter(([word,count])=>chars(word).length>2 && count>1).sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0],'ru')).slice(0,10),
+    mixed:[...new Set(words.filter(word=>/\p{Script=Cyrillic}/u.test(word) && /\p{Script=Latin}/u.test(word)))] };
+}
+
+function renderTextStatistics() {
+  const area=document.getElementById('text-statistics-content');
+  if (!area) return;
+  const stats=textStatistics(state.text);
+  area.innerHTML=`<p>${number(stats.characters)} знаков · ${number(stats.nonSpaceCharacters)} без пробельных символов · ${number(stats.words)} ${wordUnit(stats.words)}.</p>
+    <p class="field-help">Частые словоформы без объединения окончаний. Подсчёт выполняется в браузере.</p>
+    ${stats.frequent.length ? `<ul>${stats.frequent.map(([word,count])=>`<li>${escapeHTML(word)} — ${number(count)}</li>`).join('')}</ul>` : '<p>Повторяющихся словоформ длиной от трёх букв нет.</p>'}
+    <p>${stats.mixed.length ? `Смешаны кириллица и латиница: ${stats.mixed.slice(0,10).map(escapeHTML).join(', ')}${stats.mixed.length>10?'…':''}. Проверьте написание.` : 'Слов со смешением кириллицы и латиницы не найдено.'}</p>
+    <p class="field-help">Частота слов не является оценкой плагиата, орфографии или «водности».</p>`;
+}
+
 function updateCharacterCount() {
+  renderTextStatistics();
   const count = document.querySelector('#character-count');
   if (count) count.textContent = `${number(chars(state.text).length)} знаков`;
   const wordCount = document.querySelector('#word-count');
-  if (wordCount) wordCount.textContent = `${number(state.text.trim() ? state.text.trim().split(/\s+/u).length : 0)} слов`;
+  if (wordCount) wordCount.textContent = `${number(textStatistics(state.text).words)} ${wordUnit(textStatistics(state.text).words)}`;
 }
 function textLengthError(text) {
   return chars(text).length > checkTextLimit() ? `В тексте больше ${number(checkTextLimit())} знаков. Сократите его перед проверкой.` : '';
@@ -1136,8 +1163,8 @@ function decodeTextFile(buffer) {
 function showImportHint(target, decoded) {
   const hint = document.getElementById(`${target.id}-import-hint`);
   if (!hint) return;
-  hint.hidden = !decoded.guessed;
-  hint.textContent = decoded.guessed
+  hint.hidden = !decoded.guessed && !decoded.notes?.length;
+  hint.textContent = decoded.notes?.length ? decoded.notes.join(' ') : decoded.guessed
     ? 'Предположительно, файл сохранён в Windows-1251. Проверьте, правильно ли отображается текст.'
     : '';
 }
@@ -1146,14 +1173,20 @@ async function readTextFile(input, target) {
   const file = input.files[0];
   if (!file) return;
   input.value = '';
-  const token = {};
+  const token = { active:false };
   fileReadTokens.set(target, token);
-  if (!/\.(txt|md)$/i.test(file.name)) {
-    throw new Error('В этой версии доступны текстовые файлы .txt и .md.');
+  const documentFile = /\.(docx|pdf)$/i.test(file.name);
+  if (!/\.(txt|md|docx|pdf)$/i.test(file.name)) {
+    throw new Error('Выберите TXT, MD, DOCX или текстовый PDF.');
   }
-  if (file.size > 800004) {
+  if (documentFile && file.size > 1048576) throw new Error('DOCX/PDF больше 1 МиБ. Разделите документ.');
+  if (!documentFile && file.size > 800004) {
     throw new Error('Файл слишком большой. Используйте текст до 200 000 знаков.');
   }
+  token.active=true;
+  const hint=document.getElementById(`${target.id}-import-hint`);
+  if (documentFile && hint) { hint.hidden=false; hint.textContent='Извлекаем текст документа на сервере Истока… Поиск не запускается.'; }
+  updateQuotaUI(); updateHomeControls();
   const previousValue = target.value;
   let editedWhileReading = false;
   const onInput = () => { editedWhileReading = true; };
@@ -1163,9 +1196,21 @@ async function readTextFile(input, target) {
     const buffer = await file.arrayBuffer();
     if (!target.isConnected || editedWhileReading || target.value !== previousValue
       || fileReadTokens.get(target) !== token) return;
-    decoded = decodeTextFile(buffer);
+    if (documentFile) {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let offset=0; offset<bytes.length; offset+=8192) binary += String.fromCharCode(...bytes.subarray(offset,offset+8192));
+      decoded = await api('/api/import-document', { name:file.name, data:btoa(binary) });
+      if (!target.isConnected || editedWhileReading || target.value !== previousValue || fileReadTokens.get(target) !== token) return;
+    } else decoded = decodeTextFile(buffer);
+  } catch (error) {
+    if (hint && fileReadTokens.get(target) === token) { hint.hidden=false; hint.textContent=error.message; }
+    throw error;
   } finally {
+    token.active=false;
     target.removeEventListener('input', onInput);
+    if (hint && editedWhileReading && fileReadTokens.get(target) === token) hint.hidden=true;
+    updateQuotaUI(); updateHomeControls();
   }
   target.value = decoded.text;
   showImportHint(target, decoded);
@@ -1195,7 +1240,7 @@ function renderHome() {
             <h1 class="landing-title" aria-label="Проверьте уникальность текста">Проверьте текст.<br>Найдите <span>исток.</span></h1>
             <p class="landing-description">От совпавшей фразы — к её источнику. Проверяйте статьи, курсовые и исследования с отчётом, который можно проверить самому.</p>
             <div class="landing-actions"><a class="landing-button" href="#home" data-home-scroll="home-check-form">Проверить текст <span aria-hidden="true">↗</span></a><a class="landing-text-link" href="#home" data-home-scroll="home-how">Как это работает <span aria-hidden="true">→</span></a></div>
-            <p class="landing-formats">Вставьте текст или загрузите TXT / MD</p>
+            <p class="landing-formats">Вставьте текст или загрузите TXT / MD / DOCX / PDF</p>
             <div class="landing-benefits"><span><i aria-hidden="true">✓</i> Подсветка совпадений</span><span><i aria-hidden="true">✓</i> Ссылки на источники</span><span><i aria-hidden="true">✓</i> Сохранённый отчёт</span></div>
           </div>
           <div class="landing-preview" aria-label="Учебный пример оформления отчёта">
@@ -1225,11 +1270,11 @@ function renderHome() {
         <div class="landing-check-layout landing-section">
           <div class="landing-check-copy"><p class="landing-label">НАЧНИТЕ ПРОВЕРКУ</p><h2>Ваш текст.<br>Его источники.</h2><p>Добавьте материал, который хотите проверить. Результат появится здесь — с выделенными фрагментами и ссылками.</p><div class="landing-check-note"><span aria-hidden="true">↗</span><p>Уже работаете над документом?<br><a href="#check">Открыть рабочее пространство</a></p></div><p class="home-v2-status" id="home-search-status">${webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету'}</p>${state.text.trim() ? '<p class="home-existing-draft">Ваш черновик на месте. <a href="#check">Продолжить работу ↗</a></p>' : ''}</div>
           <form class="home-checker" id="home-check-form">
-            <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD</span></div>
+            <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD / DOCX / PDF</span></div>
             <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте текст вашей работы…"></textarea>
             <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
             <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
-            <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>Текстовые файлы TXT и Markdown</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label>
+            <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; DOCX / PDF до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Загрузить текст для интернет-проверки"></label>
             <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска источников.</span></label>
             <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
@@ -1258,7 +1303,7 @@ function renderHome() {
         <div class="landing-faq-list">
           <details open><summary>С чем сравнивается мой текст?<span aria-hidden="true">+</span></summary><p>С доступными страницами в интернете. Отдельно можно сравнить материал со своей библиотекой. Закрытые коллекции вузов в интернет-проверку не входят.</p></details>
           <details><summary>Что означает процент уникальности?<span aria-hidden="true">+</span></summary><p>Это доля слов без найденных дословных совпадений на прочитанных страницах. Если проверка неполная, мы покажем ограничение, а окончательный процент останется неустановленным.</p></details>
-          <details><summary>Какие файлы можно загрузить?<span aria-hidden="true">+</span></summary><p>Сейчас доступны TXT и Markdown (.md). Текст из других форматов можно скопировать в поле проверки.</p></details>
+          <details><summary>Какие файлы можно загрузить?<span aria-hidden="true">+</span></summary><p>Доступны TXT, Markdown, DOCX и текстовый PDF. DOCX/PDF до 1 МиБ обрабатываются на сервере Истока без запуска поиска; до 40 страниц PDF, без OCR. Проверьте извлечённый текст. Старые DOC, ODT, RTF и сканы пока не поддерживаются.</p></details>
           <details><summary>Что происходит с текстом после проверки?<span aria-hidden="true">+</span></summary><p>Черновик сохраняется в вашем браузере, а результат — в истории. Для поиска источников короткие фразы из текста передаются внешним поисковым сервисам только после вашего согласия.</p></details>
           <details id="home-scope"><summary>Какие ограничения есть у проверки?<span aria-hidden="true">+</span></summary><p>Закрытые сайты, переводы и глубокие пересказы могут остаться незамеченными. За проверку выполняется до <strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span class="sr-only">${maxQueries}</span> поисковых запросов и до <strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span class="sr-only">${maxUrls}</span> попыток чтения страниц. Исток сохраняет найденные совпадения и показывает недоступные источники.</p></details>
         </div>
@@ -1388,17 +1433,18 @@ function renderCheck() {
         <section class="card editor-card">
           <div class="editor-header">
             <div class="editor-title"><span class="document-icon" aria-hidden="true">▤</span>Ваш текст</div>
-            <label class="file-button">↑ Загрузить .txt
-              <input id="text-file" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текстовый файл">
+            <label class="file-button">↑ Загрузить файл
+              <input id="text-file" type="file" accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Загрузить текстовый файл">
             </label>
           </div>
-          <p class="import-hint" id="check-text-import-hint" role="status" hidden></p>
+          <p class="field-help">DOCX/PDF до 1 МиБ обрабатываются на сервере Истока без запуска поиска. DOCX — основной текст и таблицы, без сносок; PDF — до 40 страниц с текстовым слоем, без OCR.</p><p class="import-hint" id="check-text-import-hint" role="status" hidden></p>
           <textarea class="editor-text" id="check-text" aria-label="Текст для проверки"
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
             <span>${isBeta() ? state.session.beta.owner ? 'До 10 000 знаков · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
+          <details class="card text-statistics"><summary>Статистика текста и повторы</summary><div id="text-statistics-content"></div></details>
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска страниц-источников.</label>
           </div>
@@ -1496,6 +1542,7 @@ function renderCheck() {
   updateModelActionControls();
 }
 async function checkText() {
+  if (documentReading('check-text')) throw new Error('Дождитесь извлечения текста документа.');
   if (!state.text.trim()) throw new Error('Вставьте текст для проверки.');
   if (textLengthError(state.text)) throw new Error(textLengthError(state.text));
   if (internetMode()) return startWebCheck();
@@ -2562,13 +2609,13 @@ function renderSources() {
         <div class="form-group">
           <div class="section-heading">
             <label class="field-label" for="source-text">Полный текст источника</label>
-            <label class="file-button">↑ Загрузить .txt
-              <input id="source-file" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст источника">
+            <label class="file-button">↑ Загрузить файл
+              <input id="source-file" type="file" accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Загрузить текст источника">
             </label>
           </div>
           <textarea class="field" id="source-text" name="text" required placeholder="Вставьте текст публикации…"></textarea>
           <p class="field-help" id="source-text-limit-error" role="alert"></p>
-          <p class="field-help" id="source-text-import-hint" role="status" hidden></p>
+          <p class="field-help">DOCX/PDF до 1 МиБ обрабатываются на сервере Истока без запуска поиска. DOCX — основной текст и таблицы, без сносок; PDF — до 40 страниц с текстовым слоем, без OCR.</p><p class="field-help" id="source-text-import-hint" role="status" hidden></p>
         </div>
         <button class="button" type="submit">Добавить в библиотеку <span aria-hidden="true">+</span></button>
         <p class="field-help">${isBeta() ? 'Источники сохраняются в гостевом пространстве этого браузера.' : isSaas() ? 'Источники сохраняются в вашем аккаунте и используются в следующих проверках.' : 'Источники сохраняются на вашем Mac и используются в следующих проверках.'}</p>
@@ -2594,6 +2641,7 @@ function renderSources() {
   document.querySelector('#source-form').addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
+    if (documentReading('source-text')) { toast('Дождитесь извлечения текста документа.',true); return; }
     if (!validateTextLength(form.elements.text)) { form.elements.text.reportValidity(); return; }
     const submitted = {
       title: form.elements.title.value,

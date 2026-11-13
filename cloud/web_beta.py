@@ -282,7 +282,7 @@ class BetaHandler(server.Handler):
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
         allowed=(method=='GET' and (path in {'/api/status','/api/sources','/api/source-packs','/api/reports'}
                 or re.fullmatch(r'/api/(?:reports|jobs|report-exports)/[a-f0-9]{32}',path))
-            or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo'}
+            or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo','/api/import-document'}
             or method=='POST' and re.fullmatch(r'/api/jobs/[a-f0-9]{32}/cancel',path)
             or method=='DELETE' and re.fullmatch(r'/api/sources/[^/]{1,100}',path))
         if not allowed:raise access.AccessError('Эта операция недоступна в онлайн-бете.','operation_forbidden',403)

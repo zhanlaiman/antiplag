@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from urllib.parse import urlsplit
 
-from plagiarism import access, auth_provider, demo, evaluation, learning, llm, matching, report_export, retrieval, saas, search_credentials, source_packs, web_search
+from plagiarism import document_import, access, auth_provider, demo, evaluation, learning, llm, matching, report_export, retrieval, saas, search_credentials, source_packs, web_search
 from plagiarism.jobs import Jobs
 from plagiarism.matching import analyze, MAX_TEXT_CHARS
 from plagiarism.storage import Store
@@ -229,6 +229,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/session":
             return {"mode": "local", "web": web_search.status()}
         runtime = getattr(self.server, "saas", None)
+        if method == "POST" and path == "/api/import-document":
+            return document_import.extract_document(field(body,"name",255),field(body,"data",1400000))
         if path == "/api/local-search-config":
             if runtime:
                 raise access.AccessError("Настройка ключа доступна только на Mac владельца.", "operation_forbidden", 403)

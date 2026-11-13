@@ -279,6 +279,16 @@ class WebBetaTests(unittest.TestCase):
             db.execute('INSERT INTO checks VALUES (?,?,?,?)',(guest,'b'*32,'old-fingerprint','2026-11-13'));db.commit()
         with self.service.beta.connect() as db:self.assertEqual(len(db.execute('PRAGMA table_info(checks)').fetchall()),4)
 
+    def test_document_import_is_scoped_local_processing_without_search_or_daily_charge(self):
+        from tests.test_document_import import docx,encoded
+        cookie,guest=self.guest()
+        status,result,_=self.http('/api/import-document',{'name':'work.docx','data':encoded(docx())},cookie)
+        self.assertEqual(status,200,result);self.assertIn('Первый абзац.',result['text'])
+        self.assertEqual(self.calls,[]);self.assertEqual(self.service.beta.remaining(guest)['daily_remaining'],6)
+        self.assertFalse((self.root/'search-budget.sqlite3').exists())
+        self.assertEqual(self.http('/api/import-document',{'name':'work.docx','data':'invalid'},cookie)[0],400)
+        self.assertEqual(self.http('/api/import-document',{'name':'work.docx','data':encoded(docx())},cookie,origin='https://evil.example')[0],403)
+
 
 class BetaUploadTests(unittest.TestCase):
     def test_only_code_static_assets_and_two_public_source_packs_are_uploaded(self):
