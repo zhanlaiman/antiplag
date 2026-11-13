@@ -1,3 +1,9 @@
+# PROJECT REVIEW — 13 ноября 2026
+
+Пользователь вручную сбросил Codex и попросил аудит проекта, сравнение с text.ru и промпт на10часов; сам10часовой этап пока не запускал. Подготовлен `docs/PROJECT_REVIEW_2026-11-13.md`: состояние, доказательства, приоритеты и полный промпт. Production HTTP200, /api/session:10000chars/daily6/monthly180, app.js совпал, все50manifestfiles совпадают с local. Tavily read-only650/1000/paygo0, новых search0, стоимость0₸; текущий cloudledger не читался, не повторять старый остаток25 как актуальный. Codex used0/resetcredits0. Full Python930 OK(skip1)47.393s, Node61PASS, логи `.runtime/project-audit-{python,node}-20261113.log`. prepare_beta readyTrue/3DBok/modelsdisabled. Код продукта не менялся. Блокеры: preflight reliability+guestslot доpreflight, независимый search benchmark не закончен, productUX/productionbackup/operationalchecks. Все70 уже открыты; при tuning больше не holdout. Не делать вывод о точности поиска из42/44matcher. Для нового поручения на10часов следовать полному промпту в аудите, бюджет0, max120новыхTavily суммарно включая smoke, без оплаты/GPU/регистрации. Unrelated output/tmp нетронуты.
+
+---
+
 # FINAL70 AUDIT — 12 ноября 2026, 17:53 Алматы
 
 Последнее поручение пользователя: за 3–4 часа закончить продукт и пройти финальные 70. Это новое явное разрешение открыло ранее запечатанную коллекцию. Бюджет по-прежнему 0 ₸. Файлы final70 приватные/ignored. См. `docs/FINAL70_AUDIT_2026-11-12.md`.
