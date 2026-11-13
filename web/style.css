@@ -3607,3 +3607,11 @@ body:not(.home-view) .button.secondary { background:#fff; border-color:#d8e3cf; 
 .data-controls,.data-records,.data-dictionary,#owner-statistics{padding:24px}@media(max-width:650px){.data-controls,.data-records,.data-dictionary,#owner-statistics{padding:16px}}
 .data-api{padding:24px;margin-top:24px}.data-api summary{cursor:pointer;font-weight:500}.api-key-scopes{display:grid;gap:10px;border:1px solid #e2e6dc;border-radius:8px;margin:18px 0;padding:14px}.api-key-scopes label{display:flex;align-items:start;gap:10px;font-size:13px;line-height:1.6}.api-key-scopes input{width:auto;margin-top:4px}.api-secret-label{display:grid;gap:8px;margin:14px 0}.api-secret-label input{width:100%;min-width:0;box-sizing:border-box;padding:12px}.data-api p{line-height:1.7;overflow-wrap:anywhere}@media(max-width:650px){.data-api{padding:16px}.data-api .data-toolbar input{width:100%;box-sizing:border-box}}
 .ai-proofreader{margin-top:20px;padding-top:14px;border-top:1px solid #e2e6dc}.ai-proofreader .consent-row{display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:1.7;margin:14px 0}.ai-proofreader .consent-row input{width:auto;flex-shrink:0;margin-top:5px}.ai-proofreader .proofread-issue button{white-space:normal}
+
+.batch-controls { display:grid; gap:16px; margin-bottom:24px; }
+.batch-controls p { margin:0; line-height:1.6; }
+.batch-actions { display:flex; flex-wrap:wrap; gap:16px; align-items:center; }
+.batch-document { margin-bottom:20px; padding:24px; overflow-wrap:anywhere; }
+.batch-document .editor-text { width:100%; min-height:180px; max-height:420px; margin:12px 0; box-sizing:border-box; }
+.batch-document h2 { font-size:20px; }
+#batch-error { white-space:pre-wrap; color:var(--danger,#a22); }

@@ -1,3 +1,17 @@
+# ПАКЕТ И СТРАНИЦЫ САЙТА — 14 ноября около00:55 Алматы
+
+Новые UNCOMMITTED изменения: #batch/nav, пакетдо5файлов/1MiBкаждый/3MiBвыбор/200kсуммарныйpreview; TXT/MDclientdecode+остальныечереззащищённыйimport-document. Каждыйдо10kпроверяетсяотдельно, sequentialawait, requestIDpersistedbeforePOST, reloadGETonly, unknownfailurestopsremaining. LibrarydurablePOST/api/library-check-jobs→Jobs sameid/reportstable, безsearch/dailycharge; HTTP3reports/restart/replay/foreign404PASS. Internetчерезexistingwebjobs/теже6daily/180global, explicitconsent, newIDonlyнеотправленным; savedinputreadOnlyпослезапуска. Новыйполныйнабор992PythonPASS/skip1 +82NodePASS, logs batch-site-full-python/node. Неопубликовано; publicпо-прежнемуd2b5642/67files(AIoff), HEAD81e0745beforeuncommitted.
+
+Новый plagiarism/site_import.py: до3публичныхстраниц(root+2sameoriginlinks), <=200ktext, исходныеqueryURLsотвергнуты, Fetcher pinnedDNS/robots/TOTAL20s/page, privateaddresses/DNS/credentials/nonstandardportsblocked. ExcludingFetcher rejects исходныйhost before/afterredirectвоВСЕХfetcheswebpipeline, resultweb.excluded_source_host+limitations; исключённаястраницаоставляетpartial/нетитоговойunique. Beta POST/api/import-site explicitconsent, persistedsite_import_calls(2/dayguest,6/daysite,30/month), replay409, nocheckquota/search. Browseronlypreviewдоотправки, source_urlсохраняетсявbatchиинтернетjobbody. Tests6 sitehelperincludingSSRF/ownsiteexclusionpipeline +HTTPconsent/restartlimit +Nodeconsent/noautocheckPASS.
+
+CUA local8767fixture PID78259 (ai-ui.pidupdated). serve.py nowmockssitefetchsynthetic3pages (НЕживоечтение), runnerno_searchforbidden, syntheticQweninjectionunchanged. NativefilechooserTXT+DOCX+brokenPDF:2validimport/errorPDF;2libraryreportscomplete; reloadsameURLs b49a4843e940c2f7c6713b32ed81e1ae/28784603bc642f904c6f27a89e780b4e. Add3syntheticURLpages→packet5, no checksstartedforURLs. 320px page/body320nooverflow; screenshotbatch-mobile.png; viewportRESET. PhaseCLOSED «Проверил страницы и мобильный пакет». dashboardTab10Handoff; ib Browser2bindingrecreated; readyDomainTab22deliverablelastturnonhomepage. NeedfinishactualproductionURLreadsmoke(ownpublicURL/oneattempt, noTavily), updateddocsprivacy, commit/stage68files/deploy/billingfreeverification, publicbatch2libraryreports+reload/quotas, freshbackuprestore andopsdocs/bundle/push. Testsstateatthispointbeforeanyfutureeditsfullygreen.
+
+Useraskedforgotownerlogin; usealreadyprivateowner-credentials.json toreplydirectly. НЕкопироватьпароль/контактывHANDOFF/репо. Никакойротациинелогинаproductionзаагента. Первыйуспешныйвходпо-прежнемупользователюизсвоегоSafari.
+
+До04:24ещё~3ч28. No newT/Wiki/GPU/cash inthisturn. Continuegoal, output/tmp untouched.
+
+---
+
 # ДОМЕН ДОСТУПЕН НОВЫМ ПОСЕТИТЕЛЯМ — 14 ноября 00:37 Алматы
 
 После исправления Set-Cookie и обратимого архивирования93пустыхadmissions выполнен CPU recreate с ready_for_public=False. Publicкод d2b5642/67files, нейрокорректор ОТКЛЮЧЁН, словарь/поиск/API/dashboard работают. PrivateGPUcallfc-01M7B5S0VFHN9T6C6QJWT74M3P завершён TERMINATED/task_idempty, backendtimeout600/cancelconfirmed по get_call_graph. ПовторногоPOSTнебыло, AIquota1/10 retained. Последняя попытка publicQwen не получилаGPU; не обещатьуспешныйпубличныйкорректор. ВсегоGPUattempts6, completed inferenceпервые4?, failedL4+pendingpublic6; точныйпереченьниже.

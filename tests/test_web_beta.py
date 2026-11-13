@@ -157,6 +157,51 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(self.http('/api/session',cookie=cookie)[1]['beta']['daily_checks'],6)
         self.assertEqual(self.http('/api/web-check-jobs',{'request_id':'f'*32,'text':TEXT,'internet_consent':True},cookie)[0],429)
 
+    def test_site_preview_requires_consent_and_durable_limits_without_search(self):
+        alice,_=self.guest();before=self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining']
+        body={'request_id':'c'*32,'url':'https://example.org/','site_consent':True,'limit':3}
+        result={'pages':[{'title':'Открытая страница','text':TEXT,'url':'https://example.org/'}],'errors':[]}
+        with patch('cloud.web_beta.fetch_site',return_value=result) as loader:
+            self.assertEqual(self.http('/api/import-site',{**body,'site_consent':False},alice)[0],400)
+            self.assertEqual(self.http('/api/import-site',{**body,'url':'http://127.0.0.1/'},alice)[0],400)
+            loader.assert_not_called()
+            self.assertEqual(self.http('/api/import-site',body,alice)[1],result)
+            self.assertEqual(self.http('/api/import-site',body,alice)[0],409)
+            self.assertEqual(self.http('/api/import-site',{**body,'request_id':'d'*32},alice)[0],200)
+            self.stop();self.start()
+            self.assertEqual(self.http('/api/import-site',{**body,'request_id':'e'*32},alice)[0],429)
+            self.assertEqual(loader.call_count,2)
+        self.assertEqual(self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining'],before)
+        self.assertEqual(self.calls,[])
+        self.assertEqual(self.http('/api/import-site',body,alice,origin=None)[0],403)
+
+    def test_library_batch_jobs_keep_separate_reports_replay_and_budget_after_restart(self):
+        alice,_=self.guest();bob,_=self.guest()
+        before=self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining']
+        reports=[]
+        for index in range(3):
+            identifier=f'{index+10:032x}';body={'request_id':identifier,'text':TEXT+str(index)}
+            self.assertEqual(self.http('/api/library-check-jobs',body,alice)[0],200)
+            for _ in range(100):
+                job=self.http('/api/jobs/'+identifier,cookie=alice)[1]['job']
+                if job['status'] in {'complete','failed'}:break
+                time.sleep(.01)
+            self.assertEqual(job['status'],'complete',job)
+            reports.append((body,job['result']['report']))
+            self.assertEqual(self.http('/api/jobs/'+identifier,cookie=bob)[0],404)
+            self.assertEqual(self.http('/api/library-check-jobs',{**body,'text':'Изменённый текст'},alice)[0],400)
+        self.stop();self.start()
+        for body,report in reports:
+            replay=self.http('/api/library-check-jobs',body,alice)
+            self.assertEqual(replay[0],200)
+            self.assertEqual(replay[1]['job']['result']['report'],report)
+            self.assertEqual(self.http('/api/reports/'+report['id'],cookie=alice)[1]['report'],report)
+        self.assertEqual(len({report['id'] for _,report in reports}),3)
+        self.assertEqual(self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining'],before)
+        self.assertEqual(self.calls,[])
+        self.assertEqual(self.http('/api/library-check-jobs',{'request_id':'f'*32,'text':'x'*10001},alice)[0],400)
+        self.assertEqual(self.http('/api/library-check-jobs',{'request_id':'f'*32,'text':TEXT},alice,origin=None)[0],403)
+
     def test_optional_correction_is_isolated_replayed_exported_and_restorable_without_search(self):
         from hashlib import sha256
         from plagiarism.ai_proofreading import parse_response

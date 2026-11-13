@@ -1589,3 +1589,72 @@ test('Qwen proposals apply one grounded UTF-16 edit and reject a later draft', a
   assert.equal(field.value, 'Новый авторский текст');
   assert.match(app.element('ai-status-check').textContent, /Текст изменён/);
 });
+
+test('batch imports keep valid files beside a failed file without starting any check', async () => {
+  const calls=[];
+  const app=fixture({view:'batch',fetch(url){calls.push(url);if(url==='/api/session')return json({mode:'local',beta:{id:'guest',max_characters:10000}});}});await settle();
+  app.expose('batchFilesFixture',[
+    {name:'first.txt',size:12,arrayBuffer:async()=>new TextEncoder().encode('Первый текст.').buffer},
+    {name:'unsafe.exe',size:2,arrayBuffer:async()=>new ArrayBuffer(2)},
+    {name:'second.md',size:12,arrayBuffer:async()=>new TextEncoder().encode('Второй текст.').buffer}
+  ]);
+  await assert.rejects(app.evaluate('importBatchFiles(batchFilesFixture)'),/unsafe.exe/);
+  assert.equal(app.evaluate('state.batch.length'),2);
+  assert.equal(app.evaluate('state.batch[1].text'),'Второй текст.');
+  assert.ok(!calls.some(url=>/check-jobs/.test(url)));
+  assert.equal(app.evaluate('state.batchBusy'),false);
+});
+
+test('batch checks persist each ID before submission and restore without a second POST', async () => {
+  const submitted=new Map();let app;let posts=0;
+  const fetch=(url,body)=>{
+    if(url==='/api/session')return json({mode:'local',beta:{id:'batch-guest',max_characters:10000,daily_remaining:6,monthly_remaining:144}});
+    if(url==='/api/library-check-jobs'){
+      assert.equal(app.evaluate('JSON.parse(storageGet(BATCH_KEY)).find(doc=>doc.request_id === '+JSON.stringify(body.request_id)+').text'),body.text);
+      posts++;submitted.set(body.request_id,body.text);return json({job:{id:body.request_id,status:'queued'}});
+    }
+    if(url.startsWith('/api/jobs/')){
+      const id=url.split('/').pop();return json({job:{id,status:'complete',result:{report:{id,text:submitted.get(id),scope:'local_library',stats:{similarity_percent:0}}}}});
+    }
+  };
+  app=fixture({view:'batch',fetch});await settle();
+  app.expose('batchFixture',[{id:'a'.repeat(32),name:'<img onerror=1>.txt',text:'Текст один.',request_id:null},{id:'b'.repeat(32),name:'two.txt',text:'Текст два.',request_id:null}]);
+  app.evaluate('state.batch=batchFixture;renderBatch()');
+  assert.ok(!app.element('main-content').innerHTML.includes('<img onerror'));
+  await app.evaluate("startBatchChecks('library',false)");
+  assert.equal(posts,2);assert.equal(new Set(app.evaluate('state.batch.map(doc=>doc.request_id)')).size,2);
+  const stored=app.storage;
+  const restored=fixture({view:'batch',stored:Object.fromEntries(stored),fetch});await settle();
+  assert.equal(posts,2);
+  assert.equal(restored.evaluate('state.batch.length'),2);
+  assert.ok(restored.element('batch-status-'+ 'a'.repeat(32)).innerHTML.includes('Открыть результат'));
+});
+
+test('batch stops after an unknown delivery and leaves later documents unsubmitted', async () => {
+  let posts=0;
+  const app=fixture({view:'batch',fetch(url){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'guest',max_characters:10000}});
+    if(url==='/api/library-check-jobs'){posts++;throw new TypeError('Synthetic lost response');}
+  }});await settle();
+  app.expose('batchFixture',[{id:'a'.repeat(32),name:'one.txt',text:'Один.',request_id:null},{id:'b'.repeat(32),name:'two.txt',text:'Два.',request_id:null}]);
+  app.evaluate('state.batch=batchFixture;renderBatch()');
+  await assert.rejects(app.evaluate("startBatchChecks('library',false)"));
+  assert.equal(posts,1);assert.equal(app.evaluate('state.batch[1].request_id'),null);
+  assert.equal(app.evaluate('Object.values(state.modelJobs)[0].status'),'delivery_unknown');
+  assert.equal(app.evaluate('state.batchBusy'),false);
+});
+
+test('site preview needs consent and only checks imported pages after explicit batch launch', async () => {
+  let imports=0,checks=0;
+  const app=fixture({view:'batch',fetch(url,body){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'guest',max_characters:10000}});
+    if(url==='/api/import-site'){imports++;assert.equal(body.site_consent,true);return json({pages:[{title:'Публичная страница',url:'https://example.org/page',text:'Проверяемый текст.'}],errors:[]});}
+    if(/check-jobs/.test(url))checks++;
+  }});await settle();
+  await assert.rejects(app.evaluate("importSiteToBatch('https://example.org/',false)"));
+  assert.equal(imports,0);
+  await app.evaluate("importSiteToBatch('https://example.org/',true)");
+  assert.equal(imports,1);assert.equal(checks,0);
+  assert.equal(app.evaluate('state.batch[0].source_url'),'https://example.org/page');
+  assert.equal(app.evaluate('state.batch[0].request_id'),null);
+});

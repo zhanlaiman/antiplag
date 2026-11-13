@@ -27,6 +27,7 @@ from plagiarism.client_api import APIKeys,require_scope
 from plagiarism.correction_jobs import CorrectionQuota,ModalCorrector,internal_id,correction_id
 from plagiarism.ai_proofreading import request_payload
 from plagiarism.jobs import Jobs
+from plagiarism.site_import import fetch_site,public_page_url,ExcludingFetcher
 
 COOKIE='istok_beta'
 MAX_CHARACTERS=10000
@@ -83,6 +84,7 @@ class BetaRuntime:
                 'CREATE TABLE IF NOT EXISTS rates(guest TEXT,day TEXT,count INTEGER NOT NULL,PRIMARY KEY(guest,day));'
                 'CREATE TABLE IF NOT EXISTS checks(guest TEXT,id TEXT,fingerprint TEXT,day TEXT,PRIMARY KEY(guest,id));'
                 'CREATE TABLE IF NOT EXISTS unstarted_checks(guest TEXT,id TEXT,PRIMARY KEY(guest,id));'
+                'CREATE TABLE IF NOT EXISTS site_import_calls(guest TEXT NOT NULL,id TEXT PRIMARY KEY,day TEXT NOT NULL,month TEXT NOT NULL);'
                 'CREATE TABLE IF NOT EXISTS quota_guard(id INTEGER PRIMARY KEY CHECK(id=1),retry_at REAL NOT NULL);')
         self.api_keys=APIKeys(self.database,persist)
         self.tenants=DurableTenants(self.root/'tenants',persist)
@@ -95,6 +97,27 @@ class BetaRuntime:
         self.persist()
 
     def connect(self):return sqlite3.connect(self.database,timeout=15)
+
+    def import_site(self,guest,body):
+        if body.get('site_consent') is not True:
+            raise access.AccessError('Подтвердите загрузку публичных страниц сайта.','site_consent_required',400)
+        url=public_page_url(body.get('url'))['url']
+        identifier=body.get('request_id')
+        if not isinstance(identifier,str) or not re.fullmatch('[a-f0-9]{32}',identifier):raise ValueError('Нужен ID загрузки.')
+        limit=body.get('limit',3)
+        if type(limit) is not int or not 1<=limit<=3:raise ValueError('Загружаем до трёх страниц.')
+        day=datetime.now(timezone.utc).strftime('%Y-%m-%d');month=day[:7]
+        with closing(self.connect()) as db,db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM site_import_calls WHERE id=?',(identifier,)).fetchone():
+                raise access.AccessError('Этот запрос уже отправлялся. Повтор автоматически не запускается.','site_import_already_attempted',409)
+            if (db.execute('SELECT count(*) FROM site_import_calls WHERE guest=? AND day=?',(guest,day)).fetchone()[0]>=2
+                or db.execute('SELECT count(*) FROM site_import_calls WHERE day=?',(day,)).fetchone()[0]>=6
+                or db.execute('SELECT count(*) FROM site_import_calls WHERE month=?',(month,)).fetchone()[0]>=30):
+                raise access.AccessError('Бесплатный лимит загрузки сайтов исчерпан: 2 в день на пространство, 6 на сайт и 30 в месяц.','site_import_limit',429)
+            db.execute('INSERT INTO site_import_calls VALUES(?,?,?,?)',(guest,identifier,day,month))
+        self.persist()
+        return fetch_site(url,limit)
 
     def submit_correction(self,guest,body,store):
         if not self.corrector:raise access.AccessError('Qwen пока недоступна. Словарь и правила работают отдельно.','correction_unavailable',503)
@@ -284,7 +307,7 @@ class BetaRuntime:
         return {'counts':counts,'quota':self.remaining('',owner=True),'monthly_limit':MONTHLY_SEARCHES,
                 'storage_limit_bytes':256*1024*1024,'as_of':datetime.now(timezone.utc).isoformat()}
 
-    def run_web(self,text,request_id,progress=None):
+    def run_web(self,text,request_id,progress=None,source_url=None):
         # No paid fallback: confirm the included allowance before any search.
         cooldown=self.quota_cooldown()
         if cooldown:
@@ -319,7 +342,12 @@ class BetaRuntime:
             def finish(self,identifier):super().finish(identifier);persist()
         search=TavilySearch(Budget(self.root/'search-budget.sqlite3',limit=MONTHLY_SEARCHES))
         wiki=MediaWikiSearch(path=self.root/'private/mediawiki.sqlite3')
-        return web_search.run(text,request_id,progress=progress,searcher=search,wiki_searcher=wiki)
+        result=web_search.run(text,request_id,progress=progress,searcher=search,wiki_searcher=wiki,
+            **({'fetcher':ExcludingFetcher(source_url)} if source_url else {}))
+        if source_url:
+            result['web']['excluded_source_host']=public_page_url(source_url)['host']
+            result['web']['limitations'].append('Собственный сайт '+public_page_url(source_url)['host']+' исключён из сравнения. Недоступные и исключённые страницы не подтверждают уникальность.')
+        return result
 
 
 class BetaHandler(server.Handler):
@@ -409,6 +437,21 @@ class BetaHandler(server.Handler):
             return {'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}
         if method=='POST' and path=='/api/correction-jobs':
             return beta.submit_correction(self.guest,body,self.tenant.store)
+        if method=='POST' and path=='/api/import-site':
+            return beta.import_site(self.guest,body)
+        if method=='POST' and path=='/api/library-check-jobs':
+            text=server.field(body,'text',MAX_CHARACTERS)
+            identifier=body.get('request_id');store=self.tenant.store
+            saas.ensure_job_identifier(store,identifier)
+            def operation(progress):
+                progress('Сверяем с вашей библиотекой',0,1)
+                sources=store.sources()
+                result=server.analyze(text,sources)
+                report=store.save('report',{**result,'id':saas.report_identifier(identifier),
+                    'text':text,'sources':sources,'scope':'local_library'})
+                return {'report':server.public_report(report,store.match_reviews(report['id']))}
+            return {'job':self.tenant.jobs.submit_model(identifier,'/api/library-check',
+                {'text':text,'request_id':identifier},operation,store)}
         correction_job=re.fullmatch(r'/api/correction-jobs/([a-f0-9]{32})',path)
         if method=='GET' and correction_job:
             identifier=correction_job.group(1)
@@ -443,9 +486,10 @@ class BetaHandler(server.Handler):
             store,jobs=self.tenant.store,self.tenant.jobs
             saas.ensure_job_identifier(store,identifier)
             remote_id=sha256((self.guest+'\0'+identifier).encode()).hexdigest()[:32]
+            source_url=public_page_url(body['source_url'])['url'] if body.get('source_url') else None
             def operation(progress):
                 try:
-                    payload=beta.runner(text,remote_id,progress)
+                    payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}))
                 except SearchNotStarted:
                     beta.release_unstarted_check(self.guest,identifier)
                     raise
@@ -458,7 +502,7 @@ class BetaHandler(server.Handler):
                           or store.get('model-job',identifier) or jobs.items.get(identifier))
                 beta.admit_check(self.guest,identifier,text,owner=bool(self.owner),rearm=not existing)
                 try:
-                    return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True},operation,store)}
+                    return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True,**({'source_url':source_url} if source_url else {})},operation,store)}
                 except Exception:
                     if not store.get('model-request','model-request:'+identifier) and identifier not in jobs.items:
                         beta.release_unstarted_check(self.guest,identifier)

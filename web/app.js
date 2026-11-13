@@ -4,7 +4,7 @@ const DRAFT_KEY = 'istok.draft.v1';
 const MODEL_KEY = 'istok.model.v1';
 const MODAL_MODEL_KEY = 'istok.model.modal.v1';
 const MODEL_JOBS_KEY = 'istok.model-jobs.v1';
-const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate', '/api/web-check', '/api/correction'];
+const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate', '/api/web-check', '/api/correction', '/api/library-check'];
 const RETRIEVAL_JOBS_KEY = 'istok.retrieval-jobs.v1';
 const CANDIDATE_JOBS_KEY = 'istok.candidate-jobs.v1';
 const REVIEW_DRAFTS_KEY = 'istok.review-drafts.v1';
@@ -12,6 +12,7 @@ const CHECK_REQUESTS_KEY = 'istok.check-requests.v1';
 const OPERATION_IDS_KEY = 'istok.operation-ids.v1';
 const SOURCE_DRAFT_KEY = 'istok.source-draft.v1';
 const HOME_DRAFT_KEY = 'istok.home-draft.v1';
+const BATCH_KEY = 'istok.batch.v1';
 let storageScope = null;
 let turnstileLoader = null;
 let turnstileWidget = null;
@@ -57,6 +58,7 @@ function hydrateSessionStorage() {
   try { state.homeText = storageGet(HOME_DRAFT_KEY) || ''; } catch { state.homeText = ''; }
   state.model = restoreModel();
   state.modelJobs = restoreModelJobs();
+  state.batch = restoreBatch();
   state.retrievalJobs = restoreActiveJobs(RETRIEVAL_JOBS_KEY);
   state.candidateCheckJobs = restoreActiveJobs(CANDIDATE_JOBS_KEY);
   const reviews = restoreReviewDrafts();
@@ -207,7 +209,7 @@ function updateReportFreshness() {
 const state = {
   session: null, sessionReady: false, sessionExpired: false, sessionTransition: false,
   authChallenge: null, authEmail: '', captchaToken: '', checkRequests: {}, operationIds: {},
-  sourceDraft: {},
+  sourceDraft: {}, batch: [], batchBusy: false,
   checkMode: null, checkModeChosen: false, internetConsent: false,
   homeText: '', homeConsent: false,
   view: 'check', viewRevision: 0, text: restoreDraft(), sources: [], status: null, model: restoreModel(), report: null,
@@ -220,7 +222,7 @@ const state = {
 };
 const main = document.querySelector('#main-content');
 const relationNames = { exact: 'Дословное совпадение', paraphrase: 'Возможный пересказ', same_topic: 'Общая тема', unrelated: 'Разные тексты' };
-const viewNames = { home: 'Главная', check: 'Проверка текста', sources: 'Источники', evaluation: 'Оценка Qwen', history: 'История', data: 'Мои данные' };
+const viewNames = { home: 'Главная', check: 'Проверка текста', batch: 'Пакет документов', sources: 'Источники', evaluation: 'Оценка Qwen', history: 'История', data: 'Мои данные' };
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const number = value => Number(value || 0).toLocaleString('ru-RU');
 const chars = value => Array.from(value);
@@ -481,6 +483,8 @@ function updateAccountUI() {
   if (logout) logout.hidden = isBeta() ? !state.session.beta.owner : !isSaas() || !user;
   const ownerLink = document.querySelector('#owner-link');
   if (ownerLink) { ownerLink.hidden = !isBeta() || Boolean(state.session.beta.owner); }
+  const batchNav = document.querySelector('#batch-nav');
+  if (batchNav) batchNav.hidden = !isBeta();
   const evaluation = document.querySelector('#evaluation-nav');
   if (evaluation) evaluation.hidden = isSaas() || isBeta();
   const settings = document.querySelector('#model-settings');
@@ -654,6 +658,7 @@ function publicReportReady(reportId = state.report?.id) {
 }
 
 function modelJobTitle(entry) {
+  if (entry.context?.batchName) return `Документ: ${entry.context.batchName}`;
   if (entry.path === '/api/correction') return 'Предложения корректора Qwen';
   if (entry.path === '/api/web-check') return 'Проверка уникальности в интернете';
   if (entry.path === '/api/evaluate') return 'Оценка на учебных примерах';
@@ -725,6 +730,7 @@ function modelJobResultHTML(entry) {
 }
 
 function renderModelJobs() {
+  renderBatchResults();
   Object.values(state.modelJobs).filter(entry => entry.path === '/api/correction').forEach(renderAICorrection);
   const panel = document.querySelector('#model-jobs-panel');
   if (!panel) return;
@@ -813,6 +819,8 @@ async function submitModelJob(entry) {
   try {
     const { job } = entry.path === '/api/correction'
       ? await api('/api/correction-jobs', { request_id: entry.request_id, ...entry.body })
+      : entry.path === '/api/library-check'
+      ? await api('/api/library-check-jobs', { request_id: entry.request_id, ...entry.body })
       : entry.path === '/api/web-check'
       ? await api('/api/web-check-jobs', { request_id: entry.request_id, ...entry.body })
       : await api('/api/model-jobs', { request_id: entry.request_id, path: entry.path, body: entry.body });
@@ -1533,6 +1541,185 @@ async function runHomeDemo() {
   } finally {
     state.homeDemoRunning = false;
   }
+}
+
+function restoreBatch() {
+  try {
+    const saved = JSON.parse(storageGet(BATCH_KEY) || '[]');
+    if (!Array.isArray(saved) || saved.length > 5) return [];
+    let total = 0;
+    return saved.filter(doc => {
+      if (!doc || !/^[a-f0-9]{32}$/.test(doc.id) || typeof doc.name !== 'string' || doc.name.length > 255
+        || typeof doc.text !== 'string' || chars(doc.text).length > 200000
+        || doc.request_id && !/^[a-f0-9]{32}$/.test(doc.request_id)) return false;
+      total += chars(doc.text).length;
+      return total <= 200000;
+    });
+  } catch { return []; }
+}
+
+function saveBatch() {
+  try { storageSet(BATCH_KEY, JSON.stringify(state.batch)); return true; }
+  catch { return false; }
+}
+
+async function decodeBatchFile(file) {
+  if (!/\.(txt|md|doc|docx|pdf|odt|rtf|html|htm)$/i.test(file.name)) throw new Error('Неподдерживаемый формат.');
+  if (file.size > 1048576) throw new Error('Файл больше 1 МиБ.');
+  const buffer = await file.arrayBuffer();
+  if (/\.(txt|md)$/i.test(file.name)) return decodeTextFile(buffer);
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let offset=0; offset<bytes.length; offset+=8192) binary += String.fromCharCode(...bytes.subarray(offset,offset+8192));
+  return api('/api/import-document', {name:file.name, data:btoa(binary)});
+}
+
+async function importBatchFiles(files) {
+  if (state.batchBusy) throw new Error('Дождитесь текущей операции с пакетом.');
+  if (!files.length) return;
+  if (files.length + state.batch.length > 5) throw new Error('В пакете может быть до пяти документов.');
+  if (files.reduce((sum,file) => sum + file.size,0) > 3*1048576) throw new Error('Выберите файлы общим размером до 3 МиБ за раз.');
+  state.batchBusy = true;
+  renderBatchResults();
+  const errors = [];
+  try {
+    for (const file of files) {
+      try {
+        const decoded = await decodeBatchFile(file);
+        if (!decoded.text.trim()) throw new Error('Текст не извлечён.');
+        if (state.batch.reduce((sum,doc) => sum + chars(doc.text).length,0) + chars(decoded.text).length > 200000) throw new Error('Суммарный предел пакета — 200 000 знаков.');
+        state.batch.push({id:crypto.randomUUID().replaceAll('-',''),name:file.name.slice(0,255),text:decoded.text,
+          note:(decoded.notes || []).join(' ') || (decoded.guessed ? 'Предположительно Windows-1251. Проверьте текст.' : ''),request_id:null});
+        if (!saveBatch()) throw new Error('Не удалось сохранить пакет в браузере. Освободите место перед проверкой.');
+      } catch (error) { errors.push(`${file.name}: ${error.message}`); }
+    }
+  } finally {
+    state.batchBusy = false;
+    if (state.view === 'batch') renderBatch();
+  }
+  if (errors.length) throw new Error(errors.join('\n'));
+}
+
+async function importSiteToBatch(url, consent) {
+  if (state.batchBusy) throw new Error('Дождитесь текущей операции с пакетом.');
+  if (!consent) throw new Error('Подтвердите загрузку публичных страниц.');
+  const available=5-state.batch.length;
+  if (available<1) throw new Error('В пакете уже пять документов.');
+  if (!saveBatch()) throw new Error('Не удалось сохранить пакет в браузере.');
+  const request_id=crypto.randomUUID().replaceAll('-','');
+  state.batchBusy=true;renderBatchResults();
+  let result;
+  try {
+    result=await api('/api/import-site',{url,site_consent:true,request_id,limit:Math.min(3,available)});
+    for (const page of result.pages) {
+      if (state.batch.reduce((sum,doc)=>sum+chars(doc.text).length,0)+chars(page.text).length>200000) throw new Error('Суммарный предел пакета — 200 000 знаков.');
+      state.batch.push({id:crypto.randomUUID().replaceAll('-',''),name:page.title.slice(0,255),text:page.text,
+        source_url:page.url,note:'Страница '+page.url+'. Собственный сайт исключается при интернет-проверке.',request_id:null});
+      if (!saveBatch()) throw new Error('Не удалось сохранить страницы в браузере.');
+    }
+  } finally {state.batchBusy=false;if(state.view==='batch')renderBatch();}
+  if(result.errors?.length)throw new Error(result.errors.map(item=>item.url+': '+item.message).join('\n'));
+  if(!result.pages.length)throw new Error('Не удалось извлечь доступный текст.');
+}
+
+function renderBatchResults() {
+  if (state.view !== 'batch') return;
+  for (const doc of state.batch) {
+    const field = document.getElementById(`batch-text-${doc.id}`);
+    if (field) field.readOnly = state.batchBusy || Boolean(doc.request_id);
+    const note = document.getElementById(`batch-edit-note-${doc.id}`);
+    if (note) note.textContent = doc.request_id ? 'Текст отправленной проверки зафиксирован. Для изменённой версии добавьте файл заново.' : 'Можно исправить текст до отправки.';
+    const area = document.getElementById(`batch-status-${doc.id}`);
+    if (!area) continue;
+    const entry = doc.request_id && state.modelJobs[doc.request_id];
+    const job = entry?.job;
+    if (!doc.request_id) area.textContent = 'Не отправлен. Проверьте извлечённый текст.';
+    else if (!entry) area.textContent = 'ID сохранён, но данные отправки отсутствуют. Проверьте историю; автоматически новую проверку не запускаем.';
+    else if (job?.result?.report_removed) area.innerHTML = '<p>Отчёт в корзине. <a href="#data">Восстановить →</a></p>';
+    else if (job?.result?.report) area.innerHTML = `<p>Отчёт сохранён. <a href="#check/${encodeURIComponent(job.result.report.id)}">Открыть результат →</a></p>`;
+    else area.textContent = `${entry.context?.batchMode === 'library' ? 'Библиотека' : 'Интернет'} · ${job?.error || entry.watchMessage || job?.stage || (entry.status === 'rejected' ? 'Сервер не принял проверку.' : 'Восстанавливаем состояние…')} ID: ${doc.request_id}`;
+  }
+  const button = document.getElementById('batch-start');
+  if (button) { button.disabled = state.batchBusy || !state.batch.some(doc => !doc.request_id); button.textContent = state.batchBusy ? 'Обрабатываем пакет…' : 'Проверить неотправленные документы'; }
+  for (const id of ['batch-files','batch-mode','batch-clear','batch-site-start','batch-site-url','batch-site-consent']) { const el = document.getElementById(id); if (el) el.disabled = state.batchBusy; }
+  document.querySelectorAll('[data-batch-remove]').forEach(button => {button.disabled = state.batchBusy;});
+}
+
+async function startBatchChecks(mode, consent) {
+  if (state.batchBusy) throw new Error('Пакет уже обрабатывается.');
+  const pending = state.batch.filter(doc => !doc.request_id);
+  if (!pending.length) throw new Error('Нет неотправленных документов.');
+  for (const doc of pending) {
+    if (!doc.text.trim()) throw new Error(`${doc.name}: нет текста.`);
+    if (chars(doc.text).length > checkTextLimit()) throw new Error(`${doc.name}: больше ${checkTextLimit()} знаков. Сократите текст перед проверкой.`);
+  }
+  if (mode === 'internet') {
+    if (!webConfigured()) throw new Error('Интернет-поиск недоступен.');
+    if (!consent) throw new Error('Подтвердите отправку поисковых фрагментов всех документов пакета.');
+    const beta = state.session.beta;
+    if (!beta.owner && pending.length > beta.daily_remaining) throw new Error('В пакете больше документов, чем осталось дневных проверок.');
+    if (pending.length*6 > beta.monthly_remaining) throw new Error('Для всего пакета недостаточно общего поискового остатка. Уменьшите пакет.');
+  } else if (mode !== 'library') throw new Error('Выберите область проверки.');
+  if (!saveBatch()) throw new Error('Не удалось сохранить пакет. Запросы не отправлены.');
+  state.batchBusy = true;
+  renderBatchResults();
+  try {
+    for (const doc of pending) {
+      const id = crypto.randomUUID().replaceAll('-','');
+      const entry = {request_id:id,path:mode === 'internet' ? '/api/web-check' : '/api/library-check',
+        body:{text:doc.text,...(mode === 'internet' ? {internet_consent:true,...(doc.source_url ? {source_url:doc.source_url} : {})} : {})},
+        context:{surface:'batch',batchName:doc.name,batchMode:mode},created_at:new Date().toISOString(),status:'submitting'};
+      doc.request_id=id; state.modelJobs[id]=entry;
+      if (!saveModelJobs() || !saveBatch()) {
+        doc.request_id=null; delete state.modelJobs[id];saveModelJobs();saveBatch();
+        throw new Error('Не удалось сохранить ID документа. Отправка остановлена.');
+      }
+      await submitModelJob(entry);
+      await observeModelJob(entry);
+    }
+  } finally { state.batchBusy = false; renderBatchResults(); }
+}
+
+function renderBatch() {
+  main.innerHTML = heading('Пакет документов','Загрузите до пяти файлов. У каждого текста будет свой отчёт.','','Проверка нескольких текстов') + `
+    <section class="card batch-controls"><label class="file-button">↑ Добавить документы<input id="batch-files" type="file" multiple accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm" aria-label="Добавить документы в пакет"></label>
+    <p>TXT/MD/DOC/DOCX/PDF/ODT/RTF/HTML. До 1 МиБ на файл, до 3 МиБ за загрузку. Сначала извлекаем текст без поиска. Проверьте порядок и полноту текста, особенно в PDF и таблицах.</p>
+    <p class="field-help">Пакет и тексты хранятся в этом браузере. Сервер сохраняет каждый отправленный документ и отчёт. Извлечение DOCX/PDF/ODT/RTF/HTML/DOC выполняется на сервере Истока. Предел одной проверки — 10 000 знаков. <a href="/privacy.html">Подробнее о данных</a></p>
+    <label class="field-label" for="batch-mode">Область проверки</label><select class="field" id="batch-mode"><option value="internet">Интернет</option><option value="library">Моя библиотека</option></select>
+    <label class="consent-row"><input type="checkbox" id="batch-consent">Разрешаю отправить поисковые фрагменты всех документов пакета Tavily и Википедии. Для проверки по библиотеке это согласие не требуется.</label>
+    <p>Проверки идут последовательно. Интернет-пакет использует обычные дневные и общие лимиты, до 6 поисковых запросов на документ. При ошибке пакет останавливается; ID уже отправленного документа сохраняется. После reload автоматически восстанавливаем только статусы, оставшиеся документы запускаете сами.</p>
+    <div class="batch-actions"><button class="button" id="batch-start" type="button">Проверить неотправленные документы</button><button class="text-button" id="batch-clear" type="button">Новый пакет</button></div><p id="batch-error" role="alert"></p></section>
+    <section class="card batch-controls"><h2>Страницы сайта</h2><p>Загрузим выбранную публичную страницу и до двух ссылок на том же сайте. Соблюдаем robots.txt; закрытые страницы, формы входа и адреса с параметрами не поддерживаются. Это ограниченная проверка страниц, полный обход сайта не выполняется.</p><label class="field-label" for="batch-site-url">Адрес публичной страницы</label><input class="field" id="batch-site-url" type="url" placeholder="https://example.org/article"><label class="consent-row"><input id="batch-site-consent" type="checkbox">Подтверждаю, что это публичные страницы без секретных ссылок, и разрешаю Истоку загрузить их текст.</label><p class="field-help">До 2 загрузок в день на пространство, 6 на весь сайт и 30 в месяц. Ошибка также занимает попытку. Загрузка может занять до минуты, поиска она не запускает. Текст страниц остаётся в пакете этого браузера до отправки на проверку. При интернет-проверке исходный сайт исключается из сравнения; это видно в ограничениях отчёта.</p><button class="button secondary" id="batch-site-start" type="button">Добавить страницы в пакет</button><p id="batch-site-error" role="alert"></p></section>
+    <section id="batch-list" aria-label="Документы пакета">${state.batch.map(doc => `<article class="card batch-document"><h2>${escapeHTML(doc.name)}</h2><p class="field-help">${escapeHTML(doc.note || '')}</p><label class="field-label" for="batch-text-${doc.id}">Извлечённый текст</label><textarea class="editor-text" id="batch-text-${doc.id}" ${doc.request_id ? 'readonly' : ''}>${escapeHTML(doc.text)}</textarea><p class="field-help" id="batch-edit-note-${doc.id}">${doc.request_id ? 'Текст отправленной проверки зафиксирован. Для изменённой версии добавьте файл заново.' : 'Можно исправить текст до отправки.'}</p><div id="batch-status-${doc.id}" role="status"></div><button class="text-button" type="button" data-batch-remove="${doc.id}">Убрать из пакета</button></article>`).join('')}</section>`;
+  const showError = error => { const area=document.getElementById('batch-error'); if (area) area.textContent=error.message; else toast(error.message,true); };
+  document.getElementById('batch-files').addEventListener('change', async event => {
+    const files = Array.from(event.target.files);event.target.value='';
+    try { await importBatchFiles(files); } catch(error) { showError(error); }
+  });
+  document.getElementById('batch-site-start').addEventListener('click',async () => {
+    try {await importSiteToBatch(document.getElementById('batch-site-url').value.trim(),document.getElementById('batch-site-consent').checked);}
+    catch(error) {const area=document.getElementById('batch-site-error');if(area)area.textContent=error.message;else toast(error.message,true);}
+  });
+  document.getElementById('batch-start').addEventListener('click', async () => {
+    try { await startBatchChecks(document.getElementById('batch-mode').value,document.getElementById('batch-consent').checked); }
+    catch(error) { showError(error); }
+  });
+  document.getElementById('batch-clear').addEventListener('click', () => {if (!state.batchBusy) {state.batch=[];saveBatch();renderBatch();}});
+  for (const doc of state.batch) document.getElementById(`batch-text-${doc.id}`).addEventListener('input', event => {
+    if (doc.request_id) return;
+    if (state.batchBusy || state.batch.reduce((sum,item) => sum + chars(item === doc ? event.target.value : item.text).length,0) > 200000) {
+      event.target.value=doc.text;
+      showError(new Error('Дождитесь завершения операции; суммарный предел пакета — 200 000 знаков.'));
+      return;
+    }
+    doc.text=event.target.value;
+    if (!saveBatch()) showError(new Error('Не удалось сохранить изменения пакета в браузере.'));
+  });
+  document.querySelectorAll('[data-batch-remove]').forEach(button => button.addEventListener('click', () => {
+    if (state.batchBusy) return;
+    state.batch=state.batch.filter(doc => doc.id !== button.dataset.batchRemove);saveBatch();renderBatch();
+  }));
+  renderBatchResults();
 }
 
 function renderCheck() {
@@ -3262,6 +3449,7 @@ function renderView() {
   const restoreId = savedReport && state[field]?.id !== savedReport[2] ? savedReport[2] : null;
   if (restoreId) state[field] = null;
   if (isSaas() && state.view === 'evaluation') state.view = 'check';
+  if (!isBeta() && state.view === 'batch') state.view = 'check';
   document.body.classList.toggle('home-view', state.view === 'home');
   document.querySelectorAll('[data-view]').forEach(link => {
     const active = link.dataset.view === state.view;
@@ -3272,6 +3460,7 @@ function renderView() {
   document.title = `${viewNames[state.view]} · Исток`;
   if (state.view === 'home') renderHome();
   else if (state.view === 'check') renderCheck();
+  else if (state.view === 'batch') renderBatch();
   else if (state.view === 'sources') renderSources();
   else if (state.view === 'evaluation') renderEvaluation();
   else if (state.view === 'data') renderDataDashboard();
