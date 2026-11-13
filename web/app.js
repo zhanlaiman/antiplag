@@ -1096,24 +1096,57 @@ function documentReading(id) { return fileReadTokens.get(document.getElementById
 
 function wordUnit(count) { const last=count%10, pair=count%100; return pair>=11 && pair<=14 ? 'слов' : last===1 ? 'слово' : last>=2 && last<=4 ? 'слова' : 'слов'; }
 
+const TEXT_FUNCTION_WORDS = new Set('а без бы был была были было быть в вам вас во вот вы да для до его её ее если есть ещё же за и из или им их к как ко ли мы на над нам нас не ни но о об обо он она они оно от по под при про с со так то ты у уже чем что чтобы это я the a an and or in on of to for by with is are was were be it this that these those he she they we you i'.split(' '));
+const TEXT_WORD_PATTERN = /[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:[-'’][\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*/gu;
+function wordForm(word) { return word.normalize('NFKC').toLocaleLowerCase('ru'); }
+function textWordRanges(text, form) {
+  return [...text.matchAll(TEXT_WORD_PATTERN)].filter(match=>wordForm(match[0])===form)
+    .map(match=>({start:match.index,end:match.index+match[0].length}));
+}
+
 function textStatistics(text) {
-  const words = text.match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:[-'’][\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*/gu) || [];
+  const words = text.match(TEXT_WORD_PATTERN) || [];
   const counts = new Map();
-  for (const word of words) { const key=word.normalize('NFKC').toLocaleLowerCase('ru'); counts.set(key,(counts.get(key)||0)+1); }
+  for (const word of words) { const key=wordForm(word); counts.set(key,(counts.get(key)||0)+1); }
+  const rank=(a,b)=>b[1]-a[1] || a[0].localeCompare(b[0],'ru');
+  const functionWordCounts=[...counts].filter(([word])=>TEXT_FUNCTION_WORDS.has(word)).sort(rank);
+  const functionWords=functionWordCounts.reduce((sum,[,count])=>sum+count,0);
+  const content=[...counts].filter(([word])=>/\p{L}/u.test(word) && !TEXT_FUNCTION_WORDS.has(word)).sort(rank);
+  const contentWords=content.reduce((sum,[,count])=>sum+count,0);
+  const repeatedContentWords=content.reduce((sum,[,count])=>sum+count-1,0);
   return { characters:chars(text).length, nonSpaceCharacters:chars(text.replace(/\s/gu,'')).length, words:words.length,
-    frequent:[...counts].filter(([word,count])=>chars(word).length>2 && count>1).sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0],'ru')).slice(0,10),
+    uniqueForms:counts.size, functionWordCounts, functionWords, contentWords, repeatedContentWords,
+    functionWordShare:words.length ? 100*functionWords/words.length : null,
+    repetitionShare:contentWords ? 100*repeatedContentWords/contentWords : null,
+    topContent:content[0] || null, topContentShare:words.length && content.length ? 100*content[0][1]/words.length : null,
+    frequent:[...counts].filter(([word,count])=>chars(word).length>2 && count>1).sort(rank).slice(0,10),
     mixed:[...new Set(words.filter(word=>/\p{Script=Cyrillic}/u.test(word) && /\p{Script=Latin}/u.test(word)))] };
 }
 
 function renderTextStatistics() {
   const area=document.getElementById('text-statistics-content');
   if (!area) return;
-  const stats=textStatistics(state.text);
+  const text=state.text, stats=textStatistics(text);
+  const percent=value=>value===null ? '—' : value.toLocaleString('ru-RU',{maximumFractionDigits:1})+'%';
+  const tile=(value,label)=>`<div class="data-metric"><strong>${escapeHTML(value)}</strong><span>${escapeHTML(label)}</span></div>`;
   area.innerHTML=`<p>${number(stats.characters)} знаков · ${number(stats.nonSpaceCharacters)} без пробельных символов · ${number(stats.words)} ${wordUnit(stats.words)}.</p>
-    <p class="field-help">Частые словоформы без объединения окончаний. Подсчёт выполняется в браузере.</p>
-    ${stats.frequent.length ? `<ul>${stats.frequent.map(([word,count])=>`<li>${escapeHTML(word)} — ${number(count)}</li>`).join('')}</ul>` : '<p>Повторяющихся словоформ длиной от трёх букв нет.</p>'}
+    <div class="data-metrics" aria-label="Состав и повторы слов">${tile(percent(stats.functionWordShare),'Слов из списка служебных')}${tile(percent(stats.repetitionShare),'Повторных вхождений содержательных слов')}${tile(percent(stats.topContentShare),stats.topContent ? `Самая частая форма: ${stats.topContent[0]}` : 'Самая частая содержательная форма')}</div>
+    <p>Разных словоформ: ${number(stats.uniqueForms)}. Частые формы показаны без объединения окончаний. Нажмите на форму, чтобы по очереди выделять её в тексте.</p>
+    ${stats.frequent.length ? `<ul>${stats.frequent.map(([word,count],index)=>`<li><button class="text-button" id="stat-word-${index}" type="button" title="Выделить следующее вхождение">${escapeHTML(word)} — ${number(count)} (${percent(100*count/stats.words)})</button></li>`).join('')}</ul>` : '<p>Повторяющихся словоформ длиной от трёх букв нет.</p>'}
     <p>${stats.mixed.length ? `Смешаны кириллица и латиница: ${stats.mixed.slice(0,10).map(escapeHTML).join(', ')}${stats.mixed.length>10?'…':''}. Проверьте написание.` : 'Слов со смешением кириллицы и латиницы не найдено.'}</p>
-    <p class="field-help">Частота слов не является оценкой плагиата, орфографии или «водности».</p>`;
+    <details><summary>Как посчитаны показатели</summary><p>Служебные: ${number(stats.functionWords)} из ${number(stats.words)} слов по фиксированному списку ниже. Повторы: ${number(stats.repeatedContentWords)} повторных вхождений из ${number(stats.contentWords)} слов с буквами вне этого списка; первое вхождение каждой формы не считается повтором. Чистые числа в показатель повторов не входят. Плотность самой частой формы — её число вхождений, делённое на все слова.</p><p>Эти собственные показатели помогают заметить повторы. Они не определяют смысл, полезность текста, требования поисковиков или показатели других сервисов. Служебные слова естественны для речи: удалять их по одному проценту не следует.</p><details><summary>Открытый список служебных слов</summary><p>${escapeHTML([...TEXT_FUNCTION_WORDS].sort().join(', '))}</p></details></details>
+    <p class="field-help">Подсчёт выполняется в браузере и не является оценкой плагиата, орфографии или качества текста.</p>`;
+  stats.frequent.forEach(([form],index)=>{
+    let next=0;
+    document.getElementById(`stat-word-${index}`)?.addEventListener('click',()=>{
+      const field=document.getElementById('check-text');
+      if (!field || field.value!==text || state.text!==text) return;
+      const ranges=textWordRanges(text,form);
+      if (!ranges.length) return;
+      const range=ranges[next++%ranges.length];field.focus();field.setSelectionRange?.(range.start,range.end);
+      field.scrollIntoView?.({block:'center',behavior:'smooth'});
+    });
+  });
 }
 
 function proofreaderHTML(surface) {
@@ -1753,7 +1786,7 @@ function renderCheck() {
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
             <span>${isBeta() ? state.session.beta.owner ? 'До 10 000 знаков · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
-          <details class="card text-statistics"><summary>Статистика текста и повторы</summary><div id="text-statistics-content"></div></details>
+          <details class="card text-statistics"><summary>SEO-анализ: статистика и повторы</summary><div id="text-statistics-content"></div></details>
           ${proofreaderHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска страниц-источников.</label>

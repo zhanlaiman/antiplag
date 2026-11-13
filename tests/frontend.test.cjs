@@ -1480,6 +1480,35 @@ test('local statistics counts Unicode words and flags mixed scripts without chan
   assert.equal(app.evaluate('state.text'),'Кофе кофе коФе. стoл 😀');
 });
 
+test('text composition uses explicit denominators and leaves absent repetition undefined', async () => {
+  const app=fixture();await settle();
+  const result=text=>{app.expose('sampleText',text);return JSON.parse(JSON.stringify(app.evaluate('textStatistics(sampleText)')));};
+  const mixed=result('И и в кофе КОФЕ 123');
+  assert.equal(mixed.words,6);assert.equal(mixed.uniqueForms,4);
+  assert.equal(mixed.functionWords,3);assert.equal(mixed.functionWordShare,50);
+  assert.equal(mixed.contentWords,2);assert.equal(mixed.repeatedContentWords,1);assert.equal(mixed.repetitionShare,50);
+  assert.equal(mixed.topContentShare,100*2/6);
+  for (const sample of ['', '42 42 😀', 'И и в']) {
+    const stats=result(sample);assert.equal(stats.repetitionShare,null);assert.equal(stats.topContentShare,null);
+  }
+  assert.equal(result('').functionWordShare,null);
+  assert.equal(result('И и в').functionWordShare,100);
+  const normalized=result('CAFÉ cafe\u0301');
+  assert.equal(normalized.uniqueForms,1);assert.equal(normalized.repetitionShare,50);
+});
+
+test('frequency selection cycles through UTF16 ranges without editing or sending the text', async () => {
+  const calls=[];const app=fixture({fetch:async url=>{calls.push(url);}});await settle();
+  const field=app.element('check-text');field.value='😀 Кофе и кофе 123';await field.emit('input');
+  const before=calls.length, selections=[];field.setSelectionRange=(start,end)=>selections.push([start,end]);
+  const button=app.element('stat-word-0');assert.ok(button);
+  await button.emit('click');await button.emit('click');await button.emit('click');
+  assert.deepEqual(selections,[[3,7],[10,14],[3,7]]);
+  assert.equal(field.value,'😀 Кофе и кофе 123');assert.equal(app.evaluate('state.text'),field.value);
+  assert.equal(calls.length,before);
+  field.value='Новый черновик';await button.emit('click');assert.equal(selections.length,3);
+});
+
 test('document processing disables checking and oversized uploads never leave the browser', async () => {
   const delayed=deferred();let imports=0;
   const app=fixture({view:'home',fetch:async url=>{
