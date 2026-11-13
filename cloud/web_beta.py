@@ -186,8 +186,10 @@ class BetaRuntime:
         path=self.root/'tenants'/guest/'istok.sqlite3'
         if not path.exists():return {'sources':self.default_source_count,'reports':0}
         with closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)) as db:
-            return {'sources':db.execute("SELECT count(*) FROM sources WHERE NOT EXISTS (SELECT 1 FROM trash WHERE kind='source' AND trash.id=sources.id)").fetchone()[0],
-                'reports':db.execute("SELECT count(*) FROM records WHERE kind='report' AND NOT EXISTS (SELECT 1 FROM trash WHERE kind='report' AND trash.id=records.id)").fetchone()[0]}
+            has_trash=bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trash'").fetchone())
+            sources="SELECT count(*) FROM sources"+(" WHERE NOT EXISTS (SELECT 1 FROM trash WHERE kind='source' AND trash.id=sources.id)" if has_trash else '')
+            reports="SELECT count(*) FROM records WHERE kind='report'"+(" AND NOT EXISTS (SELECT 1 FROM trash WHERE kind='report' AND trash.id=records.id)" if has_trash else '')
+            return {'sources':db.execute(sources).fetchone()[0],'reports':db.execute(reports).fetchone()[0]}
 
     def owner_identity(self,headers):
         try:

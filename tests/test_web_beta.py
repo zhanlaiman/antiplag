@@ -157,6 +157,17 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(self.http('/api/session',cookie=cookie)[1]['beta']['daily_checks'],6)
         self.assertEqual(self.http('/api/web-check-jobs',{'request_id':'f'*32,'text':TEXT,'internet_consent':True},cookie)[0],429)
 
+    def test_status_reads_legacy_space_without_trash_migration_or_new_admission(self):
+        import sqlite3
+        cookie,guest=self.guest();path=self.root/'tenants'/guest/'istok.sqlite3';path.parent.mkdir(parents=True)
+        with sqlite3.connect(path) as db:
+            db.executescript("CREATE TABLE sources(id TEXT);INSERT INTO sources VALUES ('old-source');CREATE TABLE records(kind TEXT);INSERT INTO records VALUES ('report');")
+        status,result,_=self.http('/api/status',cookie=cookie)
+        self.assertEqual(status,200)
+        self.assertEqual(result['counts'],{'sources':1,'reports':1})
+        with sqlite3.connect(path) as db:self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='trash'").fetchone())
+        with self.service.beta.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],0)
+
     def test_cookieless_status_polls_do_not_allocate_tenants_or_consume_admissions(self):
         for _ in range(110):
             self.assertEqual(self.http('/api/session')[0],200)
