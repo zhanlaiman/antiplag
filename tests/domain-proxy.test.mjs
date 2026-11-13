@@ -10,6 +10,8 @@ test('fixed upstream preserves path, query, cookies and streams a private respon
     assert.equal(options.headers.get('Cookie'), 'istok_beta=owned');
     for (const name of ['Host', 'X-Forwarded-Host', 'Forwarded', 'CF-Connecting-IP']) assert.equal(options.headers.get(name), null);
     assert.equal(options.redirect, 'manual');
+    assert.equal(options.cache, 'no-store');
+    assert.equal(options.cf, undefined);
     return new Response('private report', {headers: {'Set-Cookie': 'istok_beta=signed; Secure; HttpOnly; SameSite=Lax', 'Cache-Control': 'public', 'Access-Control-Allow-Origin': '*'}});
   });
   assert.equal(await result.text(), 'private report');

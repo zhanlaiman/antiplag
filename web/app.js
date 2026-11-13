@@ -4,7 +4,7 @@ const DRAFT_KEY = 'istok.draft.v1';
 const MODEL_KEY = 'istok.model.v1';
 const MODAL_MODEL_KEY = 'istok.model.modal.v1';
 const MODEL_JOBS_KEY = 'istok.model-jobs.v1';
-const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate', '/api/web-check'];
+const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate', '/api/web-check', '/api/correction'];
 const RETRIEVAL_JOBS_KEY = 'istok.retrieval-jobs.v1';
 const CANDIDATE_JOBS_KEY = 'istok.candidate-jobs.v1';
 const REVIEW_DRAFTS_KEY = 'istok.review-drafts.v1';
@@ -654,6 +654,7 @@ function publicReportReady(reportId = state.report?.id) {
 }
 
 function modelJobTitle(entry) {
+  if (entry.path === '/api/correction') return 'Предложения корректора Qwen';
   if (entry.path === '/api/web-check') return 'Проверка уникальности в интернете';
   if (entry.path === '/api/evaluate') return 'Оценка на учебных примерах';
   if (entry.path.includes('rewrite')) return entry.body.mode === 'quote' ? 'Оформление цитаты' : 'Предложение правки';
@@ -690,6 +691,8 @@ function candidateHasModelJob(retrievalId, candidateId) {
 function modelJobResultHTML(entry) {
   const result = entry.job?.result;
   if (!result) return '';
+  if (result.correction_removed) return '<p>Предложения в корзине. <a href="#data">Восстановить →</a></p>';
+  if (result.correction) return '<p>Предложения сохранены. Откройте «Правописание и формы слов → Грамматика Qwen» у исходного текста. <a href="#data">Архив и корзина →</a></p>';
   if (result.report_removed) return '<p>Отчёт в корзине. <a href="#data">Восстановить в панели данных →</a></p>';
   if (result.report) {
     const report = result.report;
@@ -722,6 +725,7 @@ function modelJobResultHTML(entry) {
 }
 
 function renderModelJobs() {
+  Object.values(state.modelJobs).filter(entry => entry.path === '/api/correction').forEach(renderAICorrection);
   const panel = document.querySelector('#model-jobs-panel');
   if (!panel) return;
   if (!privateAccess() || state.view === 'home') { panel.hidden = true; updateHomeControls(); return; }
@@ -754,7 +758,7 @@ function renderModelJobs() {
       ${missing ? `<p class="inline-error">${escapeHTML(entry.submission_error?.message || entry.watchMessage || 'Не удалось подтвердить отправку задания. Автоматического повторного запуска нет.')}</p>` : ''}
       ${status === 'complete' ? `<details id="model-job-result-${entry.request_id}"><summary id="model-job-summary-${entry.request_id}">Посмотреть сохранённый результат</summary>${modelJobResultHTML(entry)}</details>` : ''}
       <div class="action-row">
-        ${active && job?.id ? `<button class="text-button" id="model-job-cancel-${entry.request_id}" type="button" ${status === 'cancelling' ? 'disabled' : ''}>${status === 'cancelling' ? 'Останавливаем после текущего ответа' : 'Остановить'}</button>` : ''}
+        ${active && job?.id && entry.path !== '/api/correction' ? `<button class="text-button" id="model-job-cancel-${entry.request_id}" type="button" ${status === 'cancelling' ? 'disabled' : ''}>${status === 'cancelling' ? 'Останавливаем после текущего ответа' : 'Остановить'}</button>` : ''}
         ${missing ? `<button class="button small secondary" id="model-job-retry-${entry.request_id}" type="button">Повторить отправку этого задания</button>` : ''}
         ${!active ? `<button class="text-button" id="model-job-dismiss-${entry.request_id}" type="button">Убрать уведомление</button>` : ''}
       </div>
@@ -807,7 +811,9 @@ async function submitModelJob(entry) {
   }
   renderModelJobs();
   try {
-    const { job } = entry.path === '/api/web-check'
+    const { job } = entry.path === '/api/correction'
+      ? await api('/api/correction-jobs', { request_id: entry.request_id, ...entry.body })
+      : entry.path === '/api/web-check'
       ? await api('/api/web-check-jobs', { request_id: entry.request_id, ...entry.body })
       : await api('/api/model-jobs', { request_id: entry.request_id, path: entry.path, body: entry.body });
     if (job.id !== entry.request_id) throw new Error('Сервер вернул неожиданный идентификатор задания.');
@@ -835,14 +841,14 @@ async function observeModelJob(entry, restored = false) {
         const { job } = await readJobWithRetry(entry.request_id, message => {
           entry.watchMessage = message;
           renderModelJobs();
-        });
+        }, entry.path === '/api/correction' ? '/api/correction-jobs' : '/api/jobs');
         entry.job = job;
         entry.status = job.status;
         entry.watchMessage = '';
         saveModelJobs();
         renderModelJobs();
         if (!ACTIVE_JOB_STATUSES.includes(job.status)) break;
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, entry.path === '/api/correction' ? 3000 : 1000));
       }
     } catch (error) {
       if (authError(error)) {
@@ -1103,10 +1109,63 @@ function renderTextStatistics() {
 }
 
 function proofreaderHTML(surface) {
-  return `<details class="proofreader"><summary>Правописание и формы слов</summary><p class="field-help">Русский словарь и простые правила, без нейросети. Текст обрабатывается на сервере Истока, без внешнего API и без поисковых запросов. До 10 000 знаков. <a href="/dictionary-license.txt" target="_blank" rel="noopener">Словарь LibreOffice / Hunspell</a>.</p><button class="button secondary small" id="proofread-${surface}" type="button">Проверить правописание</button><p id="proofread-status-${surface}" class="field-help" role="status"></p><div id="proofread-result-${surface}"></div></details>`;
+  return `<details class="proofreader"><summary>Правописание и формы слов</summary><p class="field-help">Русский словарь и простые правила, без нейросети. Текст обрабатывается на сервере Истока, без внешнего API и без поисковых запросов. До 10 000 знаков. <a href="/dictionary-license.txt" target="_blank" rel="noopener">Словарь LibreOffice / Hunspell</a>.</p><button class="button secondary small" id="proofread-${surface}" type="button">Проверить правописание</button><p id="proofread-status-${surface}" class="field-help" role="status"></p><div id="proofread-result-${surface}"></div>${state.session?.beta?.ai_correction?.enabled ? `<details class="ai-proofreader"><summary>Грамматика Qwen</summary><p class="field-help">Нейросеть предлагает правки, которые вы проверяете и применяете по одной. До 3000 знаков; до 2 запусков на пространство в день, 3 на сайт в день и 10 в месяц. Первый запуск может занять несколько минут. Неудачный запуск тоже расходует попытку; автоматического повтора нет.</p><label class="consent-row"><input type="checkbox" id="ai-consent-${surface}">Разрешаю обработать весь фрагмент моделью Qwen на сервере Modal и сохранить предложения в моём пространстве. Не отправляю конфиденциальный текст.</label><button class="button secondary small" id="ai-start-${surface}" type="button">Предложить правки с Qwen</button><p id="ai-status-${surface}" class="field-help" role="status"></p><div id="ai-result-${surface}"></div></details>` : ''}</details>`;
+}
+
+function renderAICorrection(entry) {
+  const surface = entry.context?.surface;
+  const area = document.getElementById(`ai-result-${surface}`);
+  const status = document.getElementById(`ai-status-${surface}`);
+  const field = document.getElementById(surface === 'home' ? 'home-text' : 'check-text');
+  if (!area || !status || !field) return;
+  status.textContent = entry.watchMessage || entry.job?.error || entry.job?.stage || 'Восстанавливаем состояние Qwen…';
+  const record = entry.job?.result?.correction;
+  if (entry.job?.result?.correction_removed) { area.innerHTML = '<p>Предложения в корзине. <a href="#data">Восстановить →</a></p>'; return; }
+  if (!record) {
+    area.innerHTML = ['missing', 'delivery_unknown', 'rejected'].includes(entry.status) ? '<button type="button" class="text-button" data-ai-retry>Восстановить доставку с прежним ID</button>' : '';
+    area.querySelector('[data-ai-retry]')?.addEventListener('click', event => busy(event.currentTarget, 'Восстанавливаем', async () => { await submitModelJob(entry); await observeModelJob(entry); }));
+    return;
+  }
+  const result = record.result;
+  const stale = field.value !== record.text;
+  status.textContent = `Предложений: ${number(result.issues.length)}. ${stale ? 'Текст изменён; эти правки недоступны.' : 'Ни одна правка ещё не применена автоматически.'}`;
+  area.innerHTML = `<p class="field-help">${escapeHTML(result.limitations)}</p>${result.issues.map((issue, index) => `<article class="proofread-issue"><p><mark>${escapeHTML(issue.original)}</mark> → ${escapeHTML(issue.suggestions[0])}</p><button class="button secondary small" data-ai-choice="${index}" type="button" ${stale ? 'disabled' : ''}>Применить эту правку</button></article>`).join('')}${!result.issues.length ? '<p>Qwen не предложила правок. Это не гарантия отсутствия ошибок.</p>' : ''}<p class="field-help">Результат доступен в личном архиве и корзине. Сохранённый отчёт о совпадениях не меняется.</p>`;
+  area.querySelectorAll('[data-ai-choice]').forEach(button => button.addEventListener('click', () => {
+    const issue = result.issues[Number(button.dataset.aiChoice)];
+    if (!field.isConnected || field.value !== record.text || field.value.slice(issue.start, issue.end) !== issue.original) { renderAICorrection(entry); toast('Текст изменён. Для него нужны новые предложения.', true); return; }
+    const replacement = issue.suggestions[0];
+    field.value = field.value.slice(0, issue.start) + replacement + field.value.slice(issue.end);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.focus(); field.setSelectionRange?.(issue.start, issue.start + replacement.length);
+    renderAICorrection(entry);
+  }));
+}
+
+function bindAICorrection(surface, field) {
+  const button = document.getElementById(`ai-start-${surface}`);
+  if (!button) return;
+  const relevant = () => Object.values(state.modelJobs).filter(entry => entry.path === '/api/correction' && entry.context?.surface === surface);
+  const previous = relevant().slice(-1)[0];
+  if (previous) renderAICorrection(previous);
+  field.addEventListener('input', () => { const latest = relevant().slice(-1)[0]; if (latest) renderAICorrection(latest); });
+  button.addEventListener('click', () => busy(button, 'Qwen проверяет фрагмент', async () => {
+    if (documentReading(field.id)) throw new Error('Дождитесь извлечения текста документа.');
+    const text = field.value;
+    if (!text.trim() || chars(text).length > 3000) throw new Error('Для Qwen нужен фрагмент от 1 до 3000 знаков.');
+    if (!document.getElementById(`ai-consent-${surface}`).checked) throw new Error('Подтвердите обработку фрагмента Qwen в Modal.');
+    let entry = relevant().findLast(item => item.body.text === text);
+    if (!entry) {
+      const request_id = crypto.randomUUID().replaceAll('-', '');
+      entry = {request_id, path:'/api/correction', body:{text, ai_consent:true}, context:{surface}, created_at:new Date().toISOString(), status:'submitting'};
+      state.modelJobs[request_id] = entry;
+      await submitModelJob(entry);
+    }
+    await observeModelJob(entry);
+  }));
 }
 
 function bindProofreader(surface, field) {
+  bindAICorrection(surface, field);
   const button = document.getElementById(`proofread-${surface}`);
   const area = document.getElementById(`proofread-result-${surface}`);
   const status = document.getElementById(`proofread-status-${surface}`);
@@ -1365,7 +1424,7 @@ function renderHome() {
         <div class="landing-faq-list">
           <details open><summary>С чем сравнивается мой текст?<span aria-hidden="true">+</span></summary><p>С доступными страницами в интернете. Отдельно можно сравнить материал со своей библиотекой. Закрытые коллекции вузов в интернет-проверку не входят.</p></details>
           <details><summary>Что означает процент уникальности?<span aria-hidden="true">+</span></summary><p>Это доля слов без найденных дословных совпадений на прочитанных страницах. Если проверка неполная, мы покажем ограничение, а окончательный процент останется неустановленным.</p></details>
-          <details><summary>Какие файлы можно загрузить?<span aria-hidden="true">+</span></summary><p>Доступны TXT, Markdown, DOCX и текстовый PDF. DOCX/PDF до 1 МиБ обрабатываются на сервере Истока без запуска поиска; до 40 страниц PDF, без OCR. Проверьте извлечённый текст. Старые DOC, ODT, RTF и сканы пока не поддерживаются.</p></details>
+          <details><summary>Какие файлы можно загрузить?<span aria-hidden="true">+</span></summary><p>Доступны TXT, Markdown, DOC, DOCX, ODT, RTF, HTML и текстовый PDF. Документы до 1 МиБ обрабатываются без запуска поиска; PDF — до 40 страниц, без OCR. Встроенные объекты не выполняются. Проверьте извлечённый текст перед отправкой; сканы без текстового слоя не поддерживаются.</p></details>
           <details><summary>Что происходит с текстом после проверки?<span aria-hidden="true">+</span></summary><p>Черновик сохраняется в вашем браузере, а результат — в истории. Для поиска источников короткие фразы из текста передаются внешним поисковым сервисам только после вашего согласия.</p></details>
           <details id="home-scope"><summary>Какие ограничения есть у проверки?<span aria-hidden="true">+</span></summary><p>Закрытые сайты, переводы и глубокие пересказы могут остаться незамеченными. За проверку выполняется до <strong data-count="${maxQueries}" aria-hidden="true">${maxQueries}</strong><span class="sr-only">${maxQueries}</span> поисковых запросов и до <strong data-count="${maxUrls}" aria-hidden="true">${maxUrls}</strong><span class="sr-only">${maxUrls}</span> попыток чтения страниц. Исток сохраняет найденные совпадения и показывает недоступные источники.</p></details>
         </div>
@@ -1374,8 +1433,8 @@ function renderHome() {
       <footer class="home-footer"><a class="home-brand" href="#home" data-home-scroll="home-top">исток<span class="home-brand-dot">.</span></a><span>У каждого совпадения есть источник</span><div><a href="#history">История</a><a href="#check">Рабочее пространство ↗</a></div></footer>
     </div>`;
   const field = document.querySelector('#home-text');
-  bindProofreader('home', field);
   field.value = state.homeText;
+  bindProofreader('home', field);
   document.querySelector('#home-consent').checked = state.homeConsent;
   field.addEventListener('input', () => {
     state.homeText = field.value;
@@ -1539,8 +1598,8 @@ function renderCheck() {
     </div>
     <section class="report-section" id="report-area" aria-live="polite"></section>`;
   const textarea = document.querySelector('#check-text');
-  bindProofreader('check', textarea);
   textarea.value = state.text;
+  bindProofreader('check', textarea);
   textarea.addEventListener('input', () => {
     saveDraft(textarea.value);
     updateCharacterCount();
@@ -2022,11 +2081,11 @@ function updateRetrievalJobStatus(reportId) {
   label.textContent = (job.stage || 'Ищем фрагменты') + progress;
 }
 
-async function readJobWithRetry(jobId, onRetry) {
+async function readJobWithRetry(jobId, onRetry, prefix = '/api/jobs') {
   let retries = 0;
   while (true) {
     try {
-      return await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+      return await api(`${prefix}/${encodeURIComponent(jobId)}`);
     } catch (error) {
       if (error.status === 404) {
         error.message = 'Задание больше недоступно. Возможно, приложение было перезапущено. Сохранённые результаты остаются доступны.';
@@ -2879,13 +2938,14 @@ async function renderDataDashboard(filters = {}) {
     main.innerHTML = heading('Мои данные', 'Отчёты, источники и корзина вашего пространства.', '', 'Панель управления') + `
       <section class="data-metrics" aria-label="Личная статистика">${tile(data.totals.reports, 'Отчётов, включая корзину')}${tile(data.totals.sources, 'Источников, включая корзину')}${tile(data.totals.trashed, 'Записей в корзине')}</section>
       <section class="card data-controls"><div><h2>Резервная копия</h2><p>ZIP содержит все ваши отчёты, тексты источников, отметки и корзину. Храните архив в безопасном месте.</p><a class="button secondary" href="/api/data-export" download="istok-personal-data.zip">↓ Скачать мои данные</a></div><p class="field-help">Корзина скрывает запись, но сохраняет её для восстановления. Она не освобождает место и квоту проверок. Автоматической очистки нет. Черновики в браузере в архив не входят.</p></section>
-      <section class="card data-records"><div class="data-toolbar"><h2>Записи</h2><label>Найти<input id="data-query" type="search" placeholder="Текст, название или адрес"></label><label>Показать<select id="data-kind"><option value="all">Все записи</option><option value="report">Отчёты</option><option value="source">Источники</option><option value="trash">Корзина</option></select></label></div><p class="field-help">На экране — до ${number(data.listed_reports_limit)} последних отчётов. В архив входят все.</p><div id="data-list"></div><p id="data-list-status" class="field-help" role="status"></p></section>
+      <section class="card data-records"><div class="data-toolbar"><h2>Записи</h2><label>Найти<input id="data-query" type="search" placeholder="Текст, название или адрес"></label><label>Показать<select id="data-kind"><option value="all">Все записи</option><option value="report">Отчёты</option><option value="source">Источники</option><option value="correction">Предложения Qwen</option><option value="trash">Корзина</option></select></label></div><p class="field-help">На экране — до ${number(data.listed_reports_limit)} последних отчётов и предложений Qwen. В архив входят все.</p><div id="data-list"></div><p id="data-list-status" class="field-help" role="status"></p></section>
       <section class="card data-dictionary"><details><summary>Мой словарь корректора</summary><p class="field-help">Имена и термины, которые словарь пропускает при проверке. До 2000 слов. Удалённое слово можно снова добавить.</p><form id="dictionary-form" class="data-toolbar"><label>Добавить слово<input id="dictionary-word" maxlength="40" required autocomplete="off"></label><button id="dictionary-add" class="button secondary small" type="submit">Добавить</button></form><div id="dictionary-list"><p>Загружаем словарь…</p></div></details></section>
       ${state.session?.beta?.owner ? '<section class="card" id="owner-statistics"><h2>Статистика сайта</h2><p>Загружаем сводные числа…</p></section><section class="card data-api" id="api-key-manager"><h2>Доступ через API</h2><p>Загружаем ключи…</p></section>' : ''}`;
     document.querySelector('#data-query').value = typeof filters.query === 'string' ? filters.query : '';
-    document.querySelector('#data-kind').value = ['all', 'report', 'source', 'trash'].includes(filters.kind) ? filters.kind : 'all';
+    document.querySelector('#data-kind').value = ['all', 'report', 'source', 'correction', 'trash'].includes(filters.kind) ? filters.kind : 'all';
     let entries = [...data.reports.map(item => ({ ...item, kind: 'report', label: item.preview || 'Отчёт без текста' })),
-      ...data.sources.map(item => ({ ...item, kind: 'source', label: item.title }))];
+      ...data.sources.map(item => ({ ...item, kind: 'source', label: item.title })),
+      ...(data.corrections || []).map(item => ({...item, kind:'correction', label:item.preview || 'Предложения Qwen'}))];
     function draw() {
       if (!current()) return;
       const query = document.querySelector('#data-query').value.trim().toLocaleLowerCase('ru');
@@ -2894,7 +2954,7 @@ async function renderDataDashboard(filters = {}) {
         && `${item.label} ${item.url || ''}`.toLocaleLowerCase('ru').includes(query));
       document.querySelector('#data-list').innerHTML = selected.length ? selected.map(item => {
         const index = entries.indexOf(item);
-        return `<article class="data-row"><div><small>${item.kind === 'report' ? 'Отчёт' : 'Источник'} · ${escapeHTML(date(item.created_at))}${item.deleted_at ? ' · в корзине' : ''}</small><h3>${escapeHTML(item.label)}</h3>${item.url ? `<p>${escapeHTML(item.url)}</p>` : ''}</div><div class="data-row-actions">${item.kind === 'report' && !item.deleted_at ? `<a class="button secondary small" href="#check/${encodeURIComponent(item.id)}">Открыть</a>` : ''}<button class="text-button" type="button" data-lifecycle-index="${index}">${item.deleted_at ? 'Восстановить' : 'В корзину'}</button></div></article>`;
+        return `<article class="data-row"><div><small>${item.kind === 'report' ? 'Отчёт' : item.kind === 'correction' ? 'Предложения Qwen' : 'Источник'} · ${escapeHTML(date(item.created_at))}${item.deleted_at ? ' · в корзине' : ''}</small><h3>${escapeHTML(item.label)}</h3>${item.url ? `<p>${escapeHTML(item.url)}</p>` : ''}</div><div class="data-row-actions">${item.kind === 'report' && !item.deleted_at ? `<a class="button secondary small" href="#check/${encodeURIComponent(item.id)}">Открыть</a>` : ''}${item.kind === 'correction' && !item.deleted_at ? `<a class="button secondary small" href="/api/corrections/${encodeURIComponent(item.id)}" download="istok-correction-${item.id}.json">Скачать JSON</a>` : ''}<button class="text-button" type="button" data-lifecycle-index="${index}">${item.deleted_at ? 'Восстановить' : 'В корзину'}</button></div></article>`;
       }).join('') : '<p class="subtle">Таких записей нет.</p>';
       document.querySelector('#data-list-status').textContent = `Показано: ${number(selected.length)}`;
       document.querySelectorAll('[data-lifecycle-index]').forEach(button => button.addEventListener('click', () => busy(button, 'Сохраняем', async () => {
@@ -2902,6 +2962,12 @@ async function renderDataDashboard(filters = {}) {
         const action = item.deleted_at ? 'restore' : 'trash';
         const filters = { query: document.querySelector('#data-query').value, kind: document.querySelector('#data-kind').value };
         await api(`/api/data/${item.kind}/${encodeURIComponent(item.id)}/${action}`, {});
+        if (action === 'trash' && item.kind === 'correction') {
+          for (const entry of Object.values(state.modelJobs)) {
+            if (entry.job?.result?.correction?.id === item.id) entry.job.result = {correction_removed:true, correction_id:item.id};
+          }
+          renderModelJobs();
+        }
         // Clear cached views of a removed report; keep the user's editor draft.
         if (action === 'trash' && item.kind === 'report') {
           if (state.report?.id === item.id) state.report = null;

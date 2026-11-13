@@ -1568,3 +1568,24 @@ test('beta library reports and citation formatting need no model or closed retri
   assert.equal(app.evaluate('state.text'), '🙂 «Точный источник»\n\nИсточник: Авторский источник — https://example.org.');
   assert.equal(app.evaluate('state.report'), null);
 });
+
+test('Qwen proposals apply one grounded UTF-16 edit and reject a later draft', async () => {
+  const app = fixture({fetch:url=>url==='/api/session' ? json({mode:'local',beta:{id:'guest',ai_correction:{enabled:true}}}) : undefined}); await settle();
+  const original = '🙂 Он хочет учится.';
+  const field = app.element('check-text'); field.value = original; await field.emit('input');
+  app.expose('correctionFixture', {context:{surface:'check'},job:{status:'complete',result:{correction:{id:'a'.repeat(32),text:original,result:{limitations:'Проверьте предложения.',issues:[{start:12,end:18,original:'учится',suggestions:['учиться']}]}}}}});
+  app.expose('originalFixture', original);
+  app.evaluate('state.report={text:originalFixture,stats:{similarity_percent:17}}');
+  const choice = new FixtureElement(app.document); choice.dataset.aiChoice = '0';
+  const area = app.element('ai-result-check');
+  area.querySelectorAll = selector => selector === '[data-ai-choice]' ? [choice] : [];
+  app.evaluate('renderAICorrection(correctionFixture)');
+  await choice.emit('click');
+  assert.equal(field.value, '🙂 Он хочет учиться.');
+  assert.equal(app.evaluate('state.report.text'), original);
+  assert.equal(app.evaluate('state.report.stats.similarity_percent'), 17);
+  assert.match(area.innerHTML, /disabled/);
+  field.value = 'Новый авторский текст'; await field.emit('input'); await choice.emit('click');
+  assert.equal(field.value, 'Новый авторский текст');
+  assert.match(app.element('ai-status-check').textContent, /Текст изменён/);
+});

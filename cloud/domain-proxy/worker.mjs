@@ -55,7 +55,9 @@ export async function proxy(request, fetchUpstream = fetch) {
   try {
     upstream = await fetchUpstream(target.href, {
       method: request.method, headers, body, redirect: 'manual',
-      cf: {cacheTtl: 0, cacheEverything: false},
+      // cacheTtl:0 still enters Cloudflare's cache and strips Set-Cookie.
+      // Request-level no-store bypasses that cache, including existing entries.
+      cache: 'no-store',
     });
   } catch {
     return reject('Исток временно недоступен. Повторите открытие страницы; отправленную проверку восстановите по её ID.', 502);

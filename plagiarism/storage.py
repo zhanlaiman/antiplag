@@ -58,6 +58,9 @@ class Store(DataManagement):
                     kind TEXT NOT NULL CHECK(kind IN ('report','source')), id TEXT NOT NULL,
                     deleted_at TEXT NOT NULL, PRIMARY KEY(kind,id)
                 );
+                CREATE TABLE IF NOT EXISTS correction_trash (
+                    id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS dictionary_words (
                     word TEXT PRIMARY KEY, created_at TEXT NOT NULL
                 );

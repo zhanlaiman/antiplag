@@ -157,6 +157,78 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(self.http('/api/session',cookie=cookie)[1]['beta']['daily_checks'],6)
         self.assertEqual(self.http('/api/web-check-jobs',{'request_id':'f'*32,'text':TEXT,'internet_consent':True},cookie)[0],429)
 
+    def test_optional_correction_is_isolated_replayed_exported_and_restorable_without_search(self):
+        from hashlib import sha256
+        from plagiarism.ai_proofreading import parse_response
+        from plagiarism.correction_jobs import internal_id
+        from zipfile import ZipFile
+        calls=[]
+        def corrector(text,store,identifier,progress):
+            calls.append(identifier)
+            return parse_response(text,{'done':True,'message':{'content':json.dumps({'edits':[{'original':'учится','replacement':'учиться','reason':'Тестовое объяснение.','kind':'grammar'}]})}})
+        self.service.beta.corrector=corrector
+        alice,guest=self.guest();bob,_=self.guest();identifier='6'*32
+        body={'request_id':identifier,'text':'🙂 Он хочет учится.','ai_consent':True}
+        before=self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining']
+        self.assertEqual(self.http('/api/correction-jobs',{**body,'ai_consent':False},alice)[0],400)
+        self.assertEqual(self.http('/api/correction-jobs',{**body,'text':'x'*3001},alice)[0],400)
+        self.assertEqual(self.http('/api/correction-jobs',body,alice,origin=None)[0],403)
+        self.assertEqual(self.http('/api/correction-quota',cookie=alice)[1]['monthly_remaining'],10)
+        self.assertEqual(self.http('/api/correction-jobs',body,alice)[0],200)
+        for _ in range(100):
+            job=self.http('/api/correction-jobs/'+identifier,cookie=alice)[1]['job']
+            if job['status'] in {'complete','failed'}:break
+            time.sleep(.01)
+        self.assertEqual(job['status'],'complete',job);self.assertEqual(job['id'],identifier)
+        record=job['result']['correction'];path='/api/corrections/'+record['id']
+        self.assertEqual(self.http(path,cookie=alice)[1]['correction'],record)
+        connection=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
+        connection.request('GET',path,headers={'Host':'beta.example','Cookie':alice})
+        response=connection.getresponse()
+        self.assertEqual(response.getheader('Content-Disposition'),f'attachment; filename="istok-correction-{record["id"]}.json"')
+        self.assertEqual(json.loads(response.read())['correction'],record)
+        connection.close()
+        self.assertEqual(self.http(path,cookie=bob)[0],404)
+        self.assertEqual(self.http('/api/correction-jobs/'+identifier,cookie=bob)[0],404)
+        self.assertEqual(self.http('/api/jobs/'+internal_id(guest,identifier),cookie=alice)[0],404)
+        self.assertEqual(self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining'],before)
+        self.assertEqual(self.http('/api/data',cookie=alice)[1]['corrections'][0]['id'],record['id'])
+        trash='/api/data/correction/'+record['id']+'/trash';restore=trash.replace('/trash','/restore')
+        self.assertEqual(self.http(trash,{},bob)[0],404)
+        self.assertEqual(self.http(trash,{},alice)[0],200)
+        self.assertEqual(self.http(path,cookie=alice)[0],404)
+        self.assertTrue(self.http('/api/correction-jobs/'+identifier,cookie=alice)[1]['job']['result']['correction_removed'])
+        self.assertTrue(self.http('/api/correction-jobs',body,alice)[1]['job']['result']['correction_removed'])
+        connection=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
+        connection.request('GET','/api/data-export',headers={'Host':'beta.example','Cookie':alice})
+        response=connection.getresponse();self.assertEqual(response.status,200)
+        with ZipFile(BytesIO(response.read())) as archive:self.assertEqual(json.loads(archive.read('corrections.jsonl')),record)
+        connection.close()
+        remaining=self.http('/api/correction-quota',cookie=alice)[1]
+        self.stop();self.start();self.service.beta.corrector=corrector
+        self.assertEqual(self.http(restore,{},alice)[0],200)
+        self.assertEqual(self.http('/api/correction-jobs',body,alice)[1]['job']['result']['correction'],record)
+        self.assertEqual(self.http('/api/correction-quota',cookie=alice)[1],remaining)
+        self.assertEqual(len(calls),1);self.assertEqual(self.calls,[])
+
+    def test_uncertain_correction_failure_never_restarts_or_refunds_itself(self):
+        calls=[]
+        def fail(text,store,identifier,progress):calls.append(identifier);raise TimeoutError('Synthetic uncertain timeout')
+        self.service.beta.corrector=fail
+        alice,_=self.guest();identifier='5'*32
+        body={'request_id':identifier,'text':'Авторский текст.','ai_consent':True}
+        self.assertEqual(self.http('/api/correction-jobs',body,alice)[0],200)
+        for _ in range(100):
+            job=self.http('/api/correction-jobs/'+identifier,cookie=alice)[1]['job']
+            if job['status']=='failed':break
+            time.sleep(.01)
+        self.assertEqual(job['status'],'failed')
+        before=self.http('/api/correction-quota',cookie=alice)[1]
+        self.stop();self.start();self.service.beta.corrector=fail
+        self.assertEqual(self.http('/api/correction-jobs',body,alice)[1]['job']['status'],'failed')
+        self.assertEqual(self.http('/api/correction-quota',cookie=alice)[1],before)
+        self.assertEqual(len(calls),1)
+
     def test_owner_password_stable_workspace_and_no_guest_daily_limit(self):
         from hashlib import pbkdf2_hmac
         salt='12'*32

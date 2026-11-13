@@ -24,6 +24,9 @@ from plagiarism.search_mediawiki import MediaWikiSearch
 from plagiarism.search_tavily import TavilySearch
 from plagiarism.tenants import TenantRegistry
 from plagiarism.client_api import APIKeys,require_scope
+from plagiarism.correction_jobs import CorrectionQuota,ModalCorrector,internal_id,correction_id
+from plagiarism.ai_proofreading import request_payload
+from plagiarism.jobs import Jobs
 
 COOKIE='istok_beta'
 MAX_CHARACTERS=10000
@@ -39,6 +42,13 @@ class DurableTenants(TenantRegistry):
     def __init__(self,root,persist):
         super().__init__(root,max_contexts=20,max_active=3)
         self.persist=persist
+        self.auxiliary_jobs=[]
+
+    def close(self):
+        for jobs in self.auxiliary_jobs:jobs.close(wait=False)
+        try:super().close()
+        finally:
+            for jobs in self.auxiliary_jobs:jobs.close()
 
     def _create(self,identifier):
         context=super()._create(identifier)
@@ -50,7 +60,7 @@ class DurableTenants(TenantRegistry):
 
 
 class BetaRuntime:
-    def __init__(self,root,origin,persist=lambda:None,*,allow_http=False,runner=None):
+    def __init__(self,root,origin,persist=lambda:None,*,allow_http=False,runner=None,corrector=None):
         parsed=urlsplit(origin)
         if (parsed.scheme not in ({'https','http'} if allow_http else {'https'}) or not parsed.netloc
                 or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password):
@@ -76,10 +86,45 @@ class BetaRuntime:
                 'CREATE TABLE IF NOT EXISTS quota_guard(id INTEGER PRIMARY KEY CHECK(id=1),retry_at REAL NOT NULL);')
         self.api_keys=APIKeys(self.database,persist)
         self.tenants=DurableTenants(self.root/'tenants',persist)
+        self.correction_quota=CorrectionQuota(self.database,persist)
+        self.correction_jobs=Jobs()
+        self.tenants.auxiliary_jobs.append(self.correction_jobs)
+        deployment=os.environ.get('ISTOK_CORRECTOR_DEPLOYMENT','')
+        self.corrector=corrector or (ModalCorrector(deployment,os.environ.get('ISTOK_CORRECTOR_MODEL_DIGEST','')) if deployment else None)
         self.runner=runner or self.run_web
         self.persist()
 
     def connect(self):return sqlite3.connect(self.database,timeout=15)
+
+    def submit_correction(self,guest,body,store):
+        if not self.corrector:raise access.AccessError('Qwen пока недоступна. Словарь и правила работают отдельно.','correction_unavailable',503)
+        if body.get('ai_consent') is not True:
+            raise access.AccessError('Нужно согласие на обработку фрагмента нейросетью в Modal.','correction_consent_required',400)
+        text=body.get('text');request_payload(text)
+        identifier=body.get('request_id');remote_id=internal_id(guest,identifier)
+        saas.ensure_job_identifier(store,remote_id)
+        jobs=self.correction_jobs
+        def operation(progress):
+            result=self.corrector(text,store,remote_id,progress)
+            record=store.save('correction',{'id':correction_id(remote_id),'request_id':identifier,'text':text,'result':result})
+            return {'correction':record}
+        with jobs.lock:
+            self.correction_quota.admit(guest,identifier,text)
+            try:
+                job=jobs.submit_model(remote_id,'/api/correction',{'text':text,'request_id':identifier,'ai_consent':True},operation,store)
+            except Exception:
+                if not store.get('model-request','model-request:'+remote_id) and remote_id not in jobs.items:
+                    self.correction_quota.release_unqueued(guest,identifier)
+                raise
+        return self.public_correction_job(job,identifier,store)
+
+    @staticmethod
+    def public_correction_job(job,identifier,store):
+        result={**job,'id':identifier}
+        correction=result.get('result',{}).get('correction')
+        if correction and store.is_trashed('correction',correction['id']):
+            result['result']={'correction_removed':True,'correction_id':correction['id']}
+        return {'job':result}
 
     def identity(self,headers):
         try:
@@ -229,6 +274,8 @@ class BetaRuntime:
                     counts['sources']+=db.execute('SELECT count(*) FROM sources').fetchone()[0]
                     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trash'").fetchone():
                         counts['trashed']+=db.execute('SELECT count(*) FROM trash').fetchone()[0]
+                        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='correction_trash'").fetchone():
+                            counts['trashed']+=db.execute('SELECT count(*) FROM correction_trash').fetchone()[0]
             except (OSError,sqlite3.Error):counts['unavailable_spaces']+=1
         day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
         with closing(self.connect()) as db:
@@ -343,6 +390,11 @@ class BetaHandler(server.Handler):
                 return beta.api_keys.create(self.guest,body.get('label'),body.get('scopes'),body.get('days',30))
             if method=='POST' and path.endswith('/revoke'):return beta.api_keys.revoke(self.guest,path.split('/')[-2])
             raise KeyError(path)
+        regular_job=re.fullmatch(r'/api/jobs/([a-f0-9]{32})(?:/cancel)?',path)
+        if regular_job:
+            identifier=regular_job.group(1)
+            reservation=self.tenant.store.get('model-request','model-request:'+identifier)
+            if reservation and reservation.get('path')=='/api/correction':raise KeyError(identifier)
         if method=='POST' and path=='/api/owner/login':
             cookie=beta.owner_login(body,self.guest);self.response_headers.append(('Set-Cookie',cookie))
             return {'ok':True}
@@ -351,7 +403,24 @@ class BetaHandler(server.Handler):
             return {'ok':True}
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
-                **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
+                **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES,
+                'ai_correction':{'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}}}
+        if method=='GET' and path=='/api/correction-quota':
+            return {'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}
+        if method=='POST' and path=='/api/correction-jobs':
+            return beta.submit_correction(self.guest,body,self.tenant.store)
+        correction_job=re.fullmatch(r'/api/correction-jobs/([a-f0-9]{32})',path)
+        if method=='GET' and correction_job:
+            identifier=correction_job.group(1)
+            job=beta.correction_jobs.get(internal_id(self.guest,identifier),self.tenant.store)
+            return beta.public_correction_job(job,identifier,self.tenant.store)
+        correction=re.fullmatch(r'/api/corrections/([a-f0-9]{32})',path)
+        if method=='GET' and correction:
+            identifier=correction.group(1)
+            record=self.tenant.store.get('correction',identifier)
+            if not record or self.tenant.store.is_trashed('correction',identifier):raise KeyError(identifier)
+            self.response_headers.append(('Content-Disposition',f'attachment; filename="istok-correction-{identifier}.json"'))
+            return {'correction':record}
         if method=='GET' and path=='/api/owner/statistics':
             if not self.owner:raise access.AccessError('Статистика сайта доступна владельцу.','owner_required',403)
             return beta.owner_statistics()
@@ -359,7 +428,7 @@ class BetaHandler(server.Handler):
                 or re.fullmatch(r'/api/(?:reports|jobs|report-exports)/[a-f0-9]{32}',path))
             or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo','/api/import-document','/api/proofread','/api/dictionary'}
             or method=='POST' and re.fullmatch(r'/api/jobs/[a-f0-9]{32}/cancel',path)
-            or method=='POST' and re.fullmatch(r'/api/data/(?:report|source)/[^/]{1,100}/(?:trash|restore)',path)
+            or method=='POST' and re.fullmatch(r'/api/data/(?:report|source|correction)/[^/]{1,100}/(?:trash|restore)',path)
             or method=='DELETE' and re.fullmatch(r'/api/sources/[^/]{1,100}',path))
         if not allowed:raise access.AccessError('Эта операция недоступна в онлайн-бете.','operation_forbidden',403)
         if method=='POST':
@@ -401,8 +470,8 @@ class BetaHandler(server.Handler):
         return super().send_json(result,status)
 
 
-def create_server(root,origin,*,host='0.0.0.0',port=8000,persist=lambda:None,allow_http=False,runner=None):
-    beta=BetaRuntime(root,origin,persist,allow_http=allow_http,runner=runner)
+def create_server(root,origin,*,host='0.0.0.0',port=8000,persist=lambda:None,allow_http=False,runner=None,corrector=None):
+    beta=BetaRuntime(root,origin,persist,allow_http=allow_http,runner=runner,corrector=corrector)
     os.environ.update(ISTOK_MODEL_PROVIDER='local',ISTOK_RUNTIME_DIR=str(beta.runtime),ISTOK_APP_MODE='local')
     service=ThreadingHTTPServer((host,port),BetaHandler);service.daemon_threads=True
     service.beta=beta;service.saas=None;service.store=None

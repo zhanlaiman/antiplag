@@ -62,6 +62,17 @@ def build_app(directory,key):
         .add_local_dir(directory,REMOTE_ROOT,copy=True)
         .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':'tavily','ISTOK_MODEL_PROVIDER':'local'}))
     secret_values={'ISTOK_TAVILY_API_KEY':key}
+    corrector_path=ROOT/'.runtime/corrector-deployment.json'
+    if corrector_path.exists():
+        corrector=json.loads(corrector_path.read_text())
+        if corrector.get('ready_for_public') is True:
+            from plagiarism.correction_jobs import ModalCorrector
+            ModalCorrector(corrector['deployment_id'],corrector['model_digest'])
+            if (corrector.get('app')!='istok-corrector' or corrector.get('class_name')!='QwenCorrector'
+                    or corrector.get('max_containers')!=1 or corrector.get('persistent_weights') is not False):
+                raise ValueError('Corrector must match the reviewed private deployment')
+            secret_values.update(ISTOK_CORRECTOR_DEPLOYMENT=corrector['deployment_id'],
+                                 ISTOK_CORRECTOR_MODEL_DIGEST=corrector['model_digest'])
     owner_path=ROOT/'.runtime/owner-credentials.json'
     if owner_path.exists():
         owner=json.loads(owner_path.read_text())

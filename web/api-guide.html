@@ -3,6 +3,7 @@
 <body><main class="auth-card" style="overflow-wrap:anywhere"><h1>API бесплатной беты</h1>
 <p>Войдите как владелец и откройте «Мои данные → Доступ через API». Создайте ключ с нужными разрешениями. Он показывается один раз, действует до 90 дней и отзывается в этой же панели. До трёх активных ключей. Полный ключ храните в секрете; сервер хранит только его хеш.</p>
 <p>Базовый адрес — текущий адрес сайта. Все запросы требуют заголовок <code>Authorization: Bearer ВАШ_КЛЮЧ</code>. Cookie не нужна. Ключ нельзя передавать в URL или включать в публичный клиентский JavaScript. Запросы из чужого браузерного Origin запрещены; API предназначен для серверных интеграций.</p>
+<p>Укажите честный User-Agent с названием вашей интеграции, например <code>User-Agent: MyIstokClient/1.0</code>. Cloudflare может отклонить стандартный User-Agent библиотеки Python urllib с кодом1010 ещё до обращения к API. Имитировать браузер не нужно; <a href="https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/" target="_blank" rel="noopener">инструкция Cloudflare</a>.</p>
 <table style="table-layout:fixed;width:100%"><thead><tr><th>Метод и путь</th><th>Разрешение</th></tr></thead><tbody>
 <tr><td>GET /api/v1/reports</td><td>reports:read</td></tr><tr><td>GET /api/v1/reports/{id}</td><td>reports:read</td></tr>
 <tr><td>GET /api/v1/jobs/{request_id}</td><td>reports:read</td></tr><tr><td>GET /api/v1/sources</td><td>sources:read</td></tr>

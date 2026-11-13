@@ -279,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
             return store.data_summary()
         if method == 'GET' and path == '/api/data-export':
             return store.export_data()
-        lifecycle = re.fullmatch(r'/api/data/(report|source)/([^/]{1,100})/(trash|restore)', path)
+        lifecycle = re.fullmatch(r'/api/data/(report|source|correction)/([^/]{1,100})/(trash|restore)', path)
         if method == 'POST' and lifecycle:
             kind, identifier, action = lifecycle.groups()
             changed = store.trash_item(kind, identifier) if action == 'trash' else store.restore_item(kind, identifier)
