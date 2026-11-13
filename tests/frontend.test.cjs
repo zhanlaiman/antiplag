@@ -1418,3 +1418,29 @@ test('homepage rejects multiple or unsupported dropped files and preserves a new
   assert.equal(app.element('home-text').value, 'Правка во время чтения');
   assert.equal(app.storage.get('istok.home-draft.v1'), 'Правка во время чтения');
 });
+
+
+test('beta shows personal and shared quota before submission and has owner entry', async () => {
+  const app = fixture({ view: 'home', fetch: async url => url === '/api/session' ? json({mode:'local',beta:{id:'quota-guest',max_characters:10000,daily_checks:6,daily_remaining:4,monthly_remaining:150}}) : undefined });
+  await settle();
+  assert.equal(app.element('owner-link').hidden,false);
+  assert.equal(app.element('home-quota').hidden,false);
+  assert.match(app.element('home-quota').textContent,/4 из 6/);
+  assert.match(app.element('home-quota').textContent,/150/);
+  await app.navigate('check');
+  assert.equal(app.element('check-quota-note').hidden,false);
+  assert.match(app.element('check-quota-note').textContent,/4 из 6/);
+});
+
+test('beta owner logout uses beta endpoint and keeps the current draft', async () => {
+  let logout=0;
+  const app=fixture({fetch:async url=>{
+    if(url==='/api/session')return json({mode:'local',beta:{id:'owner',owner:true,max_characters:10000}});
+    if(url==='/api/owner/logout'){logout++;return json({ok:true});}
+  }});
+  await settle();
+  assert.equal(app.element('owner-link').hidden,true);
+  assert.equal(app.element('logout-button').hidden,false);
+  await app.element('logout-button').emit('click');
+  assert.equal(logout,1);assert.equal(app.reloads.length,1);
+});

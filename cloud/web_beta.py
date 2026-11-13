@@ -13,6 +13,8 @@ import secrets
 import sqlite3
 import time
 from urllib.parse import urlsplit
+from urllib.error import HTTPError
+from email.utils import parsedate_to_datetime
 from urllib.request import Request,build_opener
 
 import server
@@ -26,6 +28,10 @@ COOKIE='istok_beta'
 MAX_CHARACTERS=10000
 MONTHLY_SEARCHES=180
 DAILY_CHECKS=6
+
+
+class SearchNotStarted(web_search.WebSearchError):
+    """Only the built-in preflight may certify that no search was attempted."""
 
 
 class DurableTenants(TenantRegistry):
@@ -64,7 +70,9 @@ class BetaRuntime:
         with closing(self.connect()) as db:
             db.executescript('CREATE TABLE IF NOT EXISTS guests(id TEXT PRIMARY KEY,month TEXT NOT NULL);'
                 'CREATE TABLE IF NOT EXISTS rates(guest TEXT,day TEXT,count INTEGER NOT NULL,PRIMARY KEY(guest,day));'
-                'CREATE TABLE IF NOT EXISTS checks(guest TEXT,id TEXT,fingerprint TEXT,day TEXT,PRIMARY KEY(guest,id));')
+                'CREATE TABLE IF NOT EXISTS checks(guest TEXT,id TEXT,fingerprint TEXT,day TEXT,PRIMARY KEY(guest,id));'
+                'CREATE TABLE IF NOT EXISTS unstarted_checks(guest TEXT,id TEXT,PRIMARY KEY(guest,id));'
+                'CREATE TABLE IF NOT EXISTS quota_guard(id INTEGER PRIMARY KEY CHECK(id=1),retry_at REAL NOT NULL);')
         self.tenants=DurableTenants(self.root/'tenants',persist)
         self.runner=runner or self.run_web
         self.persist()
@@ -151,23 +159,62 @@ class BetaRuntime:
             except FileNotFoundError:pass
         if used>256*1024*1024:raise access.AccessError('Хранилище бесплатной беты заполнено.','beta_storage_limit',429)
 
-    def admit_check(self,guest,identifier,text,*,owner=False):
+    def admit_check(self,guest,identifier,text,*,owner=False,rearm=False):
         if not isinstance(identifier,str) or not re.fullmatch(r'[a-f0-9]{32}',identifier):
             raise ValueError('Нужен идентификатор запроса из 32 шестнадцатеричных знаков.')
         fingerprint=sha256(text.encode()).hexdigest()
         day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
         with closing(self.connect()) as db,db:
-            db.execute('BEGIN IMMEDIATE');old=db.execute('SELECT fingerprint FROM checks WHERE guest=? AND id=?',(guest,identifier)).fetchone()
+            db.execute('BEGIN IMMEDIATE');old=db.execute('SELECT fingerprint,NOT EXISTS(SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id) FROM checks WHERE guest=? AND id=?',(guest,identifier)).fetchone()
             if old:
                 if old[0]!=fingerprint:raise access.AccessError('Идентификатор уже использован для другого текста.','request_conflict',409)
-                return
-            if not owner and db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=?',(guest,day)).fetchone()[0]>=DAILY_CHECKS:
+                if old[1] or not rearm:return
+            if not owner and db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=? AND NOT EXISTS(SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id)',(guest,day)).fetchone()[0]>=DAILY_CHECKS:
                 raise access.AccessError(f'В бете доступны {DAILY_CHECKS} интернет-проверок в сутки для этого браузера. Общая бесплатная квота ограничена.','beta_check_limit',429)
-            db.execute('INSERT INTO checks VALUES (?,?,?,?)',(guest,identifier,fingerprint,day))
+            db.execute('INSERT INTO checks(guest,id,fingerprint,day) VALUES (?,?,?,?) ON CONFLICT(guest,id) DO UPDATE SET day=excluded.day',(guest,identifier,fingerprint,day))
+            db.execute('DELETE FROM unstarted_checks WHERE guest=? AND id=?',(guest,identifier))
         self.persist()
+
+    def release_unstarted_check(self,guest,identifier):
+        # Keep identity/fingerprint forever: a duplicate still resolves the old job.
+        with closing(self.connect()) as db,db:
+            db.execute('INSERT OR IGNORE INTO unstarted_checks SELECT guest,id FROM checks WHERE guest=? AND id=?',(guest,identifier))
+        self.persist()
+
+    def quota_cooldown(self):
+        with closing(self.connect()) as db:
+            row=db.execute('SELECT retry_at FROM quota_guard WHERE id=1').fetchone()
+        return max(0,int(row[0]-time.time()+1)) if row else 0
+
+    def rate_limited(self,headers):
+        delay=600
+        value=headers.get('Retry-After','') if headers else ''
+        try:
+            delay=int(value) if value.isascii() and value.isdecimal() else int(parsedate_to_datetime(value).timestamp()-time.time())
+        except (ValueError,TypeError,OverflowError):pass
+        with closing(self.connect()) as db,db:
+            db.execute('INSERT INTO quota_guard VALUES (1,?) ON CONFLICT(id) DO UPDATE SET retry_at=max(retry_at,excluded.retry_at)',
+                       (time.time()+min(86400,max(1,delay)),))
+        self.persist()
+
+    def remaining(self,guest,owner=False):
+        day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        with closing(self.connect()) as db:
+            used=db.execute('SELECT count(*) FROM checks WHERE guest=? AND day=? AND NOT EXISTS(SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id)',(guest,day)).fetchone()[0]
+        budget=self.root/'search-budget.sqlite3';monthly=0
+        if budget.exists():
+            with closing(sqlite3.connect('file:'+str(budget.resolve())+'?mode=ro',uri=True)) as db:
+                monthly=db.execute('SELECT count(*) FROM calls WHERE month=?',(day[:7],)).fetchone()[0]
+        return {'search_retry_after_seconds':self.quota_cooldown(),'daily_used':used,'daily_remaining':None if owner else max(0,DAILY_CHECKS-used),
+                'daily_reset':'00:00 UTC (05:00 Алматы)','monthly_used':monthly,
+                'monthly_remaining':max(0,MONTHLY_SEARCHES-monthly)}
 
     def run_web(self,text,request_id,progress=None):
         # No paid fallback: confirm the included allowance before any search.
+        cooldown=self.quota_cooldown()
+        if cooldown:
+            raise SearchNotStarted(f'Сервис проверки квоты временно ограничил обращения. Попробуйте новую проверку через {cooldown} сек. Поиск не отправлен, дневная попытка сохранена.','free_quota_rate_limited')
+        if progress:progress('Проверяем бесплатную квоту поиска',0,0,phase='preflight')
         request=Request('https://api.tavily.com/usage',headers={'Authorization':'Bearer '+key_for('tavily')})
         try:
             # Retry only the read-only quota endpoint; never duplicate a search.
@@ -175,6 +222,11 @@ class BetaRuntime:
                 try:
                     with build_opener(auth_provider.NoRedirect()).open(request,timeout=12) as response:account=json.load(response)['account']
                     break
+                except HTTPError as error:
+                    try:
+                        if error.code==429:self.rate_limited(error.headers)
+                    finally:error.close()
+                    raise
                 except (TimeoutError,OSError):
                     if attempt==2:raise
             usage=account.get('plan_usage');paid=account.get('paygo_usage');needed=len(web_search.plan_queries(text))
@@ -182,7 +234,10 @@ class BetaRuntime:
                     or type(usage) not in (int,float) or not 0<=usage<=900-needed
                     or type(paid) not in (int,float) or paid!=0):raise ValueError('Unconfirmed free quota')
         except Exception:
-            raise web_search.WebSearchError('Не удалось подтвердить бесплатную квоту поиска. Запросы не отправлены.','free_quota_unconfirmed') from None
+            cooldown=self.quota_cooldown()
+            if cooldown:
+                raise SearchNotStarted(f'Сервис проверки квоты временно ограничил обращения (HTTP 429). Повторите вручную через {cooldown} сек. Поиск не отправлен, дневная попытка сохранена.','free_quota_rate_limited') from None
+            raise SearchNotStarted('Не удалось подтвердить бесплатную квоту поиска. Запросы не отправлены, дневная попытка сохранена. Повторите вручную новой проверкой, когда сервис восстановится.','free_quota_unconfirmed') from None
         persist=self.persist
         class Budget(web_search.SearchBudget):
             def reserve(self,identifier):super().reserve(identifier);persist()
@@ -224,7 +279,7 @@ class BetaHandler(server.Handler):
             return {'ok':True}
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
-                'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
+                **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
         allowed=(method=='GET' and (path in {'/api/status','/api/sources','/api/source-packs','/api/reports'}
                 or re.fullmatch(r'/api/(?:reports|jobs|report-exports)/[a-f0-9]{32}',path))
             or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo'}
@@ -240,15 +295,29 @@ class BetaHandler(server.Handler):
         if method=='POST' and path=='/api/web-check-jobs':
             if body.get('internet_consent') is not True:raise access.AccessError('Нужно согласие на интернет-поиск.','internet_consent_required',400)
             text=server.field(body,'text',MAX_CHARACTERS);identifier=body.get('request_id')
-            beta.admit_check(self.guest,identifier,text,owner=bool(self.owner))
             store,jobs=self.tenant.store,self.tenant.jobs
             saas.ensure_job_identifier(store,identifier)
             remote_id=sha256((self.guest+'\0'+identifier).encode()).hexdigest()[:32]
             def operation(progress):
-                payload=beta.runner(text,remote_id,progress)
+                try:
+                    payload=beta.runner(text,remote_id,progress)
+                except SearchNotStarted:
+                    beta.release_unstarted_check(self.guest,identifier)
+                    raise
                 report=store.save('report',{**payload,'id':saas.report_identifier(identifier)})
                 return {'report':server.public_report(report,store.match_reviews(report['id']))}
-            return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True},operation,store)}
+            # Serialize admission with scheduling for this tenant: a rejected queue
+            # cannot race a duplicate that starts work while its slot is refunded.
+            with jobs.lock:
+                existing=(store.get('model-request','model-request:'+identifier)
+                          or store.get('model-job',identifier) or jobs.items.get(identifier))
+                beta.admit_check(self.guest,identifier,text,owner=bool(self.owner),rearm=not existing)
+                try:
+                    return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True},operation,store)}
+                except Exception:
+                    if not store.get('model-request','model-request:'+identifier) and identifier not in jobs.items:
+                        beta.release_unstarted_check(self.guest,identifier)
+                    raise
         return super().route(method,path,body)
 
     def send_json(self,result,status=200):

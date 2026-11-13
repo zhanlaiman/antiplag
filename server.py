@@ -197,6 +197,7 @@ class Handler(BaseHTTPRequestHandler):
         files = {"/": "index.html", "/index.html": "index.html", "/style.css": "style.css", "/app.js": "app.js",
                  "/motion.js": "motion.js", "/motion.css": "motion.css",
                  "/setup-search.html": "setup-search.html", "/setup-search.js": "setup-search.js"}
+        files["/privacy.html"] = "privacy.html"
         files["/owner.html"] = "owner.html"
         files["/owner.js"] = "owner.js"
         files["/fonts/InterVariable.woff2"] = "fonts/InterVariable.woff2"

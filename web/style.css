@@ -3576,3 +3576,15 @@ body:not(.home-view) .button.secondary { background:#fff; border-color:#d8e3cf; 
   .landing-button,.landing-faq summary > span,.landing-dropzone { transition:none; }
   .landing-button:hover { transform:none; }
 }
+
+/* Account actions remain reachable when the narrow sidebar hides its footer. */
+#owner-link, #logout-button, .home-owner-link { font-size:12px; white-space:nowrap; }
+@media(max-width:680px) {
+  .topbar { height:auto; min-height:63px; flex-wrap:wrap; gap:8px; padding:12px 14px; }
+  .account-tools { gap:6px 10px; }
+  .home-owner-link { margin-left:auto; }
+}
+@media(max-width:680px) {
+  .home-v3 .home-nav { flex-wrap:wrap; }
+  .home-v3 .home-nav-cta { flex-basis:100%; justify-content:center; }
+}

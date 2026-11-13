@@ -151,7 +151,7 @@ class WebZeroFallbackTests(unittest.TestCase):
         self.assertEqual(report['web']['skipped_urls'], full[24:])
         self.assertEqual([error['count'] for error in report['web']['errors'] if error['code'] == 'url_limit_reached'], [2])
         self.assertEqual(report['web']['max_page_attempts'], 24)
-        self.assertIn('двадцати четырёх', report['web']['limitations'][1])
+        self.assertIn('Основной поиск ограничен шестью', report['web']['limitations'][1])
 
     def test_positive_prefix_keeps_legacy_twelve_and_second_insertion_unread(self):
         text, groups, bodies, full = setup(initial_positive=True)

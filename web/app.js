@@ -478,12 +478,26 @@ function updateAccountUI() {
   const logout = document.querySelector('#logout-button');
   if (name) name.textContent = isBeta() ? state.session.beta.owner ? 'Владелец · Администратор' : 'Гостевое пространство' : isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
   if (description) description.textContent = isBeta() ? state.session.beta.owner ? 'Вход владельца активен' : 'Онлайн-бета · без регистрации' : isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
-  if (logout) logout.hidden = !isSaas() || !user;
+  if (logout) logout.hidden = isBeta() ? !state.session.beta.owner : !isSaas() || !user;
+  const ownerLink = document.querySelector('#owner-link');
+  if (ownerLink) { ownerLink.hidden = !isBeta() || Boolean(state.session.beta.owner); }
   const evaluation = document.querySelector('#evaluation-nav');
   if (evaluation) evaluation.hidden = isSaas() || isBeta();
   const storageNote = document.querySelector('#workspace-storage-note');
-  if (storageNote) storageNote.textContent = isBeta() ? state.session.beta.owner ? 'Отчёты сохраняются в аккаунте владельца. Вход и выход: /owner.html' : 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
+  if (storageNote) storageNote.textContent = isBeta() ? state.session.beta.owner ? 'Отчёты сохраняются в аккаунте владельца.' : 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
   updateQuotaUI();
+}
+
+function betaQuotaText() {
+  const beta = state.session?.beta;
+  if (!beta) return '';
+  const personal = beta.owner ? 'Владелец: общая бесплатная квота.'
+    : Number.isFinite(beta.daily_remaining) ? `Сегодня осталось ${number(beta.daily_remaining)} из ${number(beta.daily_checks)} проверок. Обновление в 05:00 Алматы.`
+    : 'Дневной остаток пока не получен.';
+  const shared = Number.isFinite(beta.monthly_remaining)
+    ? ` Общий остаток сайта: ${number(beta.monthly_remaining)} поисковых запросов; до 6 на текст. Квота провайдера проверяется перед запуском.` : '';
+  const cooldown = beta.search_retry_after_seconds > 0 ? ` Сервис квоты просит подождать около ${number(Math.ceil(beta.search_retry_after_seconds / 60))} мин. Автоматического запуска не будет.` : '';
+  return personal + shared + cooldown;
 }
 
 function quotaRemaining() {
@@ -535,15 +549,15 @@ function updateQuotaUI() {
   const summary = document.querySelector('#quota-summary');
   const quota = state.session?.quota;
   if (summary) {
-    summary.hidden = !isSaas() || !privateAccess();
-    summary.textContent = `Осталось ${number(quotaRemaining())} из ${number(quota?.limit || 6000)} знаков`;
+    summary.hidden = !(isSaas() || isBeta()) || !privateAccess();
+    summary.textContent = isBeta() ? (state.session.beta.owner ? 'Владелец' : `Сегодня: ${number(state.session.beta.daily_remaining ?? 0)} из ${number(state.session.beta.daily_checks)}`) : `Осталось ${number(quotaRemaining())} из ${number(quota?.limit || 6000)} знаков`;
   }
   const note = document.querySelector('#check-quota-note');
   const entry = isSaas() && !internetMode() ? matchingCheckRequest() : null;
   const length = chars(state.text).length;
   if (note) {
-    note.hidden = !isSaas();
-    note.textContent = length > quotaRemaining()
+    note.hidden = !(isSaas() || isBeta());
+    note.textContent = isBeta() ? betaQuotaText() : length > quotaRemaining()
       ? `В тексте ${number(length)} знаков, осталось ${number(quotaRemaining())}. Текст сохранён целиком. Сократите его перед новой проверкой.`
       : `На новую проверку ${number(length)} знаков. Осталось ${number(quotaRemaining())} из ${number(quota?.limit || 6000)} сегодня.${quota?.reset_at ? ` Лимит обновится ${date(quota.reset_at)}.` : ''}`;
   }
@@ -840,6 +854,10 @@ async function observeModelJob(entry, restored = false) {
       renderModelJobs();
       throw error;
     }
+    if (isBeta() && entry.path === '/api/web-check') {
+      await refreshSession().catch(() => {});
+      updateHomeControls();
+    }
     if (entry.body.retrieval_id) {
       entry.latestLoaded = Boolean(await loadCandidateJudgments(entry.body.retrieval_id, true));
       renderModelJobs();
@@ -939,7 +957,7 @@ function updateHomeControls() {
   const missing = document.querySelector('#home-search-unavailable');
   if (missing) missing.hidden = webConfigured();
   const quota = document.querySelector('#home-quota');
-  if (quota) { quota.hidden = !isSaas(); quota.textContent = `Осталось ${number(quotaRemaining())} из ${number(state.session.quota?.limit || 6000)} знаков сегодня.`; }
+  if (quota) { quota.hidden = !(isSaas() || isBeta()); quota.textContent = isBeta() ? betaQuotaText() : `Осталось ${number(quotaRemaining())} из ${number(state.session.quota?.limit || 6000)} знаков сегодня.`; }
   const progress = document.querySelector('#home-check-progress');
   if (progress) {
     progress.hidden = !pending;
@@ -1167,7 +1185,7 @@ function renderHome() {
       <header class="home-nav">
         <a class="home-brand" href="#home" data-home-scroll="home-top" aria-label="Исток, главная"><span class="home-logo" aria-hidden="true">и</span>исток<span class="home-brand-dot">.</span></a>
         <nav aria-label="Главная навигация"><a href="#home" data-home-scroll="home-how">Как это работает</a><a href="#home" data-home-scroll="home-features">Возможности</a><a href="#home" data-home-scroll="home-faq">Вопросы</a></nav>
-        <a class="home-nav-cta" href="#check">Рабочее пространство <span aria-hidden="true">↗</span></a>
+        ${isBeta() ? '<a class="home-owner-link" href="/owner.html">' + (state.session.beta.owner ? 'Аккаунт владельца' : 'Вход владельца') + '</a>' : ''}<a class="home-nav-cta" href="#check">Рабочее пространство <span aria-hidden="true">↗</span></a>
       </header>
 
       <section class="landing-hero">
@@ -1212,7 +1230,8 @@ function renderHome() {
             <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
             <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>Текстовые файлы TXT и Markdown</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,text/plain,text/markdown" aria-label="Загрузить текст для интернет-проверки"></label>
-            <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска источников.</span></label>
+            <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска источников.</span></label>
+            <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
             <p class="home-quota" id="home-quota" hidden></p>
             <p class="home-connect-note" id="home-search-unavailable" ${webConfigured() ? 'hidden' : ''}>Интернет-поиск пока не подключён к этому экземпляру. Кнопка станет доступна после подключения сервиса.</p>
@@ -1380,8 +1399,8 @@ function renderCheck() {
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
             <span>${isBeta() ? state.session.beta.owner ? 'До 10 000 знаков · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
-          <div class="internet-options" id="internet-options" hidden>
-            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста внешним поисковым сервисам для поиска страниц-источников.</label>
+          <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
+            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска страниц-источников.</label>
           </div>
           <div class="editor-footer">
             <p id="draft-status">Черновик сохраняется на этом Mac</p>
@@ -2968,7 +2987,7 @@ window.addEventListener('hashchange', renderView);
 document.querySelector('#logout-button').addEventListener('click', event => busy(event.currentTarget, 'Выходим', async () => {
   saveDraft(state.text);
   saveReviewDrafts();
-  await api('/api/auth/logout', {});
+  await api(isBeta() ? '/api/owner/logout' : '/api/auth/logout', {});
   state.sessionTransition = true;
   location.reload();
 }));

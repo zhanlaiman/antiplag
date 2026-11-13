@@ -26,11 +26,10 @@
         <div class="local-note"><span class="status-dot"></span><span>Личная библиотека</span></div>
         <p id="workspace-storage-note">Тексты и отчёты сохраняются<br>в локальной библиотеке.</p>
         <div class="profile"><span class="avatar">Я</span><div><strong id="account-name">Личное пространство</strong><small id="account-description">Локальный прототип</small></div></div>
-        <button class="text-button" id="logout-button" type="button" hidden>Выйти из аккаунта</button>
       </div>
     </aside>
     <div class="main-shell">
-      <header class="topbar"><div class="breadcrumb">Личное пространство <span>/</span> <strong id="breadcrumb-title">Проверка текста</strong></div><div class="account-tools"><span id="quota-summary" class="quota-summary" hidden></span><button class="model-pill" id="model-settings" type="button"><span class="status-dot muted" id="model-dot"></span><span id="model-label">Подключение Qwen</span><span aria-hidden="true">⌄</span></button></div></header>
+      <header class="topbar"><div class="breadcrumb">Личное пространство <span>/</span> <strong id="breadcrumb-title">Проверка текста</strong></div><div class="account-tools"><a class="text-button" id="owner-link" href="/owner.html" hidden>Вход владельца</a><button class="text-button" id="logout-button" type="button" hidden>Выйти из аккаунта</button><span id="quota-summary" class="quota-summary" hidden></span><button class="model-pill" id="model-settings" type="button"><span class="status-dot muted" id="model-dot"></span><span id="model-label">Подключение Qwen</span><span aria-hidden="true">⌄</span></button></div></header>
       <section id="model-jobs-panel" class="model-jobs-panel" aria-label="Серверные задания" hidden></section>
       <main id="main-content" tabindex="-1"></main>
       <footer class="app-footer"><span>Исток · ваша библиотека</span><span>Каждое совпадение ведёт к источнику</span></footer>

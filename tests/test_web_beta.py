@@ -167,6 +167,118 @@ class WebBetaTests(unittest.TestCase):
             self.assertIn('Secure',cookie);self.assertIn('HttpOnly',cookie);self.assertIn('SameSite=Lax',cookie)
         finally:runtime.tenants.close()
 
+    # Exercise the real HTTP/job persistence path, including retained identities.
+    def outcome(self,cookie,identifier):
+        status,result,_=self.http('/api/web-check-jobs',{'request_id':identifier,'text':TEXT,'internet_consent':True},cookie)
+        self.assertEqual(status,200,result)
+        for _ in range(100):
+            result=self.http('/api/jobs/'+identifier,cookie=cookie)[1]
+            if result['job']['status'] in {'complete','failed'}:return result['job']
+            time.sleep(.01)
+        self.fail('Job did not settle')
+
+    def test_preflight_failure_refunds_only_known_zero_and_duplicate_stays_failed_after_restart(self):
+        from cloud.web_beta import SearchNotStarted
+        cookie,guest=self.guest();calls=[]
+        def blocked(*args):
+            calls.append(args[1]);raise SearchNotStarted('No search','free_quota_unconfirmed')
+        self.service.beta.runner=blocked
+        self.assertEqual(self.outcome(cookie,'a'*32)['status'],'failed')
+        self.assertEqual(self.service.beta.remaining(guest)['daily_remaining'],6)
+        self.service.beta.runner=self.runner
+        self.assertEqual(self.outcome(cookie,'a'*32)['status'],'failed');self.assertEqual(len(calls),1)
+        self.stop();self.start()
+        self.assertEqual(self.outcome(cookie,'a'*32)['status'],'failed');self.assertEqual(self.calls,[])
+        self.check(cookie,'b'*32)
+        self.assertEqual(self.service.beta.remaining(guest)['daily_remaining'],5)
+
+    def test_unknown_provider_failure_keeps_slot_even_with_same_public_error_code(self):
+        from plagiarism.web_search import WebSearchError
+        cookie,guest=self.guest()
+        def uncertain(*args):raise WebSearchError('Unknown outcome','free_quota_unconfirmed')
+        self.service.beta.runner=uncertain
+        self.assertEqual(self.outcome(cookie,'c'*32)['status'],'failed')
+        self.assertEqual(self.service.beta.remaining(guest)['daily_remaining'],5)
+
+    def test_concurrent_admission_cannot_overbook_and_refund_keeps_fingerprint(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from plagiarism.access import AccessError
+        _,guest=self.guest();runtime=self.service.beta
+        def admit(i):
+            try:runtime.admit_check(guest,format(i,'032x'),TEXT);return True
+            except AccessError:return False
+        with ThreadPoolExecutor(max_workers=10) as pool:self.assertEqual(sum(pool.map(admit,range(10))),6)
+        runtime.release_unstarted_check(guest,format(0,'032x'))
+        with self.assertRaises(AccessError):runtime.admit_check(guest,format(0,'032x'),'other text')
+        self.assertTrue(admit(10));self.assertEqual(runtime.remaining(guest)['daily_remaining'],0)
+
+    def test_paid_or_exhausted_quota_never_constructs_search_transport(self):
+        from cloud.web_beta import SearchNotStarted
+        for usage,paid in [(899,0),(650,1),(1000,0)]:
+            account={'current_plan':'Researcher','plan_limit':1000,'plan_usage':usage,'paygo_usage':paid}
+            opener=Mock();opener.open.return_value=BytesIO(json.dumps({'account':account}).encode())
+            with patch('cloud.web_beta.build_opener',return_value=opener),patch('cloud.web_beta.TavilySearch') as transport:
+                with self.assertRaises(SearchNotStarted):self.service.beta.run_web(TEXT,'x')
+                transport.assert_not_called()
+
+    def test_rejected_queue_returns_slot_and_same_id_can_be_admitted_later(self):
+        cookie,guest=self.guest()
+        with self.service.beta.tenants.context(guest) as context:
+            with patch.object(context.jobs.coordinator,'reserve',side_effect=ValueError('Queue full')):
+                status,_,_=self.http('/api/web-check-jobs',{'request_id':'9'*32,'text':TEXT,'internet_consent':True},cookie)
+                self.assertEqual(status,400)
+        self.assertEqual(self.service.beta.remaining(guest)['daily_remaining'],6)
+        self.check(cookie,'9'*32)
+        self.assertEqual(self.service.beta.remaining(guest)['daily_remaining'],5)
+
+    def test_source_delete_is_scoped_and_cannot_delete_another_guests_data(self):
+        alice,_=self.guest();bob,_=self.guest()
+        status,result,_=self.http('/api/sources',{'title':'Disposable synthetic','text':TEXT},alice)
+        self.assertEqual(status,200);identifier=result['source']['id']
+        def delete(cookie):
+            c=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
+            try:
+                c.request('DELETE','/api/sources/'+identifier,headers={'Host':'beta.example','Origin':'http://beta.example','Cookie':cookie})
+                r=c.getresponse();r.read();return r.status
+            finally:c.close()
+        self.assertEqual(delete(bob),404)
+        self.assertEqual(delete(alice),200)
+        self.assertEqual(delete(alice),404)
+
+    def test_quota_429_is_not_retried_and_persisted_cooldown_survives_restart(self):
+        from urllib.error import HTTPError
+        from cloud.web_beta import SearchNotStarted
+        opener=Mock();opener.open.side_effect=HTTPError('https://api.tavily.com/usage',429,'Too many',{'Retry-After':'900'},None)
+        with patch('cloud.web_beta.time.time',return_value=1000),patch('cloud.web_beta.build_opener',return_value=opener),patch('cloud.web_beta.TavilySearch') as transport:
+            with self.assertRaises(SearchNotStarted) as caught:self.service.beta.run_web(TEXT,'x')
+            self.assertEqual(caught.exception.code,'free_quota_rate_limited');self.assertEqual(opener.open.call_count,1)
+            self.assertGreaterEqual(self.service.beta.quota_cooldown(),900);transport.assert_not_called()
+        self.stop();self.start()
+        with patch('cloud.web_beta.time.time',return_value=1100),patch('cloud.web_beta.build_opener') as network:
+            with self.assertRaises(SearchNotStarted):self.service.beta.run_web(TEXT,'y')
+            network.assert_not_called()
+
+    def test_lost_http_response_recovers_by_get_without_duplicate_runner(self):
+        import socket
+        cookie,_=self.guest();identifier='7'*32
+        data=json.dumps({'request_id':identifier,'text':TEXT,'internet_consent':True}).encode()
+        request=(f'POST /api/web-check-jobs HTTP/1.1\r\nHost: beta.example\r\nOrigin: http://beta.example\r\nCookie: {cookie}\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n').encode()+data
+        with socket.create_connection(('127.0.0.1',self.service.server_port),timeout=5) as connection:
+            connection.sendall(request)
+        for _ in range(100):
+            status,result,_=self.http('/api/jobs/'+identifier,cookie=cookie)
+            if status==200 and result['job']['status']=='complete':break
+            time.sleep(.01)
+        self.assertEqual(result['job']['status'],'complete');self.check(cookie,identifier)
+        self.assertEqual(len(self.calls),1)
+
+    def test_previous_release_can_still_insert_checks_after_new_release_refund(self):
+        cookie,guest=self.guest();self.service.beta.admit_check(guest,'a'*32,TEXT)
+        self.service.beta.release_unstarted_check(guest,'a'*32)
+        with self.service.beta.connect() as db:
+            db.execute('INSERT INTO checks VALUES (?,?,?,?)',(guest,'b'*32,'old-fingerprint','2026-11-13'));db.commit()
+        with self.service.beta.connect() as db:self.assertEqual(len(db.execute('PRAGMA table_info(checks)').fetchall()),4)
+
 
 class BetaUploadTests(unittest.TestCase):
     def test_only_code_static_assets_and_two_public_source_packs_are_uploaded(self):

@@ -9,7 +9,7 @@ REMOTE_ROOT='/opt/istok'
 APP_NAME='istok-web-beta'
 VOLUME_NAME='istok-web-beta-data'
 ORIGIN='https://zhanlaiman--istok-beta.us-east.modal.run'
-WEB_FILES=('owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
+WEB_FILES=('privacy.html','owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
            'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt')
 
 

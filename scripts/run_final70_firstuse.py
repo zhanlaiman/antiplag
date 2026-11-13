@@ -2,6 +2,7 @@
 """Bounded first-use sample through an isolated normal HTTP queue."""
 import argparse
 from collections import defaultdict
+from datetime import datetime,timezone
 from hashlib import sha256
 from http.cookiejar import LWPCookieJar
 import json
@@ -13,6 +14,8 @@ from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from cloud.web_beta import create_server
+from cloud.modal_web import source_manifest
+from plagiarism.web_search import plan_queries
 from plagiarism.search_credentials import key_for
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +54,7 @@ def request(opener, path, payload=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--live', action='store_true')
+    parser.add_argument('--min-interval',type=float,default=65,help='Minimum seconds between fresh jobs; Tavily usage endpoint allows 10 requests/10 minutes')
     args = parser.parse_args()
     chosen = selected()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -65,6 +69,13 @@ def main():
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     if not args.live:
         print('Frozen 20 cases, maximum 120 free primary search requests; no data sent.');return
+    # A terminal receipt may be skipped only after reconciling its persisted ID.
+    remaining = sum(len(plan_queries((MATERIALS / c['input_path']).read_text()))
+                    for c in chosen if not (OUT / (c['id'] + '.json')).exists())
+    if remaining > 114:
+        raise SystemExit('Insufficient reserved primary allowance (keep six for smoke)')
+    receipts=OUT/'execution-receipts';receipts.mkdir(exist_ok=True)
+    (receipts/(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')+'.json')).write_text(json.dumps(source_manifest(),indent=2))
     if not key_for('tavily'):
         raise SystemExit('No configured search key')
     os.environ['ISTOK_TAVILY_API_KEY'] = key_for('tavily')
@@ -86,13 +97,24 @@ def main():
                                                                'password': credential['password']})
         assert status == 200, result
         cookies.save(ignore_discard=True, ignore_expires=True)
+        last_submission=0.0
         for case, entry in zip(chosen, manifest['cases']):
             identifier = entry['request_id']
             file = OUT / (case['id'] + '.json')
-            if file.exists():
-                print(case['id'], 'saved', flush=True);continue
             status, job = request(opener, '/api/jobs/' + identifier)
+            if file.exists():
+                saved=json.loads(file.read_text())
+                if saved.get('job',{}).get('status') in {'complete','failed','cancelled'}:
+                    (OUT / (case['id'] + '.recovery.json')).write_text(json.dumps({'http_status':status,'response':job},ensure_ascii=False))
+                    if status!=200 or job['job']['status']!=saved['job']['status']:
+                        raise RuntimeError('Saved job does not match persistent state; no POST sent')
+                    print(case['id'], 'reconciled', saved['job']['status'], flush=True);continue
             if status == 404:
+                if (OUT / (case['id'] + '.intent')).exists():
+                    raise RuntimeError('Submission intent exists but job is missing; do not repeat uncertain POST')
+                delay=max(service.beta.quota_cooldown(),args.min_interval-(time.monotonic()-last_submission),0)
+                if delay:time.sleep(delay)
+                last_submission=time.monotonic()
                 text = (MATERIALS / case['input_path']).read_text()
                 assert sha256(text.encode()).hexdigest() == entry['text_sha256']
                 (OUT / (case['id'] + '.intent')).write_text(identifier)
@@ -106,6 +128,9 @@ def main():
                 if status != 200 or job['job']['status'] in {'complete', 'failed', 'cancelled'}:
                     break
                 time.sleep(2)
+            if status!=200 or job['job']['status'] not in {'complete','failed','cancelled'}:
+                (OUT / (case['id'] + '.pending.json')).write_text(json.dumps(job,ensure_ascii=False))
+                raise RuntimeError('Job is not terminal; retain intent and recover by GET')
             file.write_text(json.dumps(job, ensure_ascii=False))
             print(case['id'], job.get('job', {}).get('status', status), flush=True)
             if status != 200 or job['job']['status'] != 'complete':
