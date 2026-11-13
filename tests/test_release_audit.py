@@ -26,3 +26,9 @@ class ReleaseAuditTests(unittest.TestCase):
         stats=summarize([row,{'id':'failed','outcome':'failed'},{'id':'pending','outcome':'unstarted'}])
         self.assertEqual((stats['complete'],stats['failed'],stats['unstarted']),(1,1,1))
         self.assertEqual(stats['completed_without_read_pages'],1)
+
+    def test_extracted_source_without_highlights_is_not_blameable_on_a_phrase_gap(self):
+        report=web_search.run(TEXT,searcher=Search(),fetcher=Pages())
+        report['matches']=[];report['web']['query_spans']=[]
+        row=evaluate(report,self.case(),[])
+        self.assertEqual(row['evidence'][0]['earliest_observed_loss'],'highlight_incomplete')

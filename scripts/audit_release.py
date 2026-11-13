@@ -55,8 +55,11 @@ def evaluate(report,case,reviews):
         covered=lambda matches:sum(any(m['start']<=t.start and t.end<=m['end'] for m in matches) for t in copied)
         words=covered(exact);expected_words=covered([m for m in exact if _url(m['source_url']) in urls])
         lexical=gold['needs_lexical_highlight'];whole=bool(copied) and words==len(copied)
-        loss=('found' if whole else 'no_internal_phrase_observed' if not phrase else 'expected_url_not_returned' if not discovered
-              else 'expected_url_not_queued' if not queued else 'expected_url_unread' if not pages else 'source_quote_not_extracted' if not extracted else 'highlight_incomplete')
+        # Later positive evidence overrides an earlier phrase/URL gap: a source
+        # already read and extracted cannot be lost at the query-selection stage.
+        loss=('found' if whole else 'highlight_incomplete' if extracted else 'source_quote_not_extracted' if pages
+              else 'expected_url_unread' if queued else 'expected_url_not_queued' if discovered
+              else 'no_internal_phrase_observed' if not phrase else 'expected_url_not_returned')
         evidence.append({'index':index,'lexical':lexical,'internal_phrase':phrase,'expected_url_returned':discovered,
                          'expected_url_queued':queued,'expected_url_read':bool(pages),'source_quote_extracted':extracted,
                          'copied_words':len(copied),'highlighted_words':words,'highlighted_expected_source_words':expected_words,
