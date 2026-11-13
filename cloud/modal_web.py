@@ -9,7 +9,7 @@ REMOTE_ROOT='/opt/istok'
 APP_NAME='istok-web-beta'
 VOLUME_NAME='istok-web-beta-data'
 ORIGIN='https://zhanlaiman--istok-beta.us-east.modal.run'
-WEB_FILES=('privacy.html','owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
+WEB_FILES=('privacy.html','dictionary-license.txt','rtf-license.txt','owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
            'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt')
 
 
@@ -18,6 +18,7 @@ def source_manifest(root=ROOT):
     files=['server.py','cloud/web_beta.py','cloud/modal_web.py',
         *('web/'+name for name in WEB_FILES),
         'data/source-packs/biology-ru-v1.json','data/source-packs/economics-ru-v1.json',
+        *('data/dictionaries/ru_RU/'+name for name in ('ru_RU.aff','ru_RU.dic','README_ru_RU.txt','manifest.json')),
         *(str(path.relative_to(root)) for path in sorted((root/'plagiarism').glob('*.py')))]
     result=[]
     for name in files:
@@ -56,6 +57,7 @@ def build_app(directory,key):
     import modal
     volume=modal.Volume.from_name(VOLUME_NAME,create_if_missing=True,version=2)
     image=(modal.Image.debian_slim(python_version='3.14')
+        .apt_install('hunspell','antiword')
         .pip_install('pypdf==7.0.1','pypdfium2==5.14.0')
         .add_local_dir(directory,REMOTE_ROOT,copy=True)
         .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':'tavily','ISTOK_MODEL_PROVIDER':'local'}))

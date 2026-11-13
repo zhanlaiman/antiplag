@@ -25,7 +25,7 @@ OLLAMA_IMAGE = "ollama/ollama:0.34.2@sha256:c715bebf769913db6c82d96f8a8dfee989c4
 UPLOAD_FILES = (
     "cloud/modal_evaluation.py",
     "plagiarism/__init__.py", "plagiarism/cloud_contract.py", "plagiarism/cloud_transport.py",
-    "plagiarism/demo.py", "plagiarism/evaluation.py",
+    "plagiarism/demo.py", "plagiarism/evaluation.py", "plagiarism/data_management.py",
     "plagiarism/jobs.py", "plagiarism/llm.py", "plagiarism/matching.py",
     "plagiarism/pipeline_evaluation.py", "plagiarism/retrieval.py",
     "plagiarism/retrieval_evaluation.py", "plagiarism/source_packs.py", "plagiarism/storage.py",

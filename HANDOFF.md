@@ -1,3 +1,33 @@
+# ПРОДОЛЖЕНИЕ ГОТОВО К ПУБЛИКАЦИИ — 13 ноября22:09 Алматы
+
+966PythonPASS(skip1),71NodePASS,gitdiffcheckPASS. Полныйповторfeatures-full-python-final.log. Важноеисправлениетестаconcurrentadmission: выбиратьреальноadmittedIDдляrefund, анепредполагатьчтоID0успелв6принятых. Нетпроизводственнойошибкиквоты. BrowserUIвсеосновныеновыесценарииPASS(подробностиниже), ZIPизбраузерапроверен. ПоследняяCUAphasebilling CLOSED «Подтвердил бесплатный лимит хостинга»: https://modal.com/settings/zhanlaiman/usage, credits28.04/Totalspend0/Spendlimit0/Starter. Ничегонеменялось. Tab15billingвременно,потомзакрыть. Новыезатраты0₸/новыхT0.
+
+Начатfreshproductionbackupвсех9DB+guestkey+ownerusername/salt/digest (безplaintext) /state/release-backups/20261113-before-features, remotecontainer ta-01M7AXKD9697DBKZAZEXEA2JRR. Скрипт .runtime/release-20261113/cloud-backup-features.py; выполняющийсяexecsession17582, логcloud-backup-features.log. Дождаться,downloadexistingdir,hash/quickcheck. Послеэтогоgitcheckpoint/deployCPU+newassets/oldreportpersist+restoreverify. Доdeployproductionпо-прежнему8b062d6; HEADeb2bcf7 плюснепубликуемыеновыеизменения. Основнойдедлайн14ноября04:24Алматы, остаётсяоколо6ч14мин. ПользовательпопросилдоменСТОП/самдокупитдома, большеNamecheapнетрогать.
+
+---
+
+# КОНТРОЛЬНАЯ ТОЧКА ПРОДОЛЖЕНИЯ — 13 ноября около21:00 Алматы
+
+НовыефункциивдеревеНЕОПУБЛИКОВАНЫ: dashboard/#data, reversibletrash/restore, ZIPallownrecords+sourcesnapshots+dict, owneraggregateSQLstats; Hunspellru+rules+manualUnicodeUTF16edits+privateignorelist; DOC/ODT/RTF/HTML в дополнениеDOCX/PDF; клиентскоеоформлениецитатыбезAPI. Подробнее docs/DATA_AND_CORRECTOR_2026-11-13.md. 71NodePASS. Pythonfull965hadoneallowlistfailure: Store импортируетdata_management, добавленвcloud/modal_evaluation.UPLOAD_FILES иtestcount19; targeted12PASS. Полныйповторfeatures-full-python.log ещёпроверить. Никакихмоделей/GPUневызывали — modal_evaluationтолькоsourceallowlist иmocktests.
+
+NativeUI fixture .runtime/release-20261113/dashboard-ui/serve.py PID52462 port8767, isolatedstate/no_searchrunner, syntheticowner. IABtab10 localhost (неproduction) сохраняет2авторскихбиблиотечныхотчёта/32источника/1ignoreword, ownfixtureownerlogin done; productionownerloginНЕделали. UItrash/restore/exportZIP/privateword+owneraggregate/morphology/selectedcorrectionPASS,320/1280nooverflow. Скачанный /Users/air/Downloads/istok-personal-data.zip проверен, содержит1синтетическийreport+30publicsources+1dictionaryword. Скриншотыdashboard-mobile.png/dashboard-wide.png/citation-local.png приватноruntime. Viewportreset/mobiletab14closed. CUAphaseclosed «Проверил панель, корректор и цитаты». Обнаруженыиустранены лишний403retrievalвbeta/UIQwenprompts; betaquote теперьбезмоделей.
+
+Пользовательотвлёкнадомен: istok.onlineуNamecheapNOTAVAILABLE, поего выбору istoktext.onlineдобавленвкорзину1year/$0.98+$0.20fee=$1.18;renewalпрайс35.68+.20=35.88/year. Покупки/оплатыагентом0. Пользовательсамсоздалаккаунт, попросилпомощьошибкаemaildisabled; профильcorrectemail. ВАЖНО: CUAredactsinputvalue as <redacted>, нельзясудитьоvalue/length/filled черезevaluate. Ошибочныйвыводпрологинпубличноисправлен. Поегоявнойпросьбе данныеегостаройформыперенесены UIcopy/paste безчтениятелефона вPrimaryAddress; SaveChanges→Success. Контактныеданныевrepoнерегистрировать. ЗатемонявнопопросилСТОПДОМЕН: доменНЕтрогатьдальше, домаонкупитсам. CUAphaseclosed «Сохранил контактные данные Namecheap». Tab9старыйcheckout,12usercheckout,13profileпослесохранения,11ICANNuser — НЕзакрывать/непереключать. Пользовательедетчас (~20:54→21:54)ипросилвсёэтовремяулучшатьИсток. Основнойдедлайн04:24неизменен, бюджет0.
+
+Основныхновыхпоисковпо-прежнему90T,41Wiki. Справочныеwebqueries continuation:2Hunspell/spylls+1domain+2NamecheapKB, вместе с6старыми=11; дажеconservative90+11=101<120. НовыхинтернетпроверокИстока/text.ru0. Codex2%used/resetcredits0, Modalкредиты/спендлимит передdeployЕЩЁперепроверить. Лимит180/месяцнесбрасывать. Следующее: зелёныйполныйsuite, gitcheckpoint, billing/productionbackup, deployCPU+verifyoldreports/newfeatures+restore/rollback; затем бесплатныйscopedclientAPI, boundedURL/sitechecks/batchеслиуспеваем. output/tmpнетронуты.
+
+---
+
+# ПРОДОЛЖЕНИЕ АКТИВНО — 13 ноября 20:35 Алматы
+
+По новому поручению продолжаем до прежнего дедлайна14ноября04:24, бюджет0₸, Telegram исключён, без text.ru прогонов/моделей/GPU. Пользователь выбрал «Личные данные + общая статистика владельцу». Ответ про корректор дан: Hunspell+правила, неQwen. Dots по-прежнему нет, обязательное участие пока не понадобилось.
+
+Непубликованные изменения: tenant-local корзина report/source, восстановление, ZIP export streaming TemporaryFile/consistent SQLite snapshot безсекретов/квот/jobreceipts, owneraggregateSQLcounts толькоowner. Deletedreport закрыт черезGET/export/jobpoll/POSTreplay, idempotency/квотысохранены; source snapshots неизменны. UI #data фильтры/поиск/картынеизменны, личныйсловарь. Корректор нативныйHunspell(локальноHomebrew1.7.4), официальныйLibreOffice ru_RU pinned eff9495b70722d8e590e97b1710cfc7c00f6ce72,3.47MBdic+71kBaff+copyright manifest. NoLLM/downloadmodels/noexternaltextAPI. 10kchars/800forms/200issues/12secperprocess/semaphore1, -a^quoteddata/no-default-personal/noinheritedcredentials, UTF16offsets. Rules punctuation/repetition/basicgrammar+unambiguousstems. UI manualsingleedits stalerejected, neitherdraftnorpercentrewrittenautomatically. Fullgrammar notclaimed. Need UI/testpolish, remainingformats/API/siteanalysis, finaldeploy/backups/recovery.
+
+Continuationstart backup .runtime/backups prepared and gitbundle .runtime/release-20261113/continuation-start.bundle verified (beforecode). Previousrelease8b062d6stillproduction; HEADeb2bcf7docs, sourcechangesuncommitted. Dashboardnew5PASS; correctedstorage+snapshot+new17PASS; latestdashboard/dictionaryregression40PASS;67NodePASS. Proofreadingfirst6PASS, grammar7th nowadded. Fullsuite/UI/deploy notyetperformed. No new Tavily/Wikicalls; old90T+41Wiki+6referencequeries unchanged. Modal/publicquota last36/180/paygo0 preserved. Codexlast2%used/resetcredits0. output/tmpuntouched.
+
+---
+
 # ПРОВЕРЕННЫЙ БЕСПЛАТНЫЙ MVP — завершено 2026-11-13T19:51:47+05:00
 
 Сайт: https://zhanlaiman--istok-beta.us-east.modal.run/ . Код публикации `8b062d64a5c5b25fafaa0600ffdf48cb8bc3a301`, 52 файла. Все хеши в контейнере и 6 публичных ресурсов совпали. Цель бесплатного MVP выполнена раньше предела 14 ноября 04:24 Алматы; начало 13 ноября 18:24. Полного равенства платной версии text.ru нет. Уточнение владельца соблюдено: функциональная матрица платных требований, новых внешних проверок text.ru после уточнения нет. Итог: docs/MVP_RELEASE_2026-11-13.md; требования: docs/PAID_FEATURE_REQUIREMENTS_2026-11-13.md; эксплуатация/откат: docs/RELEASE_OPERATIONS_2026-11-13.md.

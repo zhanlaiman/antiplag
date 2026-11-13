@@ -1,0 +1,8 @@
+{
+  "version": "0.0.35",
+  "url": "https://files.pythonhosted.org/packages/41/32/896d0597748a55913033a3a52de9a9449d0d479a1ac733a1e0178a537170/striprtf-0.0.35-py3-none-any.whl",
+  "wheel_sha256": "2c8e207f47c9de355374d604167b17c99a06eb4d238e07cfba772f8669db60e4",
+  "source_sha256": "4d03d30ac6d6080dbe205a3a149be73200d7d370f866b76a65792910e79274f4",
+  "vendored_path": "plagiarism/rtf_vendor.py",
+  "vendored_sha256": "ec624873a6961fc56a10a0bcbb73770088378ee472c0e3edc6ea3f92adc57e72"
+}

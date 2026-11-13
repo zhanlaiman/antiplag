@@ -19,6 +19,8 @@ from plagiarism import document_import, access, auth_provider, demo, evaluation,
 from plagiarism.jobs import Jobs
 from plagiarism.matching import analyze, MAX_TEXT_CHARS
 from plagiarism.storage import Store
+from plagiarism.data_management import DataArchive
+from plagiarism import proofreading
 
 
 ROOT = Path(__file__).resolve().parent
@@ -68,6 +70,14 @@ class Handler(BaseHTTPRequestHandler):
         logging.info(message, *arguments)
 
     def send_json(self, payload, status=200):
+        # A completed job remains an idempotency receipt even if its report is in
+        # the trash. Do not reopen the embedded copy through polling or replay.
+        job = payload.get('job') if isinstance(payload, dict) else None
+        if isinstance(job, dict) and isinstance(job.get('result'), dict):
+            report = job['result'].get('report')
+            store = self.tenant.store if getattr(self, 'tenant', None) else getattr(self.server, 'store', None)
+            if isinstance(report, dict) and store and store.is_trashed('report', report.get('id')):
+                payload = {**payload, 'job': {**job, 'result': {'report_removed': True, 'report_id': report['id']}}}
         content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -153,6 +163,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = self.read_body() if method == "POST" else {}
             result = self.route(method, path, body)
+            if isinstance(result, DataArchive):
+                with result.stream as stream:
+                    size = stream.seek(0, 2)
+                    stream.seek(0)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/zip')
+                    self.send_header('Content-Disposition', 'attachment; filename="istok-personal-data.zip"')
+                    self.send_header('Content-Length', str(size))
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    for name, value in self.response_headers:
+                        self.send_header(name, value)
+                    self.end_headers()
+                    while chunk := stream.read(65536):
+                        self.wfile.write(chunk)
+                return
             self.send_json(result)
         except (access.AccessError, auth_provider.AccessError) as error:
             payload = {"error": str(error), "code": error.code}
@@ -198,6 +224,8 @@ class Handler(BaseHTTPRequestHandler):
                  "/motion.js": "motion.js", "/motion.css": "motion.css",
                  "/setup-search.html": "setup-search.html", "/setup-search.js": "setup-search.js"}
         files["/privacy.html"] = "privacy.html"
+        files["/dictionary-license.txt"] = "dictionary-license.txt"
+        files["/rtf-license.txt"] = "rtf-license.txt"
         files["/owner.html"] = "owner.html"
         files["/owner.js"] = "owner.js"
         files["/fonts/InterVariable.woff2"] = "fonts/InterVariable.woff2"
@@ -240,6 +268,23 @@ class Handler(BaseHTTPRequestHandler):
                 return {"web": web_search.status()}
             raise KeyError(path)
         store = self.tenant.store if getattr(self, "tenant", None) else self.server.store
+        if method == 'POST' and path == '/api/proofread':
+            return proofreading.check(field(body, 'text', proofreading.MAX_CHARACTERS), store.dictionary_words())
+        if method == 'GET' and path == '/api/dictionary':
+            return {'words': store.dictionary_words()}
+        if method == 'POST' and path == '/api/dictionary':
+            return store.update_dictionary(body.get('word'), body.get('action'))
+        if method == 'GET' and path == '/api/data':
+            return store.data_summary()
+        if method == 'GET' and path == '/api/data-export':
+            return store.export_data()
+        lifecycle = re.fullmatch(r'/api/data/(report|source)/([^/]{1,100})/(trash|restore)', path)
+        if method == 'POST' and lifecycle:
+            kind, identifier, action = lifecycle.groups()
+            changed = store.trash_item(kind, identifier) if action == 'trash' else store.restore_item(kind, identifier)
+            if not changed:
+                raise KeyError(identifier)
+            return {'ok': True, 'kind': kind, 'id': identifier, 'trashed': action == 'trash'}
         jobs = self.tenant.jobs if getattr(self, "tenant", None) else getattr(self.server, "jobs", None)
         if runtime:
             if (path in {"/api/examples", "/api/evaluations", "/api/reviews", "/api/export", "/api/evaluate", "/api/demo", "/api/source-packs/install"}
@@ -320,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Укажите полную ссылку, начинающуюся с http:// или https://.")
             return {"source": runtime.add_source(store, title, text, url) if runtime else store.add_source(title, text, url)}
         if method == "DELETE" and path.startswith("/api/sources/"):
-            if not store.delete_source(path.rsplit("/", 1)[1]):
+            if not store.trash_item('source', path.rsplit("/", 1)[1]):
                 raise KeyError(path)
             return {"deleted": True}
         if method == "POST" and path == "/api/demo":

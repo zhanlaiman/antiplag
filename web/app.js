@@ -220,7 +220,7 @@ const state = {
 };
 const main = document.querySelector('#main-content');
 const relationNames = { exact: 'Дословное совпадение', paraphrase: 'Возможный пересказ', same_topic: 'Общая тема', unrelated: 'Разные тексты' };
-const viewNames = { home: 'Главная', check: 'Проверка текста', sources: 'Источники', evaluation: 'Оценка Qwen', history: 'История' };
+const viewNames = { home: 'Главная', check: 'Проверка текста', sources: 'Источники', evaluation: 'Оценка Qwen', history: 'История', data: 'Мои данные' };
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const number = value => Number(value || 0).toLocaleString('ru-RU');
 const chars = value => Array.from(value);
@@ -483,6 +483,8 @@ function updateAccountUI() {
   if (ownerLink) { ownerLink.hidden = !isBeta() || Boolean(state.session.beta.owner); }
   const evaluation = document.querySelector('#evaluation-nav');
   if (evaluation) evaluation.hidden = isSaas() || isBeta();
+  const settings = document.querySelector('#model-settings');
+  if (settings) settings.hidden = isBeta();
   const storageNote = document.querySelector('#workspace-storage-note');
   if (storageNote) storageNote.textContent = isBeta() ? state.session.beta.owner ? 'Отчёты сохраняются в аккаунте владельца.' : 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
   updateQuotaUI();
@@ -525,13 +527,13 @@ function updateCheckModeUI() {
   const unavailable = document.querySelector('#web-availability');
   if (unavailable) unavailable.hidden = webConfigured();
   const setup = document.querySelector('#setup-search-link');
-  if (setup) setup.hidden = isSaas();
+  if (setup) setup.hidden = isSaas() || isBeta();
   const options = document.querySelector('#internet-options');
   if (options) options.hidden = !internet;
   const consent = document.querySelector('#internet-consent');
   if (consent) consent.checked = state.internetConsent;
   const tools = document.querySelector('#library-tools');
-  if (tools) tools.hidden = internet;
+  if (tools) tools.hidden = internet || isBeta();
   const scope = document.querySelector('#check-scope');
   if (scope) scope.innerHTML = scopeAside();
   const button = document.querySelector('#check-button');
@@ -688,6 +690,7 @@ function candidateHasModelJob(retrievalId, candidateId) {
 function modelJobResultHTML(entry) {
   const result = entry.job?.result;
   if (!result) return '';
+  if (result.report_removed) return '<p>Отчёт в корзине. <a href="#data">Восстановить в панели данных →</a></p>';
   if (result.report) {
     const report = result.report;
     return `<p>${report.scope === 'web_search' ? 'Уникальность' : 'Отчёт'} · ${webUniqueness(report)}</p>
@@ -1099,6 +1102,64 @@ function renderTextStatistics() {
     <p class="field-help">Частота слов не является оценкой плагиата, орфографии или «водности».</p>`;
 }
 
+function proofreaderHTML(surface) {
+  return `<details class="proofreader"><summary>Правописание и формы слов</summary><p class="field-help">Русский словарь и простые правила, без нейросети. Текст обрабатывается на сервере Истока, без внешнего API и без поисковых запросов. До 10 000 знаков. <a href="/dictionary-license.txt" target="_blank" rel="noopener">Словарь LibreOffice / Hunspell</a>.</p><button class="button secondary small" id="proofread-${surface}" type="button">Проверить правописание</button><p id="proofread-status-${surface}" class="field-help" role="status"></p><div id="proofread-result-${surface}"></div></details>`;
+}
+
+function bindProofreader(surface, field) {
+  const button = document.getElementById(`proofread-${surface}`);
+  const area = document.getElementById(`proofread-result-${surface}`);
+  const status = document.getElementById(`proofread-status-${surface}`);
+  const revision = state.viewRevision;
+  let snapshot = null;
+  const current = () => state.viewRevision === revision && field.isConnected;
+  function invalidate() {
+    if (snapshot !== null && field.value !== snapshot) {
+      status.textContent = 'Текст изменён. Проверьте правописание ещё раз для новых подсказок.';
+      area.querySelectorAll('button').forEach(control => { control.disabled = true; });
+    }
+  }
+  field.addEventListener('input', invalidate);
+  button.addEventListener('click', () => busy(button, 'Проверяем словарь', async () => {
+    if (documentReading(field.id)) throw new Error('Дождитесь извлечения текста документа.');
+    const submitted = field.value;
+    status.textContent = 'Проверяем словарь и правила…';
+    try {
+      const result = await api('/api/proofread', { text: submitted });
+      if (!current()) return;
+      snapshot = submitted;
+      const issues = result.issues.slice(0, 60);
+      status.textContent = `${result.dictionary_available ? `Проверено словоформ: ${number(result.checked_unique_forms)} (до ${number(result.unique_forms_limit)}).` : 'Словарь не завершил проверку.'} Подсказок: ${number(result.issues.length)}${result.issues_truncated ? ' или больше' : ''}. ${result.issues.length > 60 ? 'Показаны первые 60.' : ''}`;
+      area.innerHTML = `<p class="field-help">${escapeHTML(result.limitations)}</p>${result.warnings.map(warning => `<p class="inline-error">${escapeHTML(warning)}</p>`).join('')}
+        ${issues.length ? issues.map((issue, index) => `<article class="proofread-issue"><p><mark>${escapeHTML(issue.original)}</mark> <span>${escapeHTML(issue.message)}</span></p><div class="proofread-actions">${issue.suggestions.map((suggestion, choice) => `<button class="button secondary small" type="button" data-proofread-choice="${index}:${choice}">${suggestion ? escapeHTML(suggestion) : 'Убрать пробел'}</button>`).join('')}${issue.kind === 'spelling' ? `<button class="text-button" type="button" data-proofread-ignore="${index}">В мой словарь</button>` : ''}</div></article>`).join('') : '<p>Словарь и правила не нашли замечаний в проверенной части. Это не гарантия отсутствия ошибок.</p>'}
+        <details class="proofread-frequencies"><summary>Частоты и формы слов</summary><p class="field-help">Объединены только однозначные словарные основы. При нескольких вариантах слово остаётся отдельно. Это не полный грамматический разбор и не показатель «воды» или плагиата.</p><ul>${result.frequencies.filter(item => item.word.length >= 3).map(item => `<li><strong>${escapeHTML(item.word)}</strong> — ${number(item.count)} <span class="subtle">(${item.forms.map(form => `${escapeHTML(form.word)}: ${number(form.count)}`).join(', ')})</span></li>`).join('')}</ul></details><p class="field-help"><a href="#data">Управлять личным словарём →</a></p>`;
+      area.querySelectorAll('[data-proofread-choice]').forEach(control => control.addEventListener('click', () => {
+        const [index, choice] = control.dataset.proofreadChoice.split(':').map(Number);
+        const issue = issues[index];
+        if (!current() || field.value !== snapshot || field.value.slice(issue.start, issue.end) !== issue.original) {
+          invalidate();
+          toast('Текст изменился. Сначала проверьте его снова.', true);
+          return;
+        }
+        const replacement = issue.suggestions[choice];
+        field.value = field.value.slice(0, issue.start) + replacement + field.value.slice(issue.end);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.focus();
+        field.setSelectionRange?.(issue.start, issue.start + replacement.length);
+        invalidate();
+      }));
+      area.querySelectorAll('[data-proofread-ignore]').forEach(control => control.addEventListener('click', () => busy(control, 'Добавляем', async () => {
+        await api('/api/dictionary', { word: issues[Number(control.dataset.proofreadIgnore)].original, action: 'add' });
+        if (current()) status.textContent = 'Слово добавлено в ваш словарь. При следующей проверке оно будет пропущено.';
+      })));
+      invalidate();
+    } catch (error) {
+      if (current()) status.textContent = error.message;
+      throw error;
+    }
+  }));
+}
+
 function updateCharacterCount() {
   renderTextStatistics();
   const count = document.querySelector('#character-count');
@@ -1175,11 +1236,11 @@ async function readTextFile(input, target) {
   input.value = '';
   const token = { active:false };
   fileReadTokens.set(target, token);
-  const documentFile = /\.(docx|pdf)$/i.test(file.name);
-  if (!/\.(txt|md|docx|pdf)$/i.test(file.name)) {
-    throw new Error('Выберите TXT, MD, DOCX или текстовый PDF.');
+  const documentFile = /\.(doc|docx|pdf|odt|rtf|html|htm)$/i.test(file.name);
+  if (!/\.(txt|md|doc|docx|pdf|odt|rtf|html|htm)$/i.test(file.name)) {
+    throw new Error('Выберите TXT, MD, DOC, DOCX, PDF, ODT, RTF или HTML.');
   }
-  if (documentFile && file.size > 1048576) throw new Error('DOCX/PDF больше 1 МиБ. Разделите документ.');
+  if (documentFile && file.size > 1048576) throw new Error('Документ больше 1 МиБ. Разделите его.');
   if (!documentFile && file.size > 800004) {
     throw new Error('Файл слишком большой. Используйте текст до 200 000 знаков.');
   }
@@ -1240,7 +1301,7 @@ function renderHome() {
             <h1 class="landing-title" aria-label="Проверьте уникальность текста">Проверьте текст.<br>Найдите <span>исток.</span></h1>
             <p class="landing-description">От совпавшей фразы — к её источнику. Проверяйте статьи, курсовые и исследования с отчётом, который можно проверить самому.</p>
             <div class="landing-actions"><a class="landing-button" href="#home" data-home-scroll="home-check-form">Проверить текст <span aria-hidden="true">↗</span></a><a class="landing-text-link" href="#home" data-home-scroll="home-how">Как это работает <span aria-hidden="true">→</span></a></div>
-            <p class="landing-formats">Вставьте текст или загрузите TXT / MD / DOCX / PDF</p>
+            <p class="landing-formats">Вставьте текст или загрузите TXT / MD / DOCX / PDF / ODT / RTF / HTML / DOC</p>
             <div class="landing-benefits"><span><i aria-hidden="true">✓</i> Подсветка совпадений</span><span><i aria-hidden="true">✓</i> Ссылки на источники</span><span><i aria-hidden="true">✓</i> Сохранённый отчёт</span></div>
           </div>
           <div class="landing-preview" aria-label="Учебный пример оформления отчёта">
@@ -1270,11 +1331,12 @@ function renderHome() {
         <div class="landing-check-layout landing-section">
           <div class="landing-check-copy"><p class="landing-label">НАЧНИТЕ ПРОВЕРКУ</p><h2>Ваш текст.<br>Его источники.</h2><p>Добавьте материал, который хотите проверить. Результат появится здесь — с выделенными фрагментами и ссылками.</p><div class="landing-check-note"><span aria-hidden="true">↗</span><p>Уже работаете над документом?<br><a href="#check">Открыть рабочее пространство</a></p></div><p class="home-v2-status" id="home-search-status">${webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету'}</p>${state.text.trim() ? '<p class="home-existing-draft">Ваш черновик на месте. <a href="#check">Продолжить работу ↗</a></p>' : ''}</div>
           <form class="home-checker" id="home-check-form">
-            <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD / DOCX / PDF</span></div>
+            <div class="home-checker-heading"><label for="home-text">Текст для проверки</label><span class="landing-format-tag">TXT / MD / DOCX / PDF / ODT / RTF / HTML / DOC</span></div>
             <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте текст вашей работы…"></textarea>
             <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
+            ${proofreaderHTML('home')}
             <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
-            <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; DOCX / PDF до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Загрузить текст для интернет-проверки"></label>
+            <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; остальные документы до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текст для интернет-проверки"></label>
             <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска источников.</span></label>
             <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
@@ -1312,6 +1374,7 @@ function renderHome() {
       <footer class="home-footer"><a class="home-brand" href="#home" data-home-scroll="home-top">исток<span class="home-brand-dot">.</span></a><span>У каждого совпадения есть источник</span><div><a href="#history">История</a><a href="#check">Рабочее пространство ↗</a></div></footer>
     </div>`;
   const field = document.querySelector('#home-text');
+  bindProofreader('home', field);
   field.value = state.homeText;
   document.querySelector('#home-consent').checked = state.homeConsent;
   field.addEventListener('input', () => {
@@ -1434,10 +1497,10 @@ function renderCheck() {
           <div class="editor-header">
             <div class="editor-title"><span class="document-icon" aria-hidden="true">▤</span>Ваш текст</div>
             <label class="file-button">↑ Загрузить файл
-              <input id="text-file" type="file" accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Загрузить текстовый файл">
+              <input id="text-file" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текстовый файл">
             </label>
           </div>
-          <p class="field-help">DOCX/PDF до 1 МиБ обрабатываются на сервере Истока без запуска поиска. DOCX — основной текст и таблицы, без сносок; PDF — до 40 страниц с текстовым слоем, без OCR.</p><p class="import-hint" id="check-text-import-hint" role="status" hidden></p>
+          <p class="field-help">Документы до 1 МиБ обрабатываются на сервере Истока без запуска поиска. DOCX/ODT — основной текст и таблицы, без сносок; PDF — до 40 страниц с текстовым слоем, без OCR. RTF/HTML/DOC — текст без выполнения объектов. Проверьте результат перед поиском.</p><p class="import-hint" id="check-text-import-hint" role="status" hidden></p>
           <textarea class="editor-text" id="check-text" aria-label="Текст для проверки"
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
@@ -1445,6 +1508,7 @@ function renderCheck() {
             <span>${isBeta() ? state.session.beta.owner ? 'До 10 000 знаков · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
           <details class="card text-statistics"><summary>Статистика текста и повторы</summary><div id="text-statistics-content"></div></details>
+          ${proofreaderHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска страниц-источников.</label>
           </div>
@@ -1475,6 +1539,7 @@ function renderCheck() {
     </div>
     <section class="report-section" id="report-area" aria-live="polite"></section>`;
   const textarea = document.querySelector('#check-text');
+  bindProofreader('check', textarea);
   textarea.value = state.text;
   textarea.addEventListener('input', () => {
     saveDraft(textarea.value);
@@ -1754,7 +1819,7 @@ function renderReport() {
         <div class="match-list">${matches.map(matchCardHTML).join('')}</div>
       </div>` : empty(
         webReport ? (hasWebSources(report) ? 'На прочитанных страницах совпадений не найдено' : 'Не удалось прочитать страницы для сравнения') : 'Лексических совпадений в библиотеке не найдено',
-        webReport ? 'Это результат ограниченного поиска. Недоступные страницы, пересказы и переводы могут остаться незамеченными.' : 'Глубокие пересказы могут остаться незамеченными. Для сравнения с конкретным источником используйте Qwen.',
+        webReport ? 'Это результат ограниченного поиска. Недоступные страницы, пересказы и переводы могут остаться незамеченными.' : isBeta() ? 'Результат учитывает только вашу библиотеку. Пересказы могут остаться незамеченными; для поиска страниц выберите режим «Интернет».' : 'Глубокие пересказы могут остаться незамеченными. Для сравнения с конкретным источником используйте Qwen.',
         '⌕'
       )}
     <div id="comparison-area" tabindex="-1">${selected ? comparisonHTML(selected) : ''}</div>
@@ -1782,7 +1847,7 @@ function renderReport() {
   });
   bindComparison(selected);
   updateReportFreshness();
-  if (!webReport) { renderRetrieval(); loadRetrieval(report.id); }
+  if (!webReport && !isBeta()) { renderRetrieval(); loadRetrieval(report.id); }
   updateModelActionControls();
 }
 
@@ -2393,8 +2458,8 @@ function comparisonHTML(match) {
       </div>
       <div class="action-row">
         <button class="button small secondary" id="quote-button" type="button">Оформить цитату</button>
-        <button class="button small secondary" id="paraphrase-button" type="button" ${available ? '' : 'disabled'}>Предложить пересказ</button>
-        <button class="text-button" id="judge-button" type="button" ${available ? '' : 'disabled'}>Оценить с Qwen ↗</button>
+        <button class="button small secondary" id="paraphrase-button" type="button" ${isBeta() ? 'hidden' : ''} ${available ? '' : 'disabled'}>Предложить пересказ</button>
+        <button class="text-button" id="judge-button" type="button" ${isBeta() ? 'hidden' : ''} ${available ? '' : 'disabled'}>Оценить с Qwen ↗</button>
       </div>
       <p class="field-help" id="comparison-model-unavailable" ${available ? 'hidden' : ''}>Модель сейчас недоступна. Настройки сервера находятся в меню сверху.</p>
       ${matchReviewHTML(match)}
@@ -2458,7 +2523,10 @@ function bindComparison(match) {
   for (const [id, mode] of [['quote-button', 'quote'], ['paraphrase-button', 'paraphrase']]) {
     document.querySelector(`#${id}`).addEventListener('click', event => busy(event.currentTarget, 'Готовим правку', async () => {
       const resultArea = document.querySelector('#rewrite-area');
-      const { rewrite } = await modelRequest('/api/rewrite', {
+      const { rewrite } = isBeta() && mode === 'quote' ? { rewrite: {
+        text: `«${match.source_excerpt}»\n\nИсточник: ${match.source_title || 'Источник'}${match.source_url ? ` — ${match.source_url}` : ''}`,
+        mode: 'quote', model: 'local-formatting', requires_review: true,
+      } } : await modelRequest('/api/rewrite', {
         report_id: reportId, match_id: match.id, mode, model: selectedModel(),
       }, { original_text: match.excerpt, source_title: match.source_title });
       if (!resultArea.isConnected || !currentComparison(reportId, match.id)) return;
@@ -2610,12 +2678,12 @@ function renderSources() {
           <div class="section-heading">
             <label class="field-label" for="source-text">Полный текст источника</label>
             <label class="file-button">↑ Загрузить файл
-              <input id="source-file" type="file" accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-label="Загрузить текст источника">
+              <input id="source-file" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текст источника">
             </label>
           </div>
           <textarea class="field" id="source-text" name="text" required placeholder="Вставьте текст публикации…"></textarea>
           <p class="field-help" id="source-text-limit-error" role="alert"></p>
-          <p class="field-help">DOCX/PDF до 1 МиБ обрабатываются на сервере Истока без запуска поиска. DOCX — основной текст и таблицы, без сносок; PDF — до 40 страниц с текстовым слоем, без OCR.</p><p class="field-help" id="source-text-import-hint" role="status" hidden></p>
+          <p class="field-help">Документы до 1 МиБ обрабатываются на сервере Истока без запуска поиска. DOCX/ODT — основной текст и таблицы, без сносок; PDF — до 40 страниц с текстовым слоем, без OCR. RTF/HTML/DOC — текст без выполнения объектов. Проверьте результат перед поиском.</p><p class="field-help" id="source-text-import-hint" role="status" hidden></p>
         </div>
         <button class="button" type="submit">Добавить в библиотеку <span aria-hidden="true">+</span></button>
         <p class="field-help">${isBeta() ? 'Источники сохраняются в гостевом пространстве этого браузера.' : isSaas() ? 'Источники сохраняются в вашем аккаунте и используются в следующих проверках.' : 'Источники сохраняются на вашем Mac и используются в следующих проверках.'}</p>
@@ -2798,6 +2866,94 @@ function renderExamples() {
   });
 }
 
+async function renderDataDashboard(filters = {}) {
+  const revision = state.viewRevision;
+  const generation = (state.dataRevision || 0) + 1;
+  state.dataRevision = generation;
+  const current = () => state.view === 'data' && state.viewRevision === revision && state.dataRevision === generation;
+  main.innerHTML = heading('Мои данные', 'Управляйте отчётами и библиотекой в своём пространстве.', '', 'Панель управления') + '<p class="subtle">Загружаем данные…</p>';
+  try {
+    const data = await api('/api/data');
+    if (!current()) return;
+    const tile = (value, label) => `<article class="card data-metric"><strong>${number(value)}</strong><span>${label}</span></article>`;
+    main.innerHTML = heading('Мои данные', 'Отчёты, источники и корзина вашего пространства.', '', 'Панель управления') + `
+      <section class="data-metrics" aria-label="Личная статистика">${tile(data.totals.reports, 'Отчётов, включая корзину')}${tile(data.totals.sources, 'Источников, включая корзину')}${tile(data.totals.trashed, 'Записей в корзине')}</section>
+      <section class="card data-controls"><div><h2>Резервная копия</h2><p>ZIP содержит все ваши отчёты, тексты источников, отметки и корзину. Храните архив в безопасном месте.</p><a class="button secondary" href="/api/data-export" download="istok-personal-data.zip">↓ Скачать мои данные</a></div><p class="field-help">Корзина скрывает запись, но сохраняет её для восстановления. Она не освобождает место и квоту проверок. Автоматической очистки нет. Черновики в браузере в архив не входят.</p></section>
+      <section class="card data-records"><div class="data-toolbar"><h2>Записи</h2><label>Найти<input id="data-query" type="search" placeholder="Текст, название или адрес"></label><label>Показать<select id="data-kind"><option value="all">Все записи</option><option value="report">Отчёты</option><option value="source">Источники</option><option value="trash">Корзина</option></select></label></div><p class="field-help">На экране — до ${number(data.listed_reports_limit)} последних отчётов. В архив входят все.</p><div id="data-list"></div><p id="data-list-status" class="field-help" role="status"></p></section>
+      <section class="card data-dictionary"><details><summary>Мой словарь корректора</summary><p class="field-help">Имена и термины, которые словарь пропускает при проверке. До 2000 слов. Удалённое слово можно снова добавить.</p><form id="dictionary-form" class="data-toolbar"><label>Добавить слово<input id="dictionary-word" maxlength="40" required autocomplete="off"></label><button id="dictionary-add" class="button secondary small" type="submit">Добавить</button></form><div id="dictionary-list"><p>Загружаем словарь…</p></div></details></section>
+      ${state.session?.beta?.owner ? '<section class="card" id="owner-statistics"><h2>Статистика сайта</h2><p>Загружаем сводные числа…</p></section>' : ''}`;
+    document.querySelector('#data-query').value = typeof filters.query === 'string' ? filters.query : '';
+    document.querySelector('#data-kind').value = ['all', 'report', 'source', 'trash'].includes(filters.kind) ? filters.kind : 'all';
+    let entries = [...data.reports.map(item => ({ ...item, kind: 'report', label: item.preview || 'Отчёт без текста' })),
+      ...data.sources.map(item => ({ ...item, kind: 'source', label: item.title }))];
+    function draw() {
+      if (!current()) return;
+      const query = document.querySelector('#data-query').value.trim().toLocaleLowerCase('ru');
+      const kind = document.querySelector('#data-kind').value;
+      const selected = entries.filter(item => (kind === 'trash' ? item.deleted_at : !item.deleted_at && (kind === 'all' || kind === item.kind))
+        && `${item.label} ${item.url || ''}`.toLocaleLowerCase('ru').includes(query));
+      document.querySelector('#data-list').innerHTML = selected.length ? selected.map(item => {
+        const index = entries.indexOf(item);
+        return `<article class="data-row"><div><small>${item.kind === 'report' ? 'Отчёт' : 'Источник'} · ${escapeHTML(date(item.created_at))}${item.deleted_at ? ' · в корзине' : ''}</small><h3>${escapeHTML(item.label)}</h3>${item.url ? `<p>${escapeHTML(item.url)}</p>` : ''}</div><div class="data-row-actions">${item.kind === 'report' && !item.deleted_at ? `<a class="button secondary small" href="#check/${encodeURIComponent(item.id)}">Открыть</a>` : ''}<button class="text-button" type="button" data-lifecycle-index="${index}">${item.deleted_at ? 'Восстановить' : 'В корзину'}</button></div></article>`;
+      }).join('') : '<p class="subtle">Таких записей нет.</p>';
+      document.querySelector('#data-list-status').textContent = `Показано: ${number(selected.length)}`;
+      document.querySelectorAll('[data-lifecycle-index]').forEach(button => button.addEventListener('click', () => busy(button, 'Сохраняем', async () => {
+        const item = entries[Number(button.dataset.lifecycleIndex)];
+        const action = item.deleted_at ? 'restore' : 'trash';
+        const filters = { query: document.querySelector('#data-query').value, kind: document.querySelector('#data-kind').value };
+        await api(`/api/data/${item.kind}/${encodeURIComponent(item.id)}/${action}`, {});
+        // Clear cached views of a removed report; keep the user's editor draft.
+        if (action === 'trash' && item.kind === 'report') {
+          if (state.report?.id === item.id) state.report = null;
+          if (state.homeReport?.id === item.id) state.homeReport = null;
+          for (const entry of Object.values(state.modelJobs)) {
+            if (entry.job?.result?.report?.id === item.id) entry.job.result = { report_removed: true, report_id: item.id };
+          }
+          saveModelJobs();
+          renderModelJobs();
+        }
+        await refreshSources();
+        if (!current()) return;
+        await renderDataDashboard(filters);
+        toast(action === 'trash' ? 'Запись в корзине. Её можно восстановить.' : 'Запись восстановлена.');
+      })));
+    }
+    document.querySelector('#data-query').addEventListener('input', draw);
+    document.querySelector('#data-kind').addEventListener('change', draw);
+    draw();
+    async function loadDictionary() {
+      const { words } = await api('/api/dictionary');
+      if (!current()) return;
+      document.querySelector('#dictionary-list').innerHTML = words.length ? `<ul class="dictionary-words">${words.map((word, index) => `<li><span>${escapeHTML(word)}</span><button class="text-button" type="button" data-dictionary-remove="${index}" aria-label="Убрать ${escapeHTML(word)} из словаря">Убрать</button></li>`).join('')}</ul>` : '<p class="subtle">Личный словарь пока пуст.</p>';
+      document.querySelectorAll('[data-dictionary-remove]').forEach(button => button.addEventListener('click', () => busy(button, 'Сохраняем', async () => {
+        await api('/api/dictionary', { word: words[Number(button.dataset.dictionaryRemove)], action: 'remove' });
+        await loadDictionary();
+      })));
+    }
+    document.querySelector('#dictionary-form').addEventListener('submit', event => {
+      event.preventDefault();
+      busy(document.querySelector('#dictionary-add'), 'Добавляем', async () => {
+        await api('/api/dictionary', { word: document.querySelector('#dictionary-word').value.trim(), action: 'add' });
+        if (!current()) return;
+        document.querySelector('#dictionary-word').value = '';
+        await loadDictionary();
+      });
+    });
+    loadDictionary().catch(error => { if (current()) document.querySelector('#dictionary-list').innerHTML = `<p class="inline-error">${escapeHTML(error.message)}</p>`; });
+    if (state.session?.beta?.owner) {
+      try {
+        const statistics = await api('/api/owner/statistics');
+        if (!current()) return;
+        const c = statistics.counts;
+        document.querySelector('#owner-statistics').innerHTML = `<h2>Статистика сайта</h2><p class="field-help">Только общие числа, без чужих текстов, адресов и идентификаторов. Обновлено ${escapeHTML(date(statistics.as_of))}.</p><div class="data-metrics">${tile(c.spaces, 'Пространств')}${tile(c.reports, 'Отчётов всего')}${tile(c.checks_today, 'Проверок сегодня')}${tile(statistics.quota.monthly_used, `Поисковых запросов из ${number(statistics.monthly_limit)} за месяц`)}</div><p>${number(c.database_bytes / 1024 / 1024)} МиБ баз данных · ${number(c.trashed)} записей в корзинах.${c.unavailable_spaces ? ' Часть пространств временно недоступна для подсчёта.' : ''}</p>`;
+      } catch (error) { if (current()) document.querySelector('#owner-statistics').innerHTML = `<h2>Статистика сайта</h2><p class="inline-error">${escapeHTML(error.message)}</p>`; }
+    }
+  } catch (error) {
+    if (current()) main.innerHTML = heading('Мои данные', 'Не удалось загрузить панель.', '', 'Панель управления') + `<p class="inline-error">${escapeHTML(error.message)}</p><button class="button secondary" id="retry-data" type="button">Повторить</button>`;
+    document.querySelector('#retry-data')?.addEventListener('click', renderDataDashboard);
+  }
+}
+
 async function renderHistory() {
   main.innerHTML = heading('История проверок', 'Сохранённые отчёты доступны вместе с фрагментами источников.', '', 'Ваши документы') + '<div id="history-list"><p class="subtle">Загружаем отчёты…</p></div>';
   try {
@@ -2896,7 +3052,7 @@ function updateModelActionControls() {
   const available = modelAvailable();
   for (const id of ['evaluation-model-unavailable', 'comparison-model-unavailable']) {
     const note = document.getElementById(id);
-    if (note) note.hidden = available;
+    if (note) note.hidden = available || isBeta();
   }
   const batchButton = document.querySelector('#check-all-candidates');
   const currentRetrieval = state.retrievals[state.report?.id];
@@ -3009,6 +3165,7 @@ function renderView() {
   else if (state.view === 'check') renderCheck();
   else if (state.view === 'sources') renderSources();
   else if (state.view === 'evaluation') renderEvaluation();
+  else if (state.view === 'data') renderDataDashboard();
   else renderHistory();
   if (state.view !== previousView && !savedReport) window.scrollTo?.({ top: 0, left: 0, behavior: 'auto' });
   if (restoreId) restoreLinkedReport(requested, restoreId, state.viewRevision);

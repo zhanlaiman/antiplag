@@ -73,6 +73,42 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(status,200);self.assertEqual(before,after)
         self.check(bob,identifier);self.assertEqual(len(set(self.calls)),2)
 
+    def test_data_lifecycle_isolation_restart_export_and_idempotent_job(self):
+        from zipfile import ZipFile
+        alice,_=self.guest();bob,_=self.guest();identifier='a'*32
+        report=self.check(alice,identifier)
+        original=self.http('/api/reports/'+report,cookie=alice)[1]
+        remaining=self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining']
+        self.assertEqual(self.http('/api/data',cookie=alice)[1]['totals']['reports'],1)
+        self.assertEqual(self.http('/api/data',cookie=bob)[1]['totals']['reports'],0)
+        trash='/api/data/report/'+report+'/trash';restore='/api/data/report/'+report+'/restore'
+        self.assertEqual(self.http(trash,{},bob)[0],404)
+        self.assertEqual(self.http(trash,{},alice,origin=None)[0],403)
+        self.assertEqual(self.http(trash,{},alice)[0],200)
+        self.assertEqual(self.http('/api/reports/'+report,cookie=alice)[0],404)
+        self.assertEqual(self.http('/api/report-exports/'+report,cookie=alice)[0],404)
+        self.assertEqual(self.http('/api/reports',cookie=alice)[1]['reports'],[])
+        self.assertEqual(self.http('/api/jobs/'+identifier,cookie=alice)[1]['job']['result'],{'report_removed':True,'report_id':report})
+        status,reused,_=self.http('/api/web-check-jobs',{'request_id':identifier,'text':TEXT,'internet_consent':True},alice)
+        self.assertEqual(status,200);self.assertTrue(reused['job']['result']['report_removed'])
+        self.assertEqual(len(self.calls),1)
+        connection=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
+        connection.request('GET','/api/data-export',headers={'Host':'beta.example','Cookie':alice})
+        response=connection.getresponse();self.assertEqual(response.status,200)
+        self.assertEqual(response.getheader('Content-Type'),'application/zip')
+        with ZipFile(BytesIO(response.read())) as archive:
+            self.assertEqual(json.loads(archive.read('reports.jsonl'))['id'],report)
+            self.assertEqual(json.loads(archive.read('trash.jsonl'))['id'],report)
+        connection.close()
+        self.stop();self.start()
+        self.assertTrue(self.http('/api/jobs/'+identifier,cookie=alice)[1]['job']['result']['report_removed'])
+        self.assertEqual(self.http(restore,{},bob)[0],404)
+        self.assertEqual(self.http(restore,{},alice)[0],200)
+        self.assertEqual(self.http('/api/reports/'+report,cookie=alice)[1],original)
+        self.assertEqual(self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining'],remaining)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.http('/api/owner/statistics',cookie=bob)[0],403)
+
     def test_cross_origin_missing_origin_and_wrong_host_mutations_are_rejected(self):
         cookie,_=self.guest();body={'request_id':'b'*32,'text':TEXT,'internet_consent':True}
         for origin,host in [('https://other.example','beta.example'),(None,'beta.example'),('http://beta.example','evil.example')]:
@@ -96,6 +132,22 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(status,200);self.assertTrue(result['text']);self.assertTrue(result['sources'])
         self.assertEqual(self.calls,[])
 
+    def test_dictionary_and_proofreader_are_personal_and_do_not_spend_search_quota(self):
+        alice,_=self.guest();bob,_=self.guest()
+        before=self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining']
+        self.assertEqual(self.http('/api/dictionary',{'word':'Данияр','action':'add'},alice)[0],200)
+        self.assertEqual(self.http('/api/dictionary',cookie=alice)[1]['words'],['данияр'])
+        self.assertEqual(self.http('/api/dictionary',cookie=bob)[1]['words'],[])
+        self.assertEqual(self.http('/api/dictionary',{'word':'Данияр','action':'add'},bob,origin='https://other.example')[0],403)
+        result=self.http('/api/proofread',{'text':'Он хочет учится. Очень  очень хорошо.'},alice)
+        self.assertEqual(result[0],200)
+        self.assertTrue(any(issue['kind']=='grammar' for issue in result[1]['issues']))
+        self.assertEqual(self.http('/api/proofread',{'text':'x'*10001},alice)[0],400)
+        self.assertEqual(self.http('/api/session',cookie=alice)[1]['beta']['daily_remaining'],before)
+        self.assertEqual(self.calls,[])
+        self.stop();self.start()
+        self.assertEqual(self.http('/api/dictionary',cookie=alice)[1]['words'],['данияр'])
+
     def test_six_daily_checks_and_duplicate_request_does_not_run_again(self):
         cookie,_=self.guest();self.check(cookie,'d'*32);self.check(cookie,'d'*32);self.check(cookie,'e'*32)
         self.assertEqual(len(self.calls),2)
@@ -116,6 +168,10 @@ class WebBetaTests(unittest.TestCase):
             self.assertIn('HttpOnly',cookie)
             session=self.http('/api/session',cookie=owner)[1]['beta']
             self.assertTrue(session['owner']);self.assertEqual(session['id'],identifier)
+            statistics=self.http('/api/owner/statistics',cookie=owner)
+            self.assertEqual(statistics[0],200)
+            self.assertEqual(statistics[1]['counts']['spaces'],1)
+            self.assertNotIn(identifier,json.dumps(statistics[1]))
             for ch in '1234567':self.check(owner,ch*32)
             other,_=self.guest()
             status,_,again=self.http('/api/owner/login',{'username':'owner','password':'test-password'},other)
@@ -207,9 +263,12 @@ class WebBetaTests(unittest.TestCase):
         def admit(i):
             try:runtime.admit_check(guest,format(i,'032x'),TEXT);return True
             except AccessError:return False
-        with ThreadPoolExecutor(max_workers=10) as pool:self.assertEqual(sum(pool.map(admit,range(10))),6)
-        runtime.release_unstarted_check(guest,format(0,'032x'))
-        with self.assertRaises(AccessError):runtime.admit_check(guest,format(0,'032x'),'other text')
+        with ThreadPoolExecutor(max_workers=10) as pool:accepted=list(pool.map(admit,range(10)))
+        self.assertEqual(sum(accepted),6)
+        # Scheduling order is arbitrary: refund an actually admitted request.
+        refunded=format(accepted.index(True),'032x')
+        runtime.release_unstarted_check(guest,refunded)
+        with self.assertRaises(AccessError):runtime.admit_check(guest,refunded,'other text')
         self.assertTrue(admit(10));self.assertEqual(runtime.remaining(guest)['daily_remaining'],0)
 
     def test_paid_or_exhausted_quota_never_constructs_search_transport(self):
@@ -294,5 +353,7 @@ class BetaUploadTests(unittest.TestCase):
     def test_only_code_static_assets_and_two_public_source_packs_are_uploaded(self):
         names=[r['path'] for r in source_manifest()]
         self.assertTrue(all(not p.startswith(('.runtime/','data/private/','output/','tmp/')) for p in names))
-        self.assertEqual(sorted(p for p in names if p.startswith('data/')),['data/source-packs/biology-ru-v1.json','data/source-packs/economics-ru-v1.json'])
+        self.assertEqual(sorted(p for p in names if p.startswith('data/')),sorted([
+            'data/source-packs/biology-ru-v1.json','data/source-packs/economics-ru-v1.json',
+            *('data/dictionaries/ru_RU/'+name for name in ('ru_RU.aff','ru_RU.dic','README_ru_RU.txt','manifest.json'))]))
         self.assertFalse(any(p.endswith(('.sqlite3','.toml')) for p in names))

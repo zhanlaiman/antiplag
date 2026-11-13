@@ -8,6 +8,7 @@ import zipfile
 import zlib
 
 from plagiarism.pdf_source import extract_pdf,PDFError
+from plagiarism.document_formats import odt_text,html_text,isolated_text
 
 MAX_BYTES=1024*1024
 MAX_EXPANDED=8*1024*1024
@@ -70,7 +71,7 @@ def docx_text(data):
 
 def extract_document(name,encoded):
     suffix=PurePosixPath(name).suffix.lower() if isinstance(name,str) else ''
-    if suffix not in {'.docx','.pdf'}:raise ValueError('Импортируются DOCX и текстовый PDF. TXT/MD читаются в браузере.')
+    if suffix not in {'.doc','.docx','.pdf','.odt','.rtf','.html','.htm'}:raise ValueError('Импортируются DOC, DOCX, PDF, ODT, RTF и HTML. TXT/MD читаются в браузере.')
     if not isinstance(encoded,str) or len(encoded)>((MAX_BYTES+2)//3)*4:
         raise ValueError('Документ превышает 1 МиБ.')
     try:data=base64.b64decode(encoded,validate=True)
@@ -80,6 +81,9 @@ def extract_document(name,encoded):
     try:
         pages=None
         if suffix=='.docx':text,notes=docx_text(data)
+        elif suffix=='.odt':text,notes=odt_text(data)
+        elif suffix in {'.html','.htm'}:text,notes=html_text(data)
+        elif suffix in {'.rtf','.doc'}:text,notes=isolated_text(data,suffix[1:])
         else:
             try:result=extract_pdf(data)
             except PDFError as error:raise ValueError(str(error)) from None

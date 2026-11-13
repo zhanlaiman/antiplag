@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 
 from plagiarism.matching import MAX_SOURCES
+from plagiarism.data_management import DataManagement
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,7 +20,7 @@ def timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
-class Store:
+class Store(DataManagement):
     def __init__(self, path=DEFAULT_DATABASE):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,6 +54,13 @@ class Store:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (report_id, match_id)
                 );
+                CREATE TABLE IF NOT EXISTS trash (
+                    kind TEXT NOT NULL CHECK(kind IN ('report','source')), id TEXT NOT NULL,
+                    deleted_at TEXT NOT NULL, PRIMARY KEY(kind,id)
+                );
+                CREATE TABLE IF NOT EXISTS dictionary_words (
+                    word TEXT PRIMARY KEY, created_at TEXT NOT NULL
+                );
             """)
             connection.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(sources)")}
@@ -71,7 +79,7 @@ class Store:
 
     def sources(self):
         with self.connect() as connection:
-            return [self._source_row(row) for row in connection.execute("SELECT * FROM sources ORDER BY created_at DESC, id")]
+            return [self._source_row(row) for row in connection.execute("SELECT * FROM sources WHERE NOT EXISTS (SELECT 1 FROM trash WHERE kind='source' AND trash.id=sources.id) ORDER BY created_at DESC, id")]
 
     def _source_row(self, row):
         return {**dict(row), "provenance": json.loads(row["provenance"])}
@@ -102,6 +110,7 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             existing_ids = {row[0] for row in connection.execute("SELECT id FROM sources")}
             new_ids = {source["id"] for source in sources} - existing_ids
+            restored_ids = {row[0] for row in connection.execute("SELECT id FROM trash WHERE kind='source'")} & {source['id'] for source in sources}
             if new_ids and len(existing_ids) + len(new_ids) > MAX_SOURCES:
                 raise ValueError(f"В локальной библиотеке доступно до {MAX_SOURCES} источников.")
             rows = [{**source, "provenance": json.dumps(source.get("provenance", {}), ensure_ascii=False)}
@@ -110,13 +119,16 @@ class Store:
                 """INSERT OR IGNORE INTO sources (id, title, text, url, created_at, provenance)
                    VALUES (:id, :title, :text, :url, :created_at, :provenance)""", rows
             )
+            connection.executemany("DELETE FROM trash WHERE kind='source' AND id=?", [(identifier,) for identifier in restored_ids])
             saved = [self._source_row(connection.execute("SELECT * FROM sources WHERE id = ?", (source["id"],)).fetchone())
                      for source in sources]
-            return {"sources": saved, "installed_count": len(new_ids),
-                    "already_present_count": len({source["id"] for source in sources}) - len(new_ids)}
+            return {"sources": saved, "installed_count": len(new_ids) + len(restored_ids),
+                    "already_present_count": len({source["id"] for source in sources}) - len(new_ids) - len(restored_ids)}
 
     def delete_source(self, source_id):
+        """Legacy internal removal; public handlers use reversible trash_item."""
         with self.connect() as connection:
+            connection.execute("DELETE FROM trash WHERE kind='source' AND id=?", (source_id,))
             return connection.execute("DELETE FROM sources WHERE id = ?", (source_id,)).rowcount > 0
 
     def save(self, kind, data):
@@ -137,8 +149,10 @@ class Store:
                                (record["id"], kind, json.dumps(stored_record, ensure_ascii=False), record["created_at"]))
         return record
 
-    def get(self, kind, record_id):
+    def get(self, kind, record_id, *, include_trashed=False):
         with self.connect() as connection:
+            if kind == 'report' and not include_trashed and connection.execute("SELECT 1 FROM trash WHERE kind='report' AND id=?", (record_id,)).fetchone():
+                return None
             row = connection.execute("SELECT data FROM records WHERE id = ? AND kind = ?", (record_id, kind)).fetchone()
             if row is None:
                 return None
@@ -147,7 +161,7 @@ class Store:
 
     def records(self, kind, limit=100):
         with self.connect() as connection:
-            rows = connection.execute("SELECT data FROM records WHERE kind = ? ORDER BY created_at DESC LIMIT ?", (kind, limit))
+            rows = connection.execute("SELECT data FROM records WHERE kind = ? AND (kind!='report' OR NOT EXISTS (SELECT 1 FROM trash WHERE trash.kind='report' AND trash.id=records.id)) ORDER BY created_at DESC LIMIT ?", (kind, limit))
             records = [json.loads(row[0]) for row in rows]
             if kind == "report":
                 return [self._restore_report_sources(connection, record) for record in records]
@@ -173,7 +187,7 @@ class Store:
                 json_extract(data, '$.stats') AS stats,
                 substr(json_extract(data, '$.text'), 1, 300) AS text,
                 json_extract(data, '$.scope') AS scope
-                FROM records WHERE kind = 'report' ORDER BY created_at DESC LIMIT 100""")
+                FROM records WHERE kind = 'report' AND NOT EXISTS (SELECT 1 FROM trash WHERE trash.kind='report' AND trash.id=records.id) ORDER BY created_at DESC LIMIT 100""")
             return [{**dict(row), "stats": json.loads(row["stats"])} for row in rows]
 
     def latest_retrieval(self, report_id):
@@ -226,6 +240,6 @@ class Store:
     def counts(self):
         with self.connect() as connection:
             return {
-                "sources": connection.execute("SELECT count(*) FROM sources").fetchone()[0],
-                "reports": connection.execute("SELECT count(*) FROM records WHERE kind = 'report'").fetchone()[0],
+                "sources": connection.execute("SELECT count(*) FROM sources WHERE NOT EXISTS (SELECT 1 FROM trash WHERE trash.kind='source' AND trash.id=sources.id)").fetchone()[0],
+                "reports": connection.execute("SELECT count(*) FROM records WHERE kind = 'report' AND NOT EXISTS (SELECT 1 FROM trash WHERE trash.kind='report' AND trash.id=records.id)").fetchone()[0],
             }

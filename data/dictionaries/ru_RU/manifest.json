@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/LibreOffice/dictionaries",
+  "commit": "eff9495b70722d8e590e97b1710cfc7c00f6ce72",
+  "files": [
+    {
+      "name": "ru_RU.aff",
+      "bytes": 71236,
+      "sha256": "38ce7d4af78e211e9bafe4bf7e3d6a2c420591136cb738ec6648f8fdf6524cd7",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/eff9495b70722d8e590e97b1710cfc7c00f6ce72/ru_RU/ru_RU.aff"
+    },
+    {
+      "name": "ru_RU.dic",
+      "bytes": 3473191,
+      "sha256": "f6047416a0204adbecf3a451b874ec8a97ee37e2cbc714466ef04d8dbcc0d6fc",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/eff9495b70722d8e590e97b1710cfc7c00f6ce72/ru_RU/ru_RU.dic"
+    },
+    {
+      "name": "README_ru_RU.txt",
+      "bytes": 1886,
+      "sha256": "262af2f6ad70a61e5ee1332ff44fa8ee50edca819cf33207d8ad6ba6a0c9be52",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/eff9495b70722d8e590e97b1710cfc7c00f6ce72/ru_RU/README_ru_RU.txt"
+    }
+  ]
+}

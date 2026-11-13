@@ -209,6 +209,27 @@ class BetaRuntime:
                 'daily_reset':'00:00 UTC (05:00 Алматы)','monthly_used':monthly,
                 'monthly_remaining':max(0,MONTHLY_SEARCHES-monthly)}
 
+    def owner_statistics(self):
+        """Aggregate SQL counts only; never load another tenant's text or IDs."""
+        counts={'spaces':0,'reports':0,'sources':0,'trashed':0,'database_bytes':0,'unavailable_spaces':0}
+        for path in (self.root/'tenants').glob('*/istok.sqlite3'):
+            if not re.fullmatch(r'[a-f0-9]{64}',path.parent.name):continue
+            counts['spaces']+=1
+            try:
+                counts['database_bytes']+=path.stat().st_size
+                with closing(sqlite3.connect('file:'+str(path.resolve())+'?mode=ro',uri=True,timeout=2)) as db:
+                    counts['reports']+=db.execute("SELECT count(*) FROM records WHERE kind='report'").fetchone()[0]
+                    counts['sources']+=db.execute('SELECT count(*) FROM sources').fetchone()[0]
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trash'").fetchone():
+                        counts['trashed']+=db.execute('SELECT count(*) FROM trash').fetchone()[0]
+            except (OSError,sqlite3.Error):counts['unavailable_spaces']+=1
+        day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        with closing(self.connect()) as db:
+            counts['checks_today']=db.execute('SELECT count(*) FROM checks WHERE day=? AND NOT EXISTS(SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id)',(day,)).fetchone()[0]
+            counts['guests_this_month']=db.execute('SELECT count(*) FROM guests WHERE month=?',(day[:7],)).fetchone()[0]
+        return {'counts':counts,'quota':self.remaining('',owner=True),'monthly_limit':MONTHLY_SEARCHES,
+                'storage_limit_bytes':256*1024*1024,'as_of':datetime.now(timezone.utc).isoformat()}
+
     def run_web(self,text,request_id,progress=None):
         # No paid fallback: confirm the included allowance before any search.
         cooldown=self.quota_cooldown()
@@ -280,17 +301,21 @@ class BetaHandler(server.Handler):
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES}}
-        allowed=(method=='GET' and (path in {'/api/status','/api/sources','/api/source-packs','/api/reports'}
+        if method=='GET' and path=='/api/owner/statistics':
+            if not self.owner:raise access.AccessError('Статистика сайта доступна владельцу.','owner_required',403)
+            return beta.owner_statistics()
+        allowed=(method=='GET' and (path in {'/api/status','/api/sources','/api/source-packs','/api/reports','/api/data','/api/data-export','/api/dictionary'}
                 or re.fullmatch(r'/api/(?:reports|jobs|report-exports)/[a-f0-9]{32}',path))
-            or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo','/api/import-document'}
+            or method=='POST' and path in {'/api/sources','/api/source-packs/install','/api/check','/api/report-reviews','/api/web-check-jobs','/api/demo','/api/import-document','/api/proofread','/api/dictionary'}
             or method=='POST' and re.fullmatch(r'/api/jobs/[a-f0-9]{32}/cancel',path)
+            or method=='POST' and re.fullmatch(r'/api/data/(?:report|source)/[^/]{1,100}/(?:trash|restore)',path)
             or method=='DELETE' and re.fullmatch(r'/api/sources/[^/]{1,100}',path))
         if not allowed:raise access.AccessError('Эта операция недоступна в онлайн-бете.','operation_forbidden',403)
         if method=='POST':
             text=body.get('text','')
             if not isinstance(text,str) or len(text)>MAX_CHARACTERS:
                 raise access.AccessError('В онлайн-бете проверяем до 10 000 знаков за один раз.','beta_text_limit',400)
-            if path=='/api/sources' and len(self.tenant.store.sources())>=37:
+            if path=='/api/sources' and self.tenant.store.data_summary()['totals']['sources']>=37:
                 raise access.AccessError('В бете можно добавить до пяти собственных источников.','beta_source_limit',429)
         if method=='POST' and path=='/api/web-check-jobs':
             if body.get('internet_consent') is not True:raise access.AccessError('Нужно согласие на интернет-поиск.','internet_consent_required',400)

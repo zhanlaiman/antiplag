@@ -1496,3 +1496,75 @@ test('document processing disables checking and oversized uploads never leave th
   assert.equal(imports,1);assert.equal(app.element('home-text').value,'Готовый текст');
   assert.match(app.element('home-check-error').textContent,/1 МиБ/);
 });
+
+test('proofreader applies one chosen UTF-16 edit and preserves the old plagiarism report', async () => {
+  const original = '🙂 ашибка.';
+  const app = fixture({ fetch: url => url === '/api/proofread' ? json({ dictionary_available: true, checked_unique_forms: 1, unique_forms_limit: 800,
+    issues: [{ start: 3, end: 9, original: 'ашибка', kind: 'spelling', message: 'Возможна опечатка', suggestions: ['ошибка'] }],
+    warnings: [], frequencies: [], limitations: 'Словарные подсказки' }) : undefined });
+  await settle();
+  const field = app.element('check-text');
+  field.value = original; await field.emit('input');
+  app.expose('testOriginal', original);
+  app.evaluate("state.report={id:'report-a',text:testOriginal,matches:[],stats:{similarity_percent:17}}");
+  const choice = new FixtureElement(app.document); choice.dataset.proofreadChoice = '0:0';
+  const area = app.element('proofread-result-check');
+  area.querySelectorAll = selector => selector === '[data-proofread-choice]' || selector === 'button' ? [choice] : [];
+  await app.element('proofread-check').emit('click');
+  await choice.emit('click');
+  assert.equal(field.value, '🙂 ошибка.');
+  assert.equal(app.evaluate('state.text'), field.value);
+  assert.equal(app.evaluate('state.report.text'), original);
+  assert.equal(app.evaluate('state.report.stats.similarity_percent'), 17);
+  assert.equal(choice.disabled, true, 'Remaining suggestions need a fresh check after an edit');
+});
+
+test('proofreader response arriving after an edit cannot overwrite the newer draft', async () => {
+  const response = deferred();
+  const app = fixture({ fetch: url => url === '/api/proofread' ? response.promise : undefined });
+  await settle();
+  const field = app.element('check-text'); field.value = 'ашибка'; await field.emit('input');
+  const choice = new FixtureElement(app.document); choice.dataset.proofreadChoice = '0:0';
+  app.element('proofread-result-check').querySelectorAll = selector => selector === '[data-proofread-choice]' || selector === 'button' ? [choice] : [];
+  const pending = app.element('proofread-check').emit('click');
+  field.value = 'Новый авторский текст'; await field.emit('input');
+  response.resolve(json({ dictionary_available: true, checked_unique_forms: 1, unique_forms_limit: 800,
+    issues: [{ start: 0, end: 6, original: 'ашибка', kind: 'spelling', message: 'Подсказка', suggestions: ['ошибка'] }], warnings: [], frequencies: [], limitations: '' }));
+  await pending; await choice.emit('click');
+  assert.equal(field.value, 'Новый авторский текст');
+  assert.equal(app.evaluate('state.text'), field.value);
+  assert.match(app.element('proofread-status-check').textContent, /Текст изменён/);
+});
+
+test('personal dashboard escapes previews and never requests global statistics for a guest', async () => {
+  const calls = [];
+  const app = fixture({ view: 'data', fetch(url) {
+    calls.push(url);
+    if (url === '/api/session') return json({ mode: 'local', beta: { id: 'guest', owner: false } });
+    if (url === '/api/data') return json({ totals: { reports: 1, sources: 0, trashed: 0 }, listed_reports_limit: 500,
+      reports: [{ id: 'a'.repeat(32), created_at: '', preview: '<script>alert(1)</script>', scope: 'web_search', deleted_at: null }], sources: [] });
+    if (url === '/api/dictionary') return json({ words: [] });
+  } });
+  await settle();
+  assert.equal(app.evaluate('state.view'), 'data');
+  assert.ok(app.element('data-list').innerHTML.includes('&lt;script&gt;'));
+  assert.ok(!app.element('data-list').innerHTML.includes('<script>'));
+  assert.ok(!calls.includes('/api/owner/statistics'));
+  assert.ok(app.element('main-content').innerHTML.includes('/api/data-export'));
+});
+
+test('beta library reports and citation formatting need no model or closed retrieval API', async () => {
+  const calls = [];
+  const app = fixture({ fetch(url) { calls.push(url); if (url === '/api/session') return json({ mode: 'local', beta: { id: 'guest', owner: false } }); } });
+  await settle();
+  app.evaluate(`state.text='🙂 Текст.'; state.report={id:'${'b'.repeat(32)}',text:state.text,scope:'local_library',created_at:'',stats:{similarity_percent:50},reviews:{},matches:[{id:'match-1',kind:'exact',start:2,end:7,excerpt:'Текст',source_excerpt:'Точный источник',source_title:'Авторский источник',source_url:'https://example.org'}]}; state.selectedMatch='match-1'; renderReport();`);
+  await settle();
+  assert.ok(!calls.some(url => url.startsWith('/api/retrievals/')));
+  assert.equal(app.element('model-settings').hidden, true);
+  await app.element('quote-button').emit('click');
+  assert.equal(app.element('rewrite-text').value, '«Точный источник»\n\nИсточник: Авторский источник — https://example.org');
+  assert.ok(!calls.includes('/api/rewrite') && !calls.includes('/api/model-jobs'));
+  await app.element('apply-rewrite').emit('click');
+  assert.equal(app.evaluate('state.text'), '🙂 «Точный источник»\n\nИсточник: Авторский источник — https://example.org.');
+  assert.equal(app.evaluate('state.report'), null);
+});
