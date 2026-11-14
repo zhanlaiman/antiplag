@@ -35,11 +35,12 @@ def free_quota(account, needed):
 
 class SerpAPISearch:
     provider = 'serpapi'
+    label = 'Google'
 
     def __init__(self,budget):
         self.key = key_for('serpapi')
         if not self.key or len(self.key)>1024 or any(not 33<=ord(c)<=126 for c in self.key):
-            raise WebSearchError('Google-поиск ещё не подключён.', 'web_not_configured')
+            raise WebSearchError(self.label+'-поиск ещё не подключён.', 'web_not_configured')
         self.budget=budget;self.opener=build_opener(NoRedirect());self.last_usage=None
         self.free_slots=0;self.free_at=None
 
@@ -67,7 +68,7 @@ class SerpAPISearch:
             error.close()
         except (WebSearchError,URLError,OSError,ValueError,TypeError,UnicodeError):
             pass
-        raise WebSearchError('Не удалось подтвердить бесплатный Google-поиск. Запросы не отправлены.', 'free_quota_unconfirmed') from None
+        raise WebSearchError('Не удалось подтвердить бесплатный поиск '+self.label+'. Запросы не отправлены.', 'free_quota_unconfirmed') from None
 
     def search(self,query,request_id):
         if (not isinstance(query,str) or not query.strip() or len(query)>400
@@ -82,7 +83,7 @@ class SerpAPISearch:
                     'hl':'ru' if re.search(r'[а-яё]',query,re.I) else 'en','output':'json'}
         self.last_usage=None
         if self.free_slots<1 or self.free_at is None or not 0<=time.monotonic()-self.free_at<=300:
-            raise WebSearchError('Бесплатная квота Google-поиска не подтверждена.','free_quota_unconfirmed')
+            raise WebSearchError('Бесплатная квота поиска '+self.label+' не подтверждена.','free_quota_unconfirmed')
         self.budget.reserve(request_id)
         self.free_slots-=1
         try:
@@ -111,9 +112,27 @@ class SerpAPISearch:
         except HTTPError as error:
             status=error.code;error.close()
             code='search_credentials_invalid' if status in (401,403) else 'search_rate_limited' if status==429 else 'search_provider_error'
-            raise WebSearchError('Сервис Google-поиска не выполнил запрос. Проверка неполная.',code) from None
+            raise WebSearchError('Поисковый сервис не выполнил запрос. Проверка неполная.',code) from None
         except (URLError,OSError,ValueError,TypeError,AttributeError,UnicodeError):
-            raise WebSearchError('Сервис Google-поиска не выполнил запрос. Проверка неполная.','search_provider_error') from None
+            raise WebSearchError('Поисковый сервис не выполнил запрос. Проверка неполная.','search_provider_error') from None
         self.budget.finish(request_id)
         self.last_usage={'credits':1}
         return urls
+
+
+class YandexSerpAPISearch(SerpAPISearch):
+    provider = 'serpapi-yandex'
+    label = 'Яндекс'
+
+    def _request(self,path,parameters,timeout):
+        if path=='search.json':
+            parameters={'engine':'yandex','text':parameters['q'],'yandex_domain':'yandex.ru',
+                        'lang':'ru','groups_on_page':5,'fix_typo':'false','output':'json'}
+        result=super()._request(path,parameters,timeout)
+        # Captured successful empty responses use this exact documented shape.
+        # Unknown and contradictory errors retain the ordinary failure path.
+        if (path=='search.json' and result.get('search_metadata',{}).get('status')=='Success'
+                and result.get('error')=="Yandex hasn't returned any results for this query."
+                and result.get('organic_results',[])==[]):
+            return {**result,'error':None,'organic_results':[]}
+        return result

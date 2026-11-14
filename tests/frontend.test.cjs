@@ -1751,3 +1751,29 @@ test('a prior unknown Tavily request still blocks duplicate submission after Goo
   assert.equal(posts,0);assert.equal(app.evaluate("pendingWebRequest('Сохранённый текст.').request_id"),'c'.repeat(32));
   assert.equal(app.evaluate("state.modelJobs[legacyEntry.request_id].body.search_provider"),undefined);
 });
+
+test('Yandex consent names its destination in every view and persists the provider in the request', async () => {
+  const posts=[];let requestID;
+  const app=fixture({view:'home',fetch(url,body){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'yandex-guest',max_characters:10000},web:{provider:'serpapi-yandex',configured:true}});
+    if(url==='/api/web-check-jobs'){posts.push(body);requestID=body.request_id;return json({job:{id:requestID,status:'failed',error:'Synthetic terminal receipt'}});}
+    if(url==='/api/jobs/'+requestID)return json({job:{id:requestID,status:'failed',error:'Synthetic terminal receipt'}});
+  }});await settle();
+  assert.match(app.element('main-content').innerHTML,/Яндексу через SerpApi и Википедии/);
+  await assert.rejects(app.evaluate("startWebCheck({text:'Авторский текст выбранного поискового сервиса.',consent:true,surface:'home'})"));
+  assert.equal(posts.length,1);assert.equal(posts[0].search_provider,'serpapi-yandex');assert.equal(posts[0].provider_consent,'serpapi-yandex');
+  await app.navigate('check');assert.match(app.element('main-content').innerHTML,/Яндексу через SerpApi и Википедии/);
+  await app.navigate('batch');assert.match(app.element('main-content').innerHTML,/Яндексу через SerpApi и Википедии/);
+});
+
+test('an unknown Google request blocks duplicate submission when Yandex becomes the default', async () => {
+  let posts=0;
+  const app=fixture({fetch(url){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'yandex-guest',max_characters:10000},web:{provider:'serpapi-yandex',configured:true}});
+    if(url==='/api/web-check-jobs')posts++;
+  }});await settle();
+  app.expose('googleEntry',{request_id:'c'.repeat(32),path:'/api/web-check',body:{text:'Сохранённый текст.',internet_consent:true,search_provider:'serpapi',provider_consent:'serpapi'},status:'delivery_unknown'});
+  app.evaluate('state.modelJobs[googleEntry.request_id]=googleEntry');
+  await assert.rejects(app.evaluate("startWebCheck({text:'Сохранённый текст.',consent:true})"));
+  assert.equal(posts,0);assert.equal(app.evaluate("state.modelJobs[googleEntry.request_id].body.search_provider"),'serpapi');
+});

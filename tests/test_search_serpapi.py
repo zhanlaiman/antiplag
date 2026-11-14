@@ -7,7 +7,7 @@ from unittest.mock import Mock,patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit,parse_qs
 
-from plagiarism.search_serpapi import SerpAPISearch,free_quota
+from plagiarism.search_serpapi import SerpAPISearch,YandexSerpAPISearch,free_quota
 from plagiarism.web_search import WebSearchError,run,plan_queries
 from tests.test_search_tavily import Budget
 
@@ -22,6 +22,31 @@ def account(**changes):
 
 
 class SerpAPITests(unittest.TestCase):
+    def test_yandex_preserves_query_uses_fixed_bounded_protocol_and_same_free_guard(self):
+        search=YandexSerpAPISearch(self.budget);search.opener=self.search.opener
+        search.opener.open.return_value=response(account());search.confirm_free(1)
+        search.opener.open.return_value=response({'search_metadata':{'status':'Success'},
+            'organic_results':[{'link':'https://example.org/source','snippet':'not evidence'}]})
+        phrase='"сосна берёза клён кедр липа пихта"'
+        self.assertEqual(search.search(phrase,'yandex-one'),[{'url':'https://example.org/source'}])
+        parameters=parse_qs(urlsplit(search.opener.open.call_args.args[0].full_url).query)
+        self.assertEqual(parameters,{'api_key':['a'*64],'engine':['yandex'],'text':[phrase],
+            'yandex_domain':['yandex.ru'],'lang':['ru'],'groups_on_page':['5'],'fix_typo':['false'],'output':['json']})
+        self.assertEqual(search.provider,'serpapi-yandex');self.assertEqual(self.budget.finished,['yandex-one'])
+
+    def test_yandex_empty_success_is_completed_but_unknown_or_contradictory_error_is_not(self):
+        search=YandexSerpAPISearch(self.budget);search.opener=self.search.opener
+        empty="Yandex hasn't returned any results for this query."
+        for i,payload in enumerate(({'search_metadata':{'status':'Success'},'error':empty},
+                                   {'search_metadata':{'status':'Success'},'error':'Unknown quota failure'},
+                                   {'search_metadata':{'status':'Success'},'error':empty,'organic_results':[{'link':'https://example.org/source'}]})):
+            search.opener.open.return_value=response(account());search.confirm_free(1)
+            search.opener.open.return_value=response(payload)
+            if i==0:self.assertEqual(search.search('valid phrase','empty-'+str(i)),[])
+            else:
+                with self.assertRaises(WebSearchError):search.search('valid phrase','empty-'+str(i))
+        self.assertEqual(self.budget.finished,['empty-0'])
+
     def setUp(self):
         temp=TemporaryDirectory();self.addCleanup(temp.cleanup)
         env=patch.dict(os.environ,{'ISTOK_SERPAPI_API_KEY':'a'*64,'ISTOK_RUNTIME_DIR':temp.name});env.start();self.addCleanup(env.stop)

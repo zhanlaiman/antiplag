@@ -72,6 +72,11 @@ class SearchCredentialsTests(unittest.TestCase):
             with patch.dict(os.environ,{'ISTOK_SEARCH_PROVIDER':'serpapi'}):self.assertEqual(search_credentials.selected_provider(),'serpapi')
             path.chmod(0o644);self.assertEqual(search_credentials.key_for('serpapi'),'')
 
+    def test_yandex_uses_the_existing_serpapi_credential_only_when_selected(self):
+        with patch.dict(os.environ,{'ISTOK_SERPAPI_API_KEY':'offline-key','ISTOK_SEARCH_PROVIDER':'serpapi-yandex'}):
+            self.assertEqual(search_credentials.key_for('serpapi-yandex'),'offline-key')
+            self.assertEqual(search_credentials.selected_provider(),'serpapi-yandex')
+
 
 if __name__ == '__main__':
     unittest.main()

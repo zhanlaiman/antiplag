@@ -45,14 +45,16 @@ function isBeta() { return Boolean(state.session?.beta); }
 function ownerWithoutTextLimit() { return isBeta() && state.session.beta.owner === true && state.session.beta.max_characters === null; }
 function checkTextLimit() { return ownerWithoutTextLimit() ? Infinity : isBeta() ? state.session.beta.max_characters : 200000; }
 function documentTextLimit() { return ownerWithoutTextLimit() ? Infinity : 200000; }
-function webProviderLabel() { return webStatus().provider === 'serpapi' ? 'Google через SerpApi' : 'Tavily'; }
+function webProviderLabel() { return webStatus().provider === 'serpapi-yandex' ? 'Яндексу через SerpApi' : webStatus().provider === 'serpapi' ? 'Google через SerpApi' : 'Tavily'; }
 function webCheckBody(text, extra = {}) {
   return { text, internet_consent: true,
-    ...(isBeta() && webStatus().provider === 'serpapi' ? {search_provider:'serpapi',provider_consent:'serpapi'} : {}), ...extra };
+    ...(isBeta() && ['serpapi','serpapi-yandex'].includes(webStatus().provider) ? {search_provider:webStatus().provider,provider_consent:webStatus().provider} : {}), ...extra };
 }
 function pendingWebRequest(text) {
   return pendingModelRequest('/api/web-check',webCheckBody(text))
-    || pendingModelRequest('/api/web-check',{text,internet_consent:true});
+    || pendingModelRequest('/api/web-check',{text,internet_consent:true})
+    || pendingModelRequest('/api/web-check',{text,internet_consent:true,search_provider:'serpapi',provider_consent:'serpapi'})
+    || pendingModelRequest('/api/web-check',{text,internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'});
 }
 function privateAccess() {
   return state.sessionReady && !state.sessionExpired && !state.sessionTransition

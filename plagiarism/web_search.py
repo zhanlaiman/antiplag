@@ -252,16 +252,18 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
 
 def status():
     provider = selected_provider()
-    configured = (bool(key_for(provider)) and provider in {"tavily", "brave", "serpapi"}
+    configured = (bool(key_for(provider)) and provider in {"tavily", "brave", "serpapi", "serpapi-yandex"}
                   and (provider != "brave" or os.environ.get("ISTOK_BRAVE_STORAGE_RIGHTS") == "1"))
     error = ("Поиск по интернету ещё не подключён. Нужен серверный ключ поискового API."
              if provider == "tavily" else
              "Поиск по интернету ещё не подключён. Нужны ключ Brave и подтверждённые условия хранения результатов."
              if provider == "brave" else "Google-поиск временно недоступен на этом сайте."
-             if provider == "serpapi" else "Выбранный поисковый сервис недоступен.")
+             if provider == "serpapi" else "Поиск Яндекса временно недоступен на этом сайте."
+             if provider == "serpapi-yandex" else "Выбранный поисковый сервис недоступен.")
     zero_fallback = os.environ.get("ISTOK_WEB_ZERO_FALLBACK", "1" if DEFAULT_ZERO_FALLBACK else "0") == "1"
     wiki_followup = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP", "1" if DEFAULT_WIKI_FOLLOWUP else "0") == "1"
     return {"provider": provider, "configured": configured,
+            "query_strategy": KEYWORD_STRATEGY if provider == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY,
             "max_queries": MAX_QUERIES + (2 if wiki_followup else 0),
             "max_primary_queries": MAX_QUERIES, "max_secondary_queries": 2 if wiki_followup else 0,
             "secondary_provider": "mediawiki" if wiki_followup else None,
@@ -551,7 +553,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         raise ValueError("Неверная настройка дополнительного чтения страниц.")
     max_page_attempts = MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if use_zero_fallback else MAX_URLS
     if query_strategy is None:
-        query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY", DEFAULT_QUERY_STRATEGY)
+        query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY",
+            KEYWORD_STRATEGY if selected_provider() == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
     request_id = request_id or uuid4().hex
     if searcher is None:
@@ -562,6 +565,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         elif provider == "serpapi":
             from plagiarism.search_serpapi import SerpAPISearch
             searcher = SerpAPISearch(SearchBudget())
+            searcher.confirm_free(len(queries))
+        elif provider == "serpapi-yandex":
+            from plagiarism.search_serpapi import YandexSerpAPISearch
+            searcher = YandexSerpAPISearch(SearchBudget())
             searcher.confirm_free(len(queries))
         elif provider == "brave":
             searcher = BraveSearch()

@@ -34,6 +34,8 @@ def _saved(provider="tavily"):
 
 
 def key_for(provider):
+    if provider == "serpapi-yandex":
+        provider = "serpapi"
     if provider not in {"tavily", "brave", "serpapi"}:
         return ""
     environment = os.environ.get("ISTOK_" + provider.upper() + "_API_KEY", "").strip()
@@ -46,7 +48,7 @@ def key_for(provider):
 def selected_provider():
     explicit = os.environ.get("ISTOK_SEARCH_PROVIDER", "")
     if explicit:
-        return explicit if explicit in {"tavily", "brave", "serpapi"} else "unavailable"
+        return explicit if explicit in {"tavily", "brave", "serpapi", "serpapi-yandex"} else "unavailable"
     if key_for("tavily"):
         return "tavily"
     return "brave" if key_for("brave") else "serpapi" if key_for("serpapi") else "tavily"

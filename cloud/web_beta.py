@@ -20,7 +20,8 @@ from urllib.request import Request,build_opener
 import server
 from plagiarism import access,auth_provider,saas,web_search
 from plagiarism.search_credentials import key_for,selected_provider
-from plagiarism.search_serpapi import SerpAPISearch
+from plagiarism.search_serpapi import SerpAPISearch,YandexSerpAPISearch
+from plagiarism.query_keywords import KEYWORD_STRATEGY
 from plagiarism.search_mediawiki import MediaWikiSearch
 from plagiarism.search_tavily import TavilySearch
 from plagiarism.tenants import TenantRegistry
@@ -331,21 +332,27 @@ class BetaRuntime:
         return {'counts':counts,'quota':self.remaining('',owner=True),'monthly_limit':MONTHLY_SEARCHES,
                 'storage_limit_bytes':256*1024*1024,'as_of':datetime.now(timezone.utc).isoformat()}
 
-    def run_google(self,text,request_id,progress=None,source_url=None):
+    def run_google(self,text,request_id,progress=None,source_url=None,engine='google'):
+        if engine not in ('google','yandex'):
+            raise SearchNotStarted('Выбранный поиск недоступен. Запросы не отправлены.','web_not_configured')
+        label='Яндекса' if engine=='yandex' else 'Google'
+        strategy=KEYWORD_STRATEGY if engine=='yandex' else web_search.DEFAULT_QUERY_STRATEGY
         if self.quota_cooldown():
             raise SearchNotStarted('Поиск временно ограничил обращения. Повторите вручную позже; запросы не отправлены.','free_quota_rate_limited')
-        if progress:progress('Проверяем бесплатную квоту Google-поиска',0,0,phase='preflight')
+        if progress:progress('Проверяем бесплатную квоту поиска '+label,0,0,phase='preflight')
         persist=self.persist
         class Budget(web_search.SearchBudget):
             def reserve(self,identifier):super().reserve(identifier);persist()
             def finish(self,identifier):super().finish(identifier);persist()
         try:
-            search=SerpAPISearch(Budget(self.root/'search-budget.sqlite3',limit=MONTHLY_SEARCHES))
-            search.confirm_free(len(web_search.plan_queries(text)))
+            factory=YandexSerpAPISearch if engine=='yandex' else SerpAPISearch
+            search=factory(Budget(self.root/'search-budget.sqlite3',limit=MONTHLY_SEARCHES))
+            search.confirm_free(len(web_search.plan_queries(text,strategy=strategy)))
         except (web_search.WebSearchError,ValueError,OSError):
-            raise SearchNotStarted('Не удалось подтвердить бесплатный Google-поиск. Запросы не отправлены, дневная попытка сохранена.','free_quota_unconfirmed') from None
+            raise SearchNotStarted('Не удалось подтвердить бесплатный поиск '+label+'. Запросы не отправлены, дневная попытка сохранена.','free_quota_unconfirmed') from None
         wiki=MediaWikiSearch(path=self.root/'private/mediawiki.sqlite3')
         result=web_search.run(text,request_id,progress=progress,searcher=search,wiki_searcher=wiki,
+            query_strategy=strategy,
             **({'fetcher':ExcludingFetcher(source_url)} if source_url else {}))
         if source_url:
             result['web']['excluded_source_host']=public_page_url(source_url)['host']
@@ -354,6 +361,7 @@ class BetaRuntime:
 
     def run_web(self,text,request_id,progress=None,source_url=None,provider='tavily'):
         if provider=='serpapi':return self.run_google(text,request_id,progress,source_url)
+        if provider=='serpapi-yandex':return self.run_google(text,request_id,progress,source_url,engine='yandex')
         if provider!='tavily':raise SearchNotStarted('Выбранный поиск недоступен. Запросы не отправлены.','web_not_configured')
         # No paid fallback: confirm the included allowance before any search.
         cooldown=self.quota_cooldown()
@@ -553,11 +561,11 @@ class BetaHandler(server.Handler):
             if provider is None and body.get('provider_consent') is not None:
                 raise access.AccessError('Укажите поисковый сервис вместе с согласием.','invalid_search_provider',400)
             if provider is not None:
-                if provider not in ('tavily','serpapi'):
+                if provider not in ('tavily','serpapi','serpapi-yandex'):
                     raise access.AccessError('Выбранный поисковый сервис недоступен.','invalid_search_provider',400)
                 if body.get('provider_consent')!=provider:
                     raise access.AccessError('Подтвердите передачу фрагментов выбранному поисковому сервису.','provider_consent_required',400)
-                if provider=='serpapi' and selected_provider()!='serpapi' and not self.owner:
+                if provider in ('serpapi','serpapi-yandex') and selected_provider()!=provider and not self.owner:
                     raise access.AccessError('Этот поисковый режим пока доступен владельцу.','owner_required',403)
             provider_fields={'search_provider':provider,'provider_consent':provider} if provider is not None else {}
             owner=bool(self.owner)

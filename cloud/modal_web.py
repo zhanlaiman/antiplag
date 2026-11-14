@@ -55,7 +55,7 @@ def serve_beta():
 
 def build_app(directory,key,*,google_key=None,default_search_provider='tavily'):
     import modal
-    if default_search_provider not in ('tavily','serpapi') or default_search_provider=='serpapi' and not google_key:
+    if default_search_provider not in ('tavily','serpapi','serpapi-yandex') or default_search_provider in ('serpapi','serpapi-yandex') and not google_key:
         raise ValueError('A reviewed search provider and its credential are required')
     volume=modal.Volume.from_name(VOLUME_NAME,create_if_missing=True,version=2)
     image=(modal.Image.debian_slim(python_version='3.14')

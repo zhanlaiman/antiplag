@@ -460,6 +460,38 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(budget.path,self.service.beta.root/'search-budget.sqlite3')
             self.assertIs(pipeline.call_args.kwargs['searcher'],factory.return_value)
 
+    def test_yandex_uses_its_guarded_adapter_keyword_plan_and_unchanged_site_budget(self):
+        with patch('cloud.web_beta.YandexSerpAPISearch')as factory,patch('cloud.web_beta.SerpAPISearch')as google,patch('cloud.web_beta.MediaWikiSearch'),patch('cloud.web_beta.web_search.run',return_value={'ok':True})as pipeline:
+            self.assertEqual(self.service.beta.run_web(TEXT,'fixture',provider='serpapi-yandex'),{'ok':True})
+            google.assert_not_called();factory.return_value.confirm_free.assert_called_once()
+            self.assertEqual(factory.call_args.args[0].limit,180)
+            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v8-complete-keywords')
+
+    def test_yandex_consent_is_distinct_and_switch_preserves_legacy_receipts_across_restart(self):
+        providers=[]
+        def routed(text,rid,progress,provider='tavily'):
+            providers.append(provider)
+            return {**analyze(text,[]),'text':text,'scope':'web_search','sources':[],'web':{'provider':provider}}
+        self.runner=self.service.beta.runner=routed
+        guest,_=self.guest();base={'request_id':'f'*32,'text':TEXT,'internet_consent':True,'search_provider':'serpapi-yandex'}
+        self.assertEqual(self.http('/api/web-check-jobs',{**base,'provider_consent':'serpapi'},guest)[0],400)
+        body={**base,'provider_consent':'serpapi-yandex'}
+        self.assertEqual(self.http('/api/web-check-jobs',body,guest)[0],403)
+        rid=self.check(guest,'a'*32);old=self.http('/api/reports/'+rid,cookie=guest)[1]
+        with patch.dict(os.environ,{'ISTOK_SEARCH_PROVIDER':'serpapi-yandex'}):
+            legacy={'request_id':'a'*32,'text':TEXT,'internet_consent':True}
+            self.assertEqual(self.http('/api/web-check-jobs',legacy,guest)[1]['job']['result']['report'],old['report'])
+            self.assertEqual(self.http('/api/web-check-jobs',body,guest)[0],200)
+            for _ in range(100):
+                job=self.http('/api/jobs/'+base['request_id'],cookie=guest)[1]['job']
+                if job['status']in{'complete','failed'}:break
+                time.sleep(.01)
+            self.assertEqual(job['status'],'complete',job)
+            self.stop();self.start()
+            self.assertEqual(self.http('/api/web-check-jobs',body,guest)[1]['job']['result']['report'],job['result']['report'])
+            self.assertEqual(providers,['tavily','serpapi-yandex'])
+            self.assertEqual(self.http('/api/web-check-jobs',legacy,guest)[1]['job']['result']['report'],old['report'])
+
     def test_invalid_cookie_creates_a_new_isolated_guest(self):
         cookie,_=self.guest();report=self.check(cookie,'1'*32)
         parts=SimpleCookie();parts.load(cookie);value=parts['istok_beta'].value
