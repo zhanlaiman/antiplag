@@ -56,6 +56,16 @@ function pendingWebRequest(text) {
     || pendingModelRequest('/api/web-check',{text,internet_consent:true,search_provider:'serpapi',provider_consent:'serpapi'})
     || pendingModelRequest('/api/web-check',{text,internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'});
 }
+function refreshSearchConsent(provider) {
+  const previous = webStatus().provider;
+  if (!isBeta() || !previous || !provider || previous === provider) return false;
+  if (privateAccess()) saveDraft(state.text);
+  state.internetConsent = false;
+  state.homeConsent = false;
+  state.sessionTransition = true;
+  location.reload();
+  return true;
+}
 function privateAccess() {
   return state.sessionReady && !state.sessionExpired && !state.sessionTransition
     && (!isSaas() || Boolean(state.session.user?.email_verified));
@@ -488,6 +498,7 @@ async function refreshSession() {
     saveDraft(state.text);
     state.sessionExpired = true;
   }
+  if (refreshSearchConsent(session.web?.provider)) return;
   state.session = session;
   updateAccountUI();
   if (lostUser) { renderView(); renderModelJobs(); }
@@ -3354,7 +3365,9 @@ async function refreshSources() {
   }
 }
 async function refreshStatus() {
-  state.status = await api('/api/status');
+  const status = await api('/api/status');
+  if (refreshSearchConsent(status.web?.provider)) return;
+  state.status = status;
   const provider = modelProvider();
   if (state.modelProvider !== provider) {
     state.modelProvider = provider;

@@ -1777,3 +1777,19 @@ test('an unknown Google request blocks duplicate submission when Yandex becomes 
   await assert.rejects(app.evaluate("startWebCheck({text:'Сохранённый текст.',consent:true})"));
   assert.equal(posts,0);assert.equal(app.evaluate("state.modelJobs[googleEntry.request_id].body.search_provider"),'serpapi');
 });
+
+test('changing the search destination clears consent and reloads while preserving drafts and prior request bodies', async () => {
+  let provider='tavily';let posts=0;
+  const app=fixture({fetch(url){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'provider-guest',max_characters:10000},web:{provider,configured:true}});
+    if(url==='/api/status')return json({web:{provider,configured:true},model:{models:[]}});
+    if(url==='/api/web-check-jobs')posts++;
+  }});await settle();
+  app.expose('prior',{request_id:'c'.repeat(32),path:'/api/web-check',body:{text:'Старый текст.',internet_consent:true,search_provider:'serpapi',provider_consent:'serpapi'},status:'delivery_unknown'});
+  app.evaluate("saveDraft('Новый черновик.');state.internetConsent=true;state.homeConsent=true;state.modelJobs[prior.request_id]=prior;saveModelJobs()");
+  provider='serpapi-yandex';await app.evaluate('refreshSession()');
+  assert.equal(app.reloads.length,1);assert.equal(posts,0);
+  assert.equal(app.evaluate('state.internetConsent'),false);assert.equal(app.evaluate('state.homeConsent'),false);
+  assert.equal(app.evaluate('restoreDraft()'),'Новый черновик.');
+  assert.equal(app.evaluate("state.modelJobs[prior.request_id].body.search_provider"),'serpapi');
+});
