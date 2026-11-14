@@ -71,6 +71,8 @@ class ClauseQueryTests(unittest.TestCase):
         self.assertIsNot(result[0]["metadata"], plan[0]["metadata"])
 
     def test_opt_in_plan_preserves_legacy_strategy_count_and_citations(self):
+        from plagiarism.web_search import DEFAULT_QUERY_STRATEGY
+        self.assertEqual(DEFAULT_QUERY_STRATEGY, CLAUSE_STRATEGY)
         text = ("Здесь указаны материалы: сосна берёза клён кедр липа пихта дуб вяз ель. "
                 + "Повторные измерения закончились после окончания планового занятия. " * 22)
         old = plan_queries(text, strategy=SHORT_PARAGRAPH_STRATEGY)
