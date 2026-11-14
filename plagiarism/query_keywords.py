@@ -5,7 +5,37 @@ import re
 from plagiarism.matching import MIN_WORDS, _tokens
 
 KEYWORD_STRATEGY = "hybrid-citation-v8-complete-keywords"
+KEYWORD_LINK_POLICY = "source-link-overlap-keyword-metadata-v2"
 _FIELD = re.compile(r"^[ \t]*(?:ключевые[ \t]+слова|key[ \t]*words)[ \t]*:[ \t]*([^\r\n]+)", re.I | re.M)
+
+
+def metadata_anchor_matches(text, label):
+    """A substantial link title can identify the full text behind an index.
+
+    Require at least six distinctive shared words and strong overlap in both
+    directions. A generic one-word link or an ordinary paragraph cannot open
+    the exception for pages which already supplied a short exact match.
+    """
+    if not isinstance(label, str) or len(label) > 500:
+        return False
+    anchor_tokens = _tokens(label)
+    if len(anchor_tokens) > 30:
+        return False
+    anchor = {t.value for t in anchor_tokens if len(t.value) >= 5 and not t.value.isdecimal()}
+    if not 6 <= len(anchor) <= 30:
+        return False
+    for field in _FIELD.finditer(text):
+        fragment = field.group(1)
+        if len(fragment) > 390:
+            continue
+        tokens = _tokens(fragment)
+        if not MIN_WORDS <= len(tokens) <= 30:
+            continue
+        words = {t.value for t in tokens if len(t.value) >= 5 and not t.value.isdecimal()}
+        common = anchor & words
+        if len(common) >= 6 and len(common) / len(anchor) >= .8 and len(common) / max(1, len(words)) >= .6:
+            return True
+    return False
 
 
 def complete_keyword_queries(text, plan, protected_queries=(), *, limit=6):

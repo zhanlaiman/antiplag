@@ -28,7 +28,7 @@ from plagiarism.html_evidence import POLICY as HTML_EVIDENCE_POLICY, source_view
 from plagiarism.input_references import extract_named_references
 from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 from plagiarism.query_clauses import CLAUSE_STRATEGY, clause_boundary_queries
-from plagiarism.query_keywords import KEYWORD_STRATEGY, complete_keyword_queries
+from plagiarism.query_keywords import KEYWORD_STRATEGY, KEYWORD_LINK_POLICY, complete_keyword_queries, metadata_anchor_matches
 from plagiarism.text_policy import target_too_long
 
 
@@ -725,7 +725,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 coverage = _word_coverage(text, confirmed_matches)
                 fully_covered = coverage["matched_words"] == coverage["total_words"]
                 related = _related_link(fetched, text, seen | final_urls)
-                if related and not fully_covered and not _word_coverage(text, page_matches)["matched_words"]:
+                metadata_link = (query_strategy == KEYWORD_STRATEGY and related is not None
+                    and any(_canonical_url(item.get("url")) == related
+                            and metadata_anchor_matches(text, item.get("text", "")) for item in fetched.get("links", [])))
+                if related and not fully_covered and (not _word_coverage(text, page_matches)["matched_words"] or metadata_link):
                     if len(ordered) >= MAX_URLS:
                         # A priority slot is renewed only after the previous
                         # linked page adds novel exact evidence. Failed or
@@ -756,7 +759,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                     seen.add(related)
                     urls.append(related)
                     linked_urls.add(related)
-                    link_discoveries.append({"parent_url": final, "url": related, "basis": "input_anchor_overlap"})
+                    link_discoveries.append({"parent_url": final, "url": related,
+                                            "basis": "keyword_metadata_anchor" if metadata_link else "input_anchor_overlap"})
                     if use_related_fallback:
                         related_parent_pages.append({"url": final, "links": fetched.get("links", [])})
         except (RuntimeError, OSError, ValueError, KeyError) as error:
@@ -814,7 +818,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "input_references": input_references,
         "link_discoveries": link_discoveries,
         "priority_link_replacements": priority_link_replacements,
-        "source_followup_policy": SOURCE_FOLLOWUP_POLICY,
+        "source_followup_policy": KEYWORD_LINK_POLICY if query_strategy == KEYWORD_STRATEGY else SOURCE_FOLLOWUP_POLICY,
         "priority_link_budget_remaining": priority_link_credit,
         "discovered_urls": list(dict.fromkeys(urls[:30] + reference_urls + [link["url"] for link in link_discoveries])),
         "attempted_urls": attempted_urls[:max_page_attempts], "skipped_urls": skipped_urls[:30],

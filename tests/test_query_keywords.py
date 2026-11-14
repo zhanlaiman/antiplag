@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from plagiarism.matching import _tokens
-from plagiarism.query_keywords import KEYWORD_STRATEGY, complete_keyword_queries
+from plagiarism.query_keywords import KEYWORD_STRATEGY, complete_keyword_queries, metadata_anchor_matches
 from plagiarism.query_clauses import CLAUSE_STRATEGY
 from plagiarism.web_search import plan_queries, run
 
@@ -18,6 +18,37 @@ def query(text, fragment):
 
 
 class KeywordQueryTests(unittest.TestCase):
+    def test_metadata_anchor_requires_specific_labelled_field_and_substantial_overlap(self):
+        label='экологически безопасная борьба сосущими насекомыми вредителями хлопковых культурах использованием биологических средств'
+        text='Ключевые слова: '+label.replace('безопасная','безопасное')
+        self.assertTrue(metadata_anchor_matches(text,label.upper()))
+        for field,anchor in ((label,label),(text,'средств'),(text,'совсем другая научная статья содержит отличные методы наблюдений'),
+                             (text+' лишнее '*80,label),(text,label+' дополнительная тема ' * 15)):
+            self.assertFalse(metadata_anchor_matches(field,anchor))
+
+    def test_partial_title_does_not_stop_a_strong_metadata_link_to_the_full_article(self):
+        title='сосна берёза пихта рябина осина ольха калина бузина черёмуха можжевельник'
+        text='Ключевые слова: '+title+'\n\nНаблюдатель аккуратно записывает температуру воздуха после каждого измерения прибора возле большой исследовательской площадки.'
+        class Search:
+            def __init__(self):self.calls=[]
+            def search(self,phrase,request_id):self.calls.append(phrase);return [{'url':'https://example.org/index'}]
+        class Fetch:
+            def __init__(self,complete=False):self.calls=[];self.complete=complete
+            def fetch(self,url):
+                self.calls.append(url)
+                return {'url':url,'title':'Artificial publication index' if url.endswith('/index') else 'Full text',
+                        'text':text if self.complete or url.endswith('/article') else title.upper(),
+                        'links':[{'url':'https://example.org/article','text':title.upper()}] if url.endswith('/index') else []}
+        a,b=Fetch(),Fetch();s1,s2=Search(),Search()
+        with patch('socket.socket',side_effect=AssertionError('Offline pipeline')):
+            old=run(text,searcher=s1,fetcher=a,query_strategy=CLAUSE_STRATEGY)
+            new=run(text,searcher=s2,fetcher=b,query_strategy=KEYWORD_STRATEGY)
+            complete=Fetch(complete=True);run(text,searcher=Search(),fetcher=complete,query_strategy=KEYWORD_STRATEGY)
+        self.assertEqual(len(s1.calls),len(s2.calls));self.assertEqual(len(a.calls),1);self.assertEqual(len(b.calls),2)
+        self.assertLess(old['stats']['matched_words'],old['stats']['total_words'])
+        self.assertEqual(new['stats']['matched_words'],new['stats']['total_words'])
+        self.assertEqual(new['web']['link_discoveries'][0]['basis'],'keyword_metadata_anchor')
+        self.assertEqual(len(complete.calls),1)
     def test_russian_and_english_fields_keep_complete_normalized_words_and_unicode_offsets(self):
         for label in ('Ключевые слова', 'KEYWORDS', 'Key words'):
             with self.subTest(label=label):
