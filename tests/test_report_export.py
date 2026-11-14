@@ -1,4 +1,5 @@
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -132,7 +133,41 @@ class ReportExportTests(unittest.TestCase):
         report = self.web_report()
         report['web']['status'] = 'partial'
         report['stats'].update(uniqueness_percent=None, uniqueness_upper_bound_percent=0.1)
-        self.assertIn('<strong>Уникальность не выше 0.1%</strong>', report_export.render(report))
+        self.assertIn('<strong>Уникальность не выше 0,1%</strong>', report_export.render(report))
+
+    def test_saved_export_matches_frontend_score_states_without_network(self):
+        samples = json.loads((Path(__file__).parent / 'fixtures/uniqueness-states.json').read_text())
+        for sample in samples:
+            with self.subTest(sample=sample['name']):
+                report = self.web_report()
+                report['stats'].update(sample.get('stats', {}))
+                if sample.get('web', {}) is None:
+                    report['web'] = None
+                else:
+                    report['web'].update(sample.get('web', {}))
+                if sample.get('empty_sources'):
+                    report['sources'] = []
+                if 'snapshots' in sample:
+                    report['source_snapshots_count'] = sample['snapshots']
+                with patch.object(server.llm, '_request', side_effect=AssertionError('No compute')):
+                    content = report_export.render(report)
+                self.assertIn('data-score-state="' + sample['kind'] + '"', content)
+                self.assertIn(sample['label'], content)
+                if sample['kind'] != 'exact':
+                    self.assertNotIn('Точный процент в пределах проверки', content)
+
+    def test_highlights_preserve_unicode_and_ignore_invalid_ranges(self):
+        text = '🙂 Авторский <текст> и совпадение.'
+        start = text.index('совпадение')
+        report = {'text': text, 'matches': [
+            {'start': start, 'end': start + len('совпадение'), 'kind': 'exact'},
+            {'start': -1, 'end': len(text), 'kind': 'similar'},
+            {'start': True, 'end': 3, 'kind': 'exact'},
+            {'start': 0, 'end': len(text) + 1, 'kind': 'similar'}]}
+        markup = report_export._annotated_text(report)
+        self.assertIn('🙂 Авторский &lt;текст&gt; и ', markup)
+        self.assertEqual(markup.count('<mark'), 1)
+        self.assertIn('>совпадение</mark>.', markup)
 
     def test_web_limitations_errors_counts_and_snapshot_metadata_are_escaped(self):
         report = self.web_report()

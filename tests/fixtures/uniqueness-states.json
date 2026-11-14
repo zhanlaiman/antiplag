@@ -1,0 +1,18 @@
+[
+  {"name":"exact percentage","stats":{"uniqueness_percent":70},"kind":"exact","label":"70%"},
+  {"name":"exact zero","stats":{"uniqueness_percent":0},"kind":"exact","label":"0%"},
+  {"name":"exact hundred in checked scope","stats":{"uniqueness_percent":100},"kind":"exact","label":"100%"},
+  {"name":"zero upper bound","web":{"status":"partial"},"stats":{"uniqueness_percent":100,"uniqueness_upper_bound_percent":0},"kind":"bound","label":"Не выше 0%"},
+  {"name":"small bound rounds upward","web":{"status":"partial"},"stats":{"uniqueness_percent":null,"uniqueness_upper_bound_percent":0.04},"kind":"bound","label":"Не выше 0,1%"},
+  {"name":"bound never rounds down","web":{"status":"partial"},"stats":{"uniqueness_percent":90,"uniqueness_upper_bound_percent":58.31},"kind":"bound","label":"Не выше 58,4%"},
+  {"name":"hundred remains only a bound","web":{"status":"partial"},"stats":{"uniqueness_upper_bound_percent":100},"kind":"bound","label":"Не выше 100%"},
+  {"name":"partial stale percentage","web":{"status":"partial"},"stats":{"uniqueness_percent":100},"kind":"unknown","label":"Не установлена"},
+  {"name":"no read pages overrides all scores","web":{"sources_checked":0},"stats":{"uniqueness_percent":100,"uniqueness_upper_bound_percent":50},"kind":"unknown","label":"Не установлена"},
+  {"name":"empty snapshots override stale counts","empty_sources":true,"stats":{"uniqueness_percent":100},"kind":"unknown","label":"Не установлена"},
+  {"name":"snapshot count zero overrides stale counts","snapshots":0,"stats":{"uniqueness_percent":100},"kind":"unknown","label":"Не установлена"},
+  {"name":"invalid percentage cannot use a bound on a complete check","stats":{"uniqueness_percent":101,"uniqueness_upper_bound_percent":50},"kind":"unknown","label":"Не установлена"},
+  {"name":"boolean is not a percentage","stats":{"uniqueness_percent":true},"kind":"unknown","label":"Не установлена"},
+  {"name":"errors revoke completion","web":{"errors":[{"message":"Недоступная страница"}]},"stats":{"uniqueness_percent":70},"kind":"unknown","label":"Не установлена"},
+  {"name":"errors permit only an explicit bound","web":{"errors":[{"message":"Недоступная страница"}]},"stats":{"uniqueness_percent":70,"uniqueness_upper_bound_percent":80},"kind":"bound","label":"Не выше 80%"},
+  {"name":"legacy report without completion metadata","web":null,"stats":{"uniqueness_percent":100},"kind":"unknown","label":"Не установлена"}
+]

@@ -6,6 +6,30 @@ import tempfile
 import zipfile
 
 
+# Only score metadata is read for lists; source text, URLs and search errors stay
+# in the saved report and are not hydrated for the dashboard or history.
+REPORT_SCORE_COLUMNS = """
+    json_extract(r.data,'$.stats') AS stats,
+    CASE WHEN json_type(r.data,'$.web')='object' THEN json_object(
+        'status',json_extract(r.data,'$.web.status'),
+        'sources_checked',json_extract(r.data,'$.web.sources_checked'),
+        'errors_count',coalesce(json_array_length(r.data,'$.web.errors'),0)) END AS web,
+    coalesce(json_array_length(r.data,'$.sources_refs'),
+             json_array_length(r.data,'$.sources'),0) AS source_snapshots_count
+"""
+
+
+def report_score_preview(row):
+    result = dict(row)
+    for name in ('stats', 'web'):
+        try:
+            value = json.loads(result[name]) if isinstance(result.get(name), str) else result.get(name)
+        except (ValueError, TypeError):
+            value = None
+        result[name] = value if isinstance(value, dict) else {}
+    return result
+
+
 class DataArchive:
     """An already finished ZIP; the HTTP handler owns and closes the file."""
     def __init__(self, stream):
@@ -63,9 +87,9 @@ class DataManagement:
     def data_summary(self):
         """Counts and bounded previews only; large report snapshots stay on disk."""
         with self.connect() as db:
-            reports = [dict(row) for row in db.execute("""SELECT r.id,r.created_at,
+            reports = [report_score_preview(row) for row in db.execute(f"""SELECT r.id,r.created_at,
                 substr(json_extract(r.data,'$.text'),1,180) AS preview,
-                json_extract(r.data,'$.scope') AS scope,t.deleted_at
+                json_extract(r.data,'$.scope') AS scope,t.deleted_at,{REPORT_SCORE_COLUMNS}
                 FROM records r LEFT JOIN trash t ON t.kind='report' AND t.id=r.id
                 WHERE r.kind='report' ORDER BY r.created_at DESC,r.id LIMIT 500""")]
             sources = [dict(row) for row in db.execute("""SELECT s.id,s.title,s.url,s.created_at,
@@ -78,8 +102,13 @@ class DataManagement:
                 substr(json_extract(r.data,'$.text'),1,180) AS preview,t.deleted_at
                 FROM records r LEFT JOIN correction_trash t ON t.id=r.id
                 WHERE r.kind='correction' ORDER BY r.created_at DESC,r.id LIMIT 500""")]
+            active_totals = {
+                'reports': db.execute("SELECT count(*) FROM records r WHERE kind='report' AND NOT EXISTS (SELECT 1 FROM trash t WHERE t.kind='report' AND t.id=r.id)").fetchone()[0],
+                'sources': sum(not source['deleted_at'] for source in sources),
+                'corrections': db.execute("SELECT count(*) FROM records r WHERE kind='correction' AND NOT EXISTS (SELECT 1 FROM correction_trash t WHERE t.id=r.id)").fetchone()[0],
+            }
         return {'reports': reports, 'sources': sources, 'corrections':corrections,'totals': totals,
-                'listed_reports_limit': 500, 'database_bytes': self.path.stat().st_size}
+                'active_totals': active_totals, 'listed_reports_limit': 500, 'database_bytes': self.path.stat().st_size}
 
     def export_data(self):
         """Consistent snapshot without credentials, jobs, quotas or cross-tenant data.

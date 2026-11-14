@@ -1026,10 +1026,11 @@ function renderHomeResult() {
   setReportAddress('home', report);
   const selected = report.matches.find(match => match.id === state.homeMatch) || report.matches[0];
   area.innerHTML = `<section class="home-result-card">
-    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webResultTitle(report)}</h2><p>${webResultDescription(report)}</p></div><a href="#check/${escapeHTML(report.id)}" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
+    <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webResultTitle(report) === 'Совпадений не найдено' ? 'Совпадений не найдено' : 'Результат проверки уникальности'}</h2><p>${webResultDescription(report)}</p></div><a href="#check/${escapeHTML(report.id)}" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
     <p id="home-report-stale" class="warning" hidden>Это отчёт для предыдущего текста. Новая правка в поле сохранена отдельно.</p>
+    ${webScoreHTML(report)}
     ${webStatsHTML(report)}
-    ${selected ? `<div class="card"><h3>Совпадения в вашем тексте</h3><div class="annotated-text">${annotatedText(report, selected.id)}</div>
+    ${selected ? `<div class="card"><h3>Совпадения в вашем тексте</h3>${matchLegendHTML()}<div class="annotated-text">${annotatedText(report, selected.id)}</div>
       <p class="field-help">Нажмите на выделенный фрагмент, чтобы сверить его с источником.</p></div>
       <div class="comparison-columns home-source-comparison" id="home-fragments" tabindex="-1">
         <div><h3>Ваш фрагмент</h3><blockquote>${escapeHTML(selected.excerpt)}</blockquote></div>
@@ -1969,7 +1970,7 @@ function annotatedText(report, selectedId = state.selectedMatch) {
     const value = escapeHTML(text.slice(start, end).join(''));
     const selected = covering.find(match => match.id === selectedId);
     const match = selected || covering[0];
-    output.push(match ? `<mark tabindex="0" role="button" aria-label="Показать совпадение с ${escapeHTML(match.source_title)}" data-highlight="${escapeHTML(match.id)}" class="${selected ? 'selected' : ''} ${match.kind === 'similar' ? 'fuzzy' : ''}">${value}</mark>` : value);
+    output.push(match ? `<mark tabindex="0" role="button" aria-label="${match.kind === 'similar' ? 'Похожая формулировка' : 'Дословное совпадение'}. Показать источник: ${escapeHTML(match.source_title)}" aria-pressed="${Boolean(selected)}" data-highlight="${escapeHTML(match.id)}" class="${selected ? 'selected' : ''} ${match.kind === 'similar' ? 'fuzzy' : ''}">${value}</mark>` : value);
   }
   return output.join('');
 }
@@ -1977,7 +1978,7 @@ function matchCardHTML(match, index) {
   const selected = match.id === state.selectedMatch;
   const label = reviewLabel(match.id);
   return `<div class="match-entry">
-    <button class="match-item ${selected ? 'selected' : ''}" data-match="${escapeHTML(match.id)}" type="button">
+    <button class="match-item ${selected ? 'selected' : ''}" data-match="${escapeHTML(match.id)}" aria-pressed="${selected}" type="button">
       <div class="match-kicker">
         <span>Фрагмент ${index + 1}</span>
         <span class="match-kind ${match.kind}">${match.kind === 'exact' ? 'Дословно' : 'Похожая формулировка'}</span>
@@ -1993,6 +1994,7 @@ function matchCardHTML(match, index) {
 
 function webSourceCount(report) {
   const counts = [report.web?.sources_checked, report.source_snapshots_count, report.stats?.checked_source_count];
+  if (Array.isArray(report.sources)) counts.push(report.sources.length);
   if (counts.includes(0)) return 0;
   return counts.find(value => Number.isInteger(value) && value > 0);
 }
@@ -2002,17 +2004,46 @@ function hasWebSources(report) {
 }
 
 function webCheckComplete(report) {
-  return hasWebSources(report) && (report.web ? report.web.status === 'complete' && !report.web.errors?.length : report.scope === 'web_search');
+  return hasWebSources(report) && report.web?.status === 'complete'
+    && !report.web.errors?.length && !report.web.errors_count;
+}
+
+function webScoreState(report) {
+  const value = report.stats?.uniqueness_percent;
+  if (webCheckComplete(report) && Number.isFinite(value) && value >= 0 && value <= 100) {
+    return { kind: 'exact', label: `${value.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`,
+      status: 'Точный процент в пределах проверки',
+      description: 'Найденные доступные страницы проверены. Показана доля слов без подтверждённых дословных совпадений.' };
+  }
+  const upper = report.stats?.uniqueness_upper_bound_percent;
+  if (!webCheckComplete(report) && hasWebSources(report) && Number.isFinite(upper) && upper >= 0 && upper <= 100) {
+    // An upper bound must never round down and turn a small nonzero bound into zero.
+    const rounded = Math.ceil(upper * 10) / 10;
+    return { kind: 'bound', label: `Не выше ${rounded.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`,
+      status: 'Верхняя граница · проверка неполная',
+      description: 'Не все источники проверены. Показан максимально возможный процент по найденным совпадениям, а не точный итог проверки.' };
+  }
+  return { kind: 'unknown', label: 'Не установлена', status: 'Итогового процента нет',
+    description: hasWebSources(report) ? 'Данных недостаточно для итогового процента. Найденные совпадения и прочитанные источники доступны ниже.'
+      : 'Источники прочитать не удалось. По этому результату нельзя определить оригинальность текста.' };
 }
 
 function webUniqueness(report) {
-  const value = report.stats?.uniqueness_percent;
-  if (webCheckComplete(report) && Number.isFinite(value) && value >= 0 && value <= 100) {
-    return `${value.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`;
-  }
-  const upper = report.stats?.uniqueness_upper_bound_percent;
-  return hasWebSources(report) && Number.isFinite(upper) && upper >= 0 && upper <= 100
-    ? `Не выше ${upper.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%` : 'Не установлена';
+  return webScoreState(report).label;
+}
+
+function webScoreHTML(report, compact = false) {
+  const score = webScoreState(report);
+  if (compact) return `<span class="report-score-badge score-${score.kind}"><span>Уникальность: </span>${escapeHTML(score.label)}<span>${score.kind === 'exact' ? ' · по прочитанным страницам' : score.kind === 'bound' ? ' · верхняя граница' : ''}</span></span>`;
+  return `<section class="uniqueness-score score-${score.kind}" aria-label="Уникальность текста" data-score-state="${score.kind}">
+    <div><p class="uniqueness-label">Уникальность по прочитанным страницам</p>
+      <strong class="uniqueness-value">${escapeHTML(score.label)}</strong><p class="uniqueness-state">${score.status}</p></div>
+    <div class="uniqueness-context"><p>${score.description}</p><p class="uniqueness-scope">Оценка относится к найденным страницам, а не ко всему интернету. Совпадение само по себе не означает нарушение.</p></div>
+  </section>`;
+}
+
+function matchLegendHTML() {
+  return '<div class="match-legend" aria-label="Обозначения подсветки"><span><i class="legend-exact" aria-hidden="true"></i>Дословное совпадение</span><span><i class="legend-similar" aria-hidden="true"></i>Похожая формулировка</span><span>Нажмите на фрагмент, чтобы сверить источник</span></div>';
 }
 
 function webResultTitle(report) {
@@ -2035,7 +2066,7 @@ function webStatsHTML(report) {
   return `<div class="stats-row web-stats">
     <div class="stat-card"><strong>${percent}</strong><span>слов с подтверждёнными дословными совпадениями${validWords ? ` · ${number(stats.matched_words)} из ${number(stats.total_words)}` : ''}</span></div>
     <div class="stat-card"><strong>${Number.isInteger(checked) ? number(checked) : '—'}</strong><span>страниц прочитано</span></div>
-    <div class="stat-card"><strong class="coverage-status">Завершена</strong><span>${webCheckComplete(report) ? 'найденные страницы проверены' : hasWebSources(report) ? 'часть источников не проверена' : 'источники прочитать не удалось'}</span></div></div>`;
+    <div class="stat-card"><strong class="coverage-status">${webCheckComplete(report) ? 'Проверены' : hasWebSources(report) ? 'Частично' : 'Нет данных'}</strong><span>${webCheckComplete(report) ? 'найденные страницы проверены' : hasWebSources(report) ? 'часть источников не проверена' : 'источники прочитать не удалось'}</span></div></div>`;
 }
 
 function showComparison(selector) {
@@ -2071,11 +2102,13 @@ function webCoverageHTML(report) {
   const replay = report.offline_replay && typeof report.offline_replay === 'object';
   const mixed = web.hybrid_reply_provenance && typeof web.hybrid_reply_provenance === 'object';
   const savedPages = replay && report.offline_replay.fresh_page_load_attempts === 0;
-  return `<section class="card web-coverage">
-    <h3>Проверка завершена</h3>
+  const provenance = replay ? `<p class="warning">Повтор сохранённых данных: используется прежняя поисковая выдача.${savedPages ? ' Источники проверены по сохранённым снимкам.' : ''}</p>`
+    : mixed ? '<p class="warning">Часть поисковой выдачи взята из сохранённых данных.</p>' : '';
+  return `${provenance}<details class="card web-coverage">
+    <summary>Охват проверки и ограничения</summary>
+    <p>Проверка завершена</p>
     ${hasWebSources(report) && report.stats?.matched_words === 0 && !report.matches?.length ? `<p>На ${number(webSourceCount(report))} проверенных страницах дословных совпадений не найдено.</p>` : ''}
     ${!webCheckComplete(report) ? `<p>${hasWebSources(report) ? 'Часть источников недоступна или осталась непроверенной из-за ограничений поиска и загрузки.' : 'Прочитать источники не удалось. Подтвердить уникальность текста пока нельзя.'}</p>` : ''}
-    ${replay ? `<p class="warning">Повтор сохранённых данных: используется прежняя поисковая выдача.${savedPages ? ' Источники проверены по сохранённым снимкам.' : ''}</p>` : mixed ? '<p class="warning">Часть поисковой выдачи взята из сохранённых данных.</p>' : ''}
     <p>${replay ? 'Использовано сохранённых поисковых ответов' : mixed ? 'Обработано поисковых ответов' : 'Поисковых запросов выполнено'} ${number(web.queries_completed)} из ${number(web.queries_planned)}.
       ${savedPages ? 'Проверено снимков страниц' : 'Проверено страниц'} ${number(web.sources_checked)}. ${replay || mixed ? 'Обработано адресов' : 'Попыток загрузки'} ${number(web.urls_attempted)}.</p>
     ${web.post_wiki_enabled ? `<p class="field-help">Дополнительный поиск по русской Википедии: ${number(web.post_wiki_queries_completed)} из ${number(web.post_wiki_queries_planned)} запросов. Подсветка строится только по тексту прочитанных страниц.</p>` : ''}
@@ -2083,7 +2116,7 @@ function webCoverageHTML(report) {
     ${web.status !== 'complete' && Number.isFinite(report.stats?.uniqueness_upper_bound_percent) ? '<p class="field-help">По найденным совпадениям указана верхняя граница уникальности. Не все источники удалось проверить, окончательный процент не установлен.</p>' : ''}
     ${web.errors?.length ? `<details><summary>Причины ограничений · ${number(web.errors.length)}</summary><ul>${web.errors.map(error => `<li>${escapeHTML(typeof error === 'string' ? error : error.message || 'Источник недоступен')} ${typeof error === 'object' ? safeLink(error.url) : ''}</li>`).join('')}</ul></details>` : ''}
     <ul class="field-help">${(web.limitations || ['Оценка относится к найденным доступным страницам, а не ко всему интернету.']).map(value => `<li>${escapeHTML(value)}</li>`).join('')}</ul>
-  </section>`;
+  </details>`;
 }
 
 function renderReport() {
@@ -2112,7 +2145,7 @@ function renderReport() {
         <button class="text-button" id="download-report" type="button">↓ Данные JSON</button>
       </div>
     </div>
-    ${webReport ? `<p class="web-score-label"><strong>${webResultTitle(report)}</strong> · ${webResultDescription(report)}</p>${webStatsHTML(report)}` : `
+    ${webReport ? `${webScoreHTML(report)}<p class="web-score-label">${webResultTitle(report) === 'Совпадений не найдено' ? 'Совпадений не найдено · ' : ''}${webResultDescription(report)}</p>${webStatsHTML(report)}` : `
     <div class="stats-row">
       <div class="stat-card"><strong>${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%</strong><span>текста с лексическими совпадениями</span></div>
       <div class="stat-card"><strong>${number(matches.length)}</strong><span>найдено фрагментов</span></div>
@@ -2126,6 +2159,7 @@ function renderReport() {
           <div class="editor-header">
             <span class="editor-title">Совпадения в тексте</span><span class="mini-label">Нажмите на подсветку</span>
           </div>
+          ${matchLegendHTML()}
           <div class="annotated-text">${annotatedText(report)}</div>
           <div class="report-caption">Перекрывающиеся участки учитываются в проценте один раз. Оформленные цитаты также могут совпадать.</div>
         </div>
@@ -3189,32 +3223,41 @@ async function renderDataDashboard(filters = {}) {
     const data = await api('/api/data');
     if (!current()) return;
     const tile = (value, label) => `<article class="card data-metric"><strong>${number(value)}</strong><span>${label}</span></article>`;
+    const active = data.active_totals || { reports: data.reports.filter(item => !item.deleted_at).length, sources: data.sources.filter(item => !item.deleted_at).length, corrections: (data.corrections || []).filter(item => !item.deleted_at).length };
     main.innerHTML = heading('Мои данные', 'Отчёты, источники и корзина вашего пространства.', '', 'Панель управления') + `
-      <section class="data-metrics" aria-label="Личная статистика">${tile(data.totals.reports, 'Отчётов, включая корзину')}${tile(data.totals.sources, 'Источников, включая корзину')}${tile(data.totals.trashed, 'Записей в корзине')}</section>
+      <section class="data-metrics" aria-label="Личная статистика">${tile(active.reports, 'Отчётов')}${tile(active.sources, 'Источников')}${tile(active.corrections, 'Предложений Qwen')}${tile(data.totals.trashed, 'В корзине')}</section><p class="data-count-note">Отчёты, источники и предложения Qwen — без корзины. Записи в корзине можно восстановить.</p>
       <section class="card data-controls"><div><h2>Резервная копия</h2><p>ZIP содержит все ваши отчёты, тексты источников, отметки и корзину. Храните архив в безопасном месте.</p><a class="button secondary" href="/api/data-export" download="istok-personal-data.zip">↓ Скачать мои данные</a></div><p class="field-help">Корзина скрывает запись, но сохраняет её для восстановления. Она не освобождает место и квоту проверок. Автоматической очистки нет. Черновики в браузере в архив не входят.</p></section>
-      <section class="card data-records"><div class="data-toolbar"><h2>Записи</h2><label>Найти<input id="data-query" type="search" placeholder="Текст, название или адрес"></label><label>Показать<select id="data-kind"><option value="all">Все записи</option><option value="report">Отчёты</option><option value="source">Источники</option><option value="correction">Предложения Qwen</option><option value="trash">Корзина</option></select></label></div><p class="field-help">На экране — до ${number(data.listed_reports_limit)} последних отчётов и предложений Qwen. В архив входят все.</p><div id="data-list"></div><p id="data-list-status" class="field-help" role="status"></p></section>
+      <section class="card data-records"><div class="data-toolbar"><h2>Мои записи</h2><label>Найти<input id="data-query" type="search" placeholder="Текст, название или адрес"></label><label>Показать<select id="data-kind"><option value="all">Все записи</option><option value="report">Отчёты</option><option value="source">Источники</option><option value="correction">Предложения Qwen</option><option value="trash">Корзина</option></select></label><label>Порядок<select id="data-sort"><option value="newest">Сначала новые</option><option value="oldest">Сначала старые</option><option value="kind">По типу записи</option></select></label><button id="data-clear-filters" class="text-button" type="button" hidden>Сбросить фильтры</button></div><p class="field-help">Загружено до ${number(data.listed_reports_limit)} последних отчётов и до ${number(data.listed_reports_limit)} предложений Qwen. В архив входят все записи.</p><div id="data-list"></div><p id="data-list-status" class="field-help" role="status"></p></section>
       <section class="card data-dictionary"><details><summary>Мой словарь корректора</summary><p class="field-help">Имена и термины, которые словарь пропускает при проверке. До 2000 слов. Удалённое слово можно снова добавить.</p><form id="dictionary-form" class="data-toolbar"><label>Добавить слово<input id="dictionary-word" maxlength="40" required autocomplete="off"></label><button id="dictionary-add" class="button secondary small" type="submit">Добавить</button></form><div id="dictionary-list"><p>Загружаем словарь…</p></div></details></section>
       ${state.session?.beta?.owner ? '<section class="card" id="owner-statistics"><h2>Статистика сайта</h2><p>Загружаем сводные числа…</p></section><section class="card data-api" id="api-key-manager"><h2>Доступ через API</h2><p>Загружаем ключи…</p></section>' : ''}`;
+    filters = { ...state.dataFilters, ...filters };
     document.querySelector('#data-query').value = typeof filters.query === 'string' ? filters.query : '';
     document.querySelector('#data-kind').value = ['all', 'report', 'source', 'correction', 'trash'].includes(filters.kind) ? filters.kind : 'all';
-    let entries = [...data.reports.map(item => ({ ...item, kind: 'report', label: item.preview || 'Отчёт без текста' })),
+    document.querySelector('#data-sort').value = ['newest', 'oldest', 'kind'].includes(filters.sort) ? filters.sort : 'newest';
+    const entries = [...data.reports.map(item => ({ ...item, kind: 'report', label: item.preview || 'Отчёт без текста' })),
       ...data.sources.map(item => ({ ...item, kind: 'source', label: item.title })),
       ...(data.corrections || []).map(item => ({...item, kind:'correction', label:item.preview || 'Предложения Qwen'}))];
     function draw() {
       if (!current()) return;
       const query = document.querySelector('#data-query').value.trim().toLocaleLowerCase('ru');
       const kind = document.querySelector('#data-kind').value;
+      const sort = document.querySelector('#data-sort').value;
+      state.dataFilters = { query: document.querySelector('#data-query').value, kind, sort };
+      document.querySelector('#data-clear-filters').hidden = !query && kind === 'all' && sort === 'newest';
       const selected = entries.filter(item => (kind === 'trash' ? item.deleted_at : !item.deleted_at && (kind === 'all' || kind === item.kind))
         && `${item.label} ${item.url || ''}`.toLocaleLowerCase('ru').includes(query));
+      const byDate = (a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || String(a.id).localeCompare(String(b.id));
+      const kindOrder = { report: 0, source: 1, correction: 2 };
+      selected.sort(sort === 'kind' ? (a, b) => kindOrder[a.kind] - kindOrder[b.kind] || byDate(a, b) : sort === 'oldest' ? (a, b) => byDate(b, a) : byDate);
       document.querySelector('#data-list').innerHTML = selected.length ? selected.map(item => {
         const index = entries.indexOf(item);
-        return `<article class="data-row"><div><small>${item.kind === 'report' ? 'Отчёт' : item.kind === 'correction' ? 'Предложения Qwen' : 'Источник'} · ${escapeHTML(date(item.created_at))}${item.deleted_at ? ' · в корзине' : ''}</small><h3>${escapeHTML(item.label)}</h3>${item.url ? `<p>${escapeHTML(item.url)}</p>` : ''}</div><div class="data-row-actions">${item.kind === 'report' && !item.deleted_at ? `<a class="button secondary small" href="#check/${encodeURIComponent(item.id)}">Открыть</a>` : ''}${item.kind === 'correction' && !item.deleted_at ? `<a class="button secondary small" href="/api/corrections/${encodeURIComponent(item.id)}" download="istok-correction-${item.id}.json">Скачать JSON</a>` : ''}<button class="text-button" type="button" data-lifecycle-index="${index}">${item.deleted_at ? 'Восстановить' : 'В корзину'}</button></div></article>`;
-      }).join('') : '<p class="subtle">Таких записей нет.</p>';
-      document.querySelector('#data-list-status').textContent = `Показано: ${number(selected.length)}`;
+        return `<article class="data-row"><div><small>${item.kind === 'report' ? 'Отчёт' : item.kind === 'correction' ? 'Предложения Qwen' : 'Источник'} · ${escapeHTML(date(item.created_at))}${item.deleted_at ? ' · в корзине' : ''}</small><h3>${escapeHTML(item.label)}</h3>${item.url ? `<p>${escapeHTML(item.url)}</p>` : ''}${item.kind === 'report' ? item.scope === 'web_search' ? webScoreHTML(item, true) : '<p class="data-record-scope">Проверка по библиотеке · не процент уникальности в интернете</p>' : item.kind === 'source' && Number.isFinite(item.characters) ? `<p class="data-record-scope">${number(item.characters)} знаков</p>` : ''}</div><div class="data-row-actions">${item.kind === 'report' && !item.deleted_at ? `<a class="button secondary small" href="#check/${encodeURIComponent(item.id)}">Открыть</a>` : ''}${item.kind === 'correction' && !item.deleted_at ? `<a class="button secondary small" href="/api/corrections/${encodeURIComponent(item.id)}" download="istok-correction-${item.id}.json">Скачать JSON</a>` : ''}<button class="text-button" type="button" data-lifecycle-index="${index}">${item.deleted_at ? 'Восстановить' : 'В корзину'}</button></div></article>`;
+      }).join('') : `<p class="data-empty">${query ? 'По вашему запросу ничего не найдено. Измените запрос или сбросьте фильтры.' : kind === 'trash' ? 'Корзина пуста.' : 'В этом разделе пока нет записей.'}</p>`;
+      document.querySelector('#data-list-status').textContent = `Показано: ${number(selected.length)} из ${number(entries.length)} загруженных записей${kind === 'trash' ? ' · корзина' : ''}`;
       document.querySelectorAll('[data-lifecycle-index]').forEach(button => button.addEventListener('click', () => busy(button, 'Сохраняем', async () => {
         const item = entries[Number(button.dataset.lifecycleIndex)];
         const action = item.deleted_at ? 'restore' : 'trash';
-        const filters = { query: document.querySelector('#data-query').value, kind: document.querySelector('#data-kind').value };
+        const filters = { ...state.dataFilters };
         await api(`/api/data/${item.kind}/${encodeURIComponent(item.id)}/${action}`, {});
         if (action === 'trash' && item.kind === 'correction') {
           for (const entry of Object.values(state.modelJobs)) {
@@ -3240,6 +3283,14 @@ async function renderDataDashboard(filters = {}) {
     }
     document.querySelector('#data-query').addEventListener('input', draw);
     document.querySelector('#data-kind').addEventListener('change', draw);
+    document.querySelector('#data-sort').addEventListener('change', draw);
+    document.querySelector('#data-clear-filters').addEventListener('click', () => {
+      document.querySelector('#data-query').value = '';
+      document.querySelector('#data-kind').value = 'all';
+      document.querySelector('#data-sort').value = 'newest';
+      draw();
+      document.querySelector('#data-query').focus();
+    });
     draw();
     async function loadDictionary() {
       const { words } = await api('/api/dictionary');
@@ -3323,7 +3374,7 @@ async function renderHistory() {
     const { reports } = await api('/api/reports');
     if (state.view !== 'history') return;
     const list = document.querySelector('#history-list');
-    list.innerHTML = reports.length ? reports.map(report => `<article class="card history-row"><div><small>${escapeHTML(date(report.created_at))}</small><h3>${escapeHTML(report.text.slice(0, 85))}${report.text.length > 85 ? '…' : ''}</h3><p>${number(report.stats.total_characters ?? chars(report.text).length)} знаков · ${report.scope === 'web_search' ? `${webUniqueness(report)} · уникальность по интернету` : `${Number(report.stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}% совпадений по библиотеке`}</p></div><button class="button secondary small" data-open-report="${escapeHTML(report.id)}" type="button">Открыть отчёт ↗</button></article>`).join('') : empty('Проверок пока нет', 'Проверьте первый текст, и его отчёт появится здесь.', '↶');
+    list.innerHTML = reports.length ? reports.map(report => `<article class="card history-row"><div><small>${escapeHTML(date(report.created_at))}</small><h3>${escapeHTML(report.text.slice(0, 85))}${report.text.length > 85 ? '…' : ''}</h3><p>${number(report.stats.total_characters ?? chars(report.text).length)} знаков${report.scope === 'web_search' ? '' : ` · ${Number(report.stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}% совпадений по библиотеке`}</p>${report.scope === 'web_search' ? webScoreHTML(report, true) : ''}</div><button class="button secondary small" data-open-report="${escapeHTML(report.id)}" type="button">Открыть отчёт ↗</button></article>`).join('') : empty('Проверок пока нет', 'Проверьте первый текст, и его отчёт появится здесь.', '↶');
     list.querySelectorAll('[data-open-report]').forEach(button => button.addEventListener('click', () => busy(button, 'Открываем', async () => {
       const revision = state.viewRevision;
       const { report } = await api(`/api/reports/${encodeURIComponent(button.dataset.openReport)}`);

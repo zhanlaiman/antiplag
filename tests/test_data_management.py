@@ -9,6 +9,29 @@ from plagiarism.storage import Store
 
 
 class DataManagementTests(unittest.TestCase):
+    def test_previews_include_score_evidence_counts_without_source_text_or_error_details(self):
+        with TemporaryDirectory() as root:
+            store = Store(Path(root) / 'data.sqlite3')
+            source = store.add_source('Источник', 'PRIVATE_SOURCE_SENTINEL')
+            report = store.save('report', {'text': 'Мой текст', 'scope': 'web_search',
+                'sources': [source], 'stats': {'uniqueness_percent': None, 'uniqueness_upper_bound_percent': 58.3},
+                'web': {'status': 'partial', 'sources_checked': 1,
+                        'errors': [{'message': 'PRIVATE_ERROR_SENTINEL', 'url': 'https://private.example'}]}})
+            for preview in (store.data_summary()['reports'][0], store.report_summaries()[0]):
+                self.assertEqual(preview['stats']['uniqueness_upper_bound_percent'], 58.3)
+                self.assertEqual(preview['web'], {'status': 'partial', 'sources_checked': 1, 'errors_count': 1})
+                self.assertEqual(preview['source_snapshots_count'], 1)
+                self.assertNotIn('PRIVATE_SOURCE_SENTINEL', json.dumps(preview))
+                self.assertNotIn('PRIVATE_ERROR_SENTINEL', json.dumps(preview))
+                self.assertNotIn('private.example', json.dumps(preview))
+            store.save('correction', {'text': 'Правки'})
+            store.trash_item('report', report['id'])
+            store.trash_item('source', source['id'])
+            summary = store.data_summary()
+            self.assertEqual(summary['active_totals'], {'reports': 0, 'sources': 0, 'corrections': 1})
+            self.assertEqual(summary['totals']['reports'], 1)
+            self.assertEqual(summary['totals']['trashed'], 2)
+
     def test_trash_restore_preserves_snapshots_and_operational_receipts(self):
         with TemporaryDirectory() as root:
             path = Path(root) / 'data.sqlite3'

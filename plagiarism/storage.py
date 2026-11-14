@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 
 from plagiarism.matching import MAX_SOURCES
-from plagiarism.data_management import DataManagement
+from plagiarism.data_management import DataManagement, REPORT_SCORE_COLUMNS, report_score_preview
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -186,12 +186,12 @@ class Store(DataManagement):
     def report_summaries(self):
         # Read only listing fields, leaving potentially large source snapshots on disk.
         with self.connect() as connection:
-            rows = connection.execute("""SELECT id, created_at,
-                json_extract(data, '$.stats') AS stats,
-                substr(json_extract(data, '$.text'), 1, 300) AS text,
-                json_extract(data, '$.scope') AS scope
-                FROM records WHERE kind = 'report' AND NOT EXISTS (SELECT 1 FROM trash WHERE trash.kind='report' AND trash.id=records.id) ORDER BY created_at DESC LIMIT 100""")
-            return [{**dict(row), "stats": json.loads(row["stats"])} for row in rows]
+            rows = connection.execute(f"""SELECT r.id, r.created_at,
+                {REPORT_SCORE_COLUMNS},
+                substr(json_extract(r.data, '$.text'), 1, 300) AS text,
+                json_extract(r.data, '$.scope') AS scope
+                FROM records r WHERE r.kind = 'report' AND NOT EXISTS (SELECT 1 FROM trash WHERE trash.kind='report' AND trash.id=r.id) ORDER BY r.created_at DESC LIMIT 100""")
+            return [report_score_preview(row) for row in rows]
 
     def latest_retrieval(self, report_id):
         with self.connect() as connection:

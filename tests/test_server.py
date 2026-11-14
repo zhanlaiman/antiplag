@@ -1,6 +1,7 @@
 """Exercise the real HTTP routes with an isolated database and no model server."""
 
 from http.client import HTTPConnection
+from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -91,7 +92,12 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(response.getheader('Content-Type'), 'text/html; charset=utf-8')
             self.assertIn("default-src 'none'", response.getheader('Content-Security-Policy'))
             self.assertEqual(response.getheader('Cache-Control'), 'no-store')
-            self.assertIn(SOURCE_TEXT, content)
+            class VisibleText(HTMLParser):
+                def handle_data(self, data):
+                    visible.append(data)
+            visible = []
+            VisibleText().feed(content)
+            self.assertIn(SOURCE_TEXT, ''.join(visible))
             self.assertIn('а не весь интернет', content)
         finally:
             connection.close()

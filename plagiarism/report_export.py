@@ -1,6 +1,7 @@
 """Render an offline, script-free report from saved evidence only."""
 
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from html import escape
 import math
 from urllib.parse import urlsplit
@@ -56,21 +57,34 @@ def _evidence(judgment, candidate):
 def _web_summary(report, stats):
     web = report.get("web") or {}
     errors = web.get("errors") or []
-    checked = web.get("sources_checked", len(report.get("sources", [])))
+    counts = [web.get('sources_checked'), report.get('source_snapshots_count'),
+              stats.get('checked_source_count'), len(report.get('sources', []))]
+    checked = 0 if any(type(value) is int and value == 0 for value in counts) else next(
+        (value for value in counts if type(value) is int and value > 0), 0)
     have_sources = bool(report.get("sources")) and type(checked) is int and checked > 0
-    complete = web.get("status") == "complete" and not errors and have_sources
+    complete = web.get("status") == "complete" and not errors and not web.get('errors_count') and have_sources
     uniqueness = stats.get("uniqueness_percent") if complete else None
-    score = "Не установлена" if uniqueness is None else _text(uniqueness) + "%"
+    valid = lambda value: type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 100
+    def percent(value, rounding=ROUND_HALF_UP):
+        rounded = Decimal(str(value)).quantize(Decimal('0.1'), rounding=rounding)
+        return format(rounded, 'f').rstrip('0').rstrip('.').replace('.', ',') + '%'
+    score = percent(uniqueness) if valid(uniqueness) else "Не установлена"
     upper_bound = stats.get("uniqueness_upper_bound_percent")
-    has_bound = (web.get("status") == "partial" and have_sources and type(upper_bound) in (int, float)
-                 and math.isfinite(upper_bound) and 0 <= upper_bound <= 100)
-    headline = ("Уникальность не выше " + _text(format(upper_bound, "g")) + "%" if has_bound
+    has_bound = not complete and have_sources and valid(upper_bound)
+    kind = 'bound' if has_bound else 'exact' if valid(uniqueness) else 'unknown'
+    headline = ("Уникальность не выше " + percent(upper_bound, ROUND_CEILING) if has_bound
                 else "Уникальность среди проверенных страниц: " + score)
+    display = 'Не выше ' + percent(upper_bound, ROUND_CEILING) if has_bound else score
+    label = {'exact': 'Точный процент в пределах проверки', 'bound': 'Верхняя граница · проверка неполная',
+             'unknown': 'Итогового процента нет'}[kind]
     status = "Завершена в пределах указанного охвата" if complete else "Частичная проверка — итоговая уникальность не установлена"
-    details = ('<p class="notice">Оценка относится к найденным доступным страницам, а не ко всему интернету. '
+    details = ('<section class="export-score score-' + kind + '" data-score-state="' + kind + '">'
+               '<p>Уникальность по прочитанным страницам</p><div class="export-score-value">' + display + '</div>'
+               '<p class="export-score-state">' + label + '</p><p><strong>' + headline + '</strong></p>'
+               + ('<p>Проверка неполная. Указана верхняя граница по найденным совпадениям, а не точный итог проверки.</p>' if has_bound else '')
+               + '<p class="meta">Оценка относится к найденным доступным страницам, а не ко всему интернету. '
                'Сходство не устанавливает направление копирования или нарушение правил. Корректная цитата может совпадать с источником.</p>'
-               '<p><strong>' + headline + '</strong>'
-               + (' <span class="meta">Проверка неполная</span>' if has_bound else "") + '</p>'
+               '</section>'
                '<p>Статус: ' + status + '. Поисковых запросов выполнено: ' + _text(web.get("queries_completed", 0))
                + ' из ' + _text(web.get("queries_planned", 0)) + '. Проверено страниц: '
                + _text(web.get("sources_checked", len(report.get("sources", [])))) + '. Ошибок: ' + _text(len(errors)) + '.</p>'
@@ -90,6 +104,25 @@ def _web_summary(report, stats):
         else:
             details += '<p class="notice">' + _text(error) + '</p>'
     return details
+
+
+def _annotated_text(report):
+    """Saved Unicode ranges only; malformed ranges cannot add markup or links."""
+    text = report.get('text', '')
+    matches = [(index, match) for index, match in enumerate(report.get('matches', []), 1)
+               if type(match.get('start')) is int and type(match.get('end')) is int
+               and 0 <= match['start'] < match['end'] <= len(text)]
+    bounds = sorted({0, len(text), *(match[key] for _, match in matches for key in ('start', 'end'))})
+    result = []
+    for start, end in zip(bounds, bounds[1:]):
+        covered = [(index, match) for index, match in matches if match['start'] < end and match['end'] > start]
+        value = _text(text[start:end])
+        if covered:
+            index, match = next((item for item in covered if item[1].get('kind') == 'exact'), covered[0])
+            kind = 'similar' if match.get('kind') == 'similar' else 'exact'
+            value = '<mark class="' + kind + '" aria-label="Источник ' + str(index) + '">' + value + '</mark>'
+        result.append(value)
+    return ''.join(result)
 
 
 def render(report, reviews=None, retrieval=None, outcomes=()):
@@ -185,6 +218,8 @@ article{padding:20px 0;border-bottom:1px solid #dce3dd}h3,h4{margin:8px 0}h4{fon
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:24px}blockquote{margin:0;padding:12px 16px;background:#f3f6f2;border-left:3px solid #7c9b87;white-space:pre-wrap;overflow-wrap:anywhere}
 a{color:#18553a;overflow-wrap:anywhere}.notice{padding:16px;background:#fff3df;border-radius:8px}.tag{font-weight:650}.preserve{white-space:pre-wrap;overflow-wrap:anywhere}
 li{margin-bottom:20px}li p{margin:4px 0}.meta{color:#54675d;font-size:14px}footer{border-top:1px solid #dce3dd;margin-top:32px;padding-top:16px}
+.export-score{padding:24px;margin:24px 0;border:1px solid #bdd1c3;border-radius:12px;background:#f1f7f2}.export-score p{margin:8px 0}.export-score-value{font-size:clamp(36px,7vw,64px);font-weight:700;line-height:1.2;letter-spacing:-1.5px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.export-score-state{font-weight:650;color:#23583d}.score-bound{background:#fffbeb;border-color:#e3c780}.score-bound .export-score-state{color:#854d0e}.score-unknown{background:#f1f5f4;border-color:#cbd5d1}.score-unknown .export-score-value{font-size:32px;letter-spacing:-.5px}.score-unknown .export-score-state{color:#475951}
+mark.exact{color:#213a31;background:#fee2e2;border-bottom:2px solid #b91c1c;padding:2px 0;box-decoration-break:clone;-webkit-box-decoration-break:clone}mark.similar{color:#213a31;background:#fef3c7;border-bottom:2px dashed #92400e;padding:2px 0;box-decoration-break:clone;-webkit-box-decoration-break:clone}
 @media(max-width:650px){main{margin:0;padding:20px;border-radius:0}.pair{grid-template-columns:1fr}h1{font-size:32px}}
 @media print{body{background:white;font-size:11pt}main{margin:0;padding:0;max-width:none}h2,h3,h4{break-after:avoid}blockquote{break-inside:avoid}.notice{border:1px solid #aaa}a::after{content:" (" attr(href) ")";font-size:9pt}}
 </style></head><body><main><header><p>ИСТОК · ОТЧЁТ ДЛЯ СВЕРКИ</p><h1>''' + heading + '''</h1>
@@ -192,6 +227,6 @@ li{margin-bottom:20px}li p{margin:4px 0}.meta{color:#54675d;font-size:14px}foote
 ''' + summary + '''
 ''' + issues + '''<h2>Лексические совпадения и решения редактора</h2>''' + lexical + '''
 <h2>''' + semantic_heading + '''</h2>''' + semantic + '''
-<h2>Сохранённая версия проверяемого текста</h2><div class="preserve">''' + _text(report.get("text", "")) + '''</div>
+<h2>Сохранённая версия проверяемого текста</h2><p class="meta">Красное подчёркивание — дословное совпадение; жёлтое пунктирное — похожая формулировка. Подсветка отражает сохранённый результат.</p><div class="preserve">''' + _annotated_text(report) + '''</div>
 <h2>''' + bibliography_heading + '''</h2><p>''' + bibliography_notice + '''</p><ol>''' + ''.join(bibliography) + '''</ol>
 <footer class="meta">Автономная копия отчёта. Новые проверки и правки в этом файле не выполняются. Окончательное решение принимает редактор.</footer></main></body></html>'''

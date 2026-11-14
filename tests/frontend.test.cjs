@@ -1088,6 +1088,57 @@ function webReport(text = 'Учебный текст', partial = false) {
       errors: partial ? [{ message: 'Учебная страница недоступна', url: 'https://example.test/unavailable' }] : [] } };
 }
 
+test('score states agree on home and full reports, including zero, bounds and missing evidence', async () => {
+  const cases = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/uniqueness-states.json'), 'utf8'));
+  for (const sample of cases) {
+    const report = webReport();
+    report.sources = sample.empty_sources ? [] : [{ id: 'fixture-source', text: 'Сохранённый источник' }];
+    report.stats = { ...report.stats, ...sample.stats };
+    report.web = sample.web === null ? null : { ...report.web, ...sample.web };
+    if (sample.snapshots !== undefined) report.source_snapshots_count = sample.snapshots;
+    for (const surface of ['home', 'check']) {
+      const app = fixture({ view: surface + '/' + report.id, fetch(url) { if (url === '/api/reports/' + report.id) return json({ report }); } });
+      await settle();
+      const key = surface === 'home' ? 'homeReport' : 'report';
+      assert.equal(app.evaluate(`webUniqueness(state.${key})`), sample.label, sample.name);
+      const html = app.element(surface === 'home' ? 'home-report-result' : 'report-area').innerHTML;
+      assert.ok(html.includes(`data-score-state="${sample.kind}"`), sample.name);
+      assert.ok(html.includes(sample.label), sample.name);
+      if (sample.kind !== 'exact') assert.ok(!html.includes('Точный процент в пределах проверки'), sample.name);
+    }
+  }
+});
+
+test('record filters sort across types and preserve their state after navigating away', async () => {
+  const data = { totals: { reports: 2, sources: 1, trashed: 1 }, active_totals: { reports: 1, sources: 1, corrections: 0 }, listed_reports_limit: 500,
+    reports: [{ ...webReport(), preview: 'Старый отчёт', created_at: '2026-11-10T00:00:00Z' },
+      { ...webReport(), id: 'a'.repeat(32), preview: 'Удалённый отчёт', deleted_at: '2026-11-11T00:00:00Z' }],
+    sources: [{ id: 'fixture-source', title: 'Новый источник', created_at: '2026-11-12T00:00:00Z', characters: 120 }], corrections: [] };
+  const app = fixture({ view: 'data', fetch(url) {
+    if (url === '/api/data') return json(data);
+    if (url === '/api/dictionary') return json({ words: [] });
+  } });
+  await settle();
+  let html = app.element('data-list').innerHTML;
+  assert.ok(html.indexOf('Новый источник') < html.indexOf('Старый отчёт'));
+  assert.ok(!html.includes('Удалённый отчёт'));
+  app.element('data-sort').value = 'oldest'; await app.element('data-sort').emit('change');
+  html = app.element('data-list').innerHTML;
+  assert.ok(html.indexOf('Старый отчёт') < html.indexOf('Новый источник'));
+  app.element('data-kind').value = 'trash'; await app.element('data-kind').emit('change');
+  assert.ok(app.element('data-list').innerHTML.includes('Удалённый отчёт'));
+  app.element('data-query').value = 'Не существует'; await app.element('data-query').emit('input');
+  assert.match(app.element('data-list').innerHTML, /сбросьте фильтры/);
+  await app.navigate('check'); await app.navigate('data'); await settle();
+  assert.equal(app.element('data-kind').value, 'trash');
+  assert.equal(app.element('data-sort').value, 'oldest');
+  assert.equal(app.element('data-query').value, 'Не существует');
+  await app.element('data-clear-filters').emit('click');
+  assert.equal(app.element('data-kind').value, 'all');
+  assert.equal(app.element('data-query').value, '');
+  assert.equal(app.element('data-sort').value, 'newest');
+});
+
 test('finished web checks distinguish zero matches from limited source coverage on both screens', async () => {
   const report = webReport('Самостоятельный текст', true);
   report.stats = { total_words: 570, matched_words: 0, uniqueness_percent: null };
