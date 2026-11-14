@@ -610,7 +610,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                            "message": "Google вернул служебные ссылки вместо адресов источников. Уникальность не установлена."
                            if code == "search_redirect_unresolved" else "Не удалось выполнить один из поисковых запросов."})
             if getattr(error, "code", "") in {"search_rate_limited", "search_budget_exhausted",
-                                                "search_credentials_invalid", "search_already_attempted"}:
+                                                "search_credentials_invalid", "search_already_attempted",
+                                                "search_redirect_unresolved"}:
                 stopped_code = error.code
                 break
     queries_unattempted = len(queries) - queries_attempted

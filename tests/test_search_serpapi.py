@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit,parse_qs
 
 from plagiarism.search_serpapi import SerpAPISearch,free_quota
-from plagiarism.web_search import WebSearchError,run
+from plagiarism.web_search import WebSearchError,run,plan_queries
 from tests.test_search_tavily import Budget
 
 
@@ -108,12 +108,18 @@ class SerpAPITests(unittest.TestCase):
         self.search.opener.open.return_value=response({'search_metadata':{'status':'Success'},
             'organic_results':[{'link':'https://www.google.com/goto?url=CAESopaque'}]})
         fetcher=Mock()
-        result=run('Independent authored notes describe careful botanical observations during spring.',
+        text=' '.join('botanical'+str(i)for i in range(180))
+        self.assertEqual(len(plan_queries(text)),6)
+        result=run(text,
                    searcher=self.search,fetcher=fetcher,use_wiki_followup=False,use_related_fallback=False)
         fetcher.fetch.assert_not_called()
         self.assertEqual(result['stats']['checked_source_count'],0)
         self.assertIsNone(result['stats']['uniqueness_percent'])
         self.assertEqual(result['web']['status'],'partial')
+        self.assertEqual(result['web']['queries_attempted'],1)
+        self.assertEqual(result['web']['queries_unattempted'],5)
+        self.assertEqual(result['web']['query_stop_code'],'search_redirect_unresolved')
+        self.assertEqual(self.search.opener.open.call_count,2) # Account + one search.
         self.assertTrue(any(error['code']=='search_redirect_unresolved' and 'служебные ссылки' in error['message']
                             for error in result['web']['errors']))
 
