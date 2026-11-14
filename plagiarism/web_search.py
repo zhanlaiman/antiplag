@@ -28,6 +28,7 @@ from plagiarism.html_evidence import POLICY as HTML_EVIDENCE_POLICY, source_view
 from plagiarism.input_references import extract_named_references
 from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 from plagiarism.query_clauses import CLAUSE_STRATEGY, clause_boundary_queries
+from plagiarism.query_keywords import KEYWORD_STRATEGY, complete_keyword_queries
 from plagiarism.text_policy import target_too_long
 
 
@@ -205,19 +206,21 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
-    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY):
+    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY):
         planned = _dense_queries(text, limit)
-        if strategy in (PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY):
+        if strategy in (PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY):
             protected = [query["query"] for query in _citation_queries(text)]
             planned = paragraph_redundancy_queries(text, planned, protected, limit=limit,
-                include_short_paragraphs=strategy in (SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY))
-            if strategy == CLAUSE_STRATEGY:
+                include_short_paragraphs=strategy in (SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY))
+            if strategy in (CLAUSE_STRATEGY, KEYWORD_STRATEGY):
                 planned = clause_boundary_queries(text, planned, protected, limit=limit)
+            if strategy == KEYWORD_STRATEGY:
+                planned = complete_keyword_queries(text, planned, protected, limit=limit)
         return planned
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
@@ -716,7 +719,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 if url in priority_link_urls and linked_coverage["matched_words"] > previous_link_words:
                     priority_link_credit = 1
                 fully_covered = linked_coverage["matched_words"] == linked_coverage["total_words"]
-            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY) and url not in linked_urls and not fully_covered:
+            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY) and url not in linked_urls and not fully_covered:
                 page_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)
