@@ -5,6 +5,7 @@ from unittest.mock import patch
 from plagiarism.matching import _tokens
 from plagiarism.query_keywords import KEYWORD_STRATEGY, complete_keyword_queries, metadata_anchor_matches
 from plagiarism.query_clauses import CLAUSE_STRATEGY
+from plagiarism.query_sentences import SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY
 from plagiarism.web_search import plan_queries, run
 
 
@@ -49,6 +50,12 @@ class KeywordQueryTests(unittest.TestCase):
         self.assertEqual(new['stats']['matched_words'],new['stats']['total_words'])
         self.assertEqual(new['web']['link_discoveries'][0]['basis'],'keyword_metadata_anchor')
         self.assertEqual(len(complete.calls),1)
+        for strategy in (SHORT_SENTENCE_STRATEGY,SHORT_CENTER_STRATEGY):
+            fetch=Fetch()
+            result=run(text,searcher=Search(),fetcher=fetch,query_strategy=strategy)
+            self.assertEqual(result['stats']['matched_words'],result['stats']['total_words'])
+            self.assertEqual(len(fetch.calls),2)
+            self.assertEqual(result['web']['link_discoveries'][0]['basis'],'keyword_metadata_anchor')
     def test_russian_and_english_fields_keep_complete_normalized_words_and_unicode_offsets(self):
         for label in ('Ключевые слова', 'KEYWORDS', 'Key words'):
             with self.subTest(label=label):

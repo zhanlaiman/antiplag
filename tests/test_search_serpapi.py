@@ -22,6 +22,20 @@ def account(**changes):
 
 
 class SerpAPITests(unittest.TestCase):
+    def test_yandex_keeps_only_safe_observed_titles_and_never_snippets_or_credentials(self):
+        search=YandexSerpAPISearch(self.budget);search.opener=self.search.opener
+        search.opener.open.return_value=response(account());search.confirm_free(1)
+        title='Исследование кинетики биологического разложения'
+        search.opener.open.return_value=response({'search_metadata':{'status':'Success'},'organic_results':[
+            {'link':'https://example.org/article/1','title':title,'snippet':'Never evidence'},
+            {'link':'https://example.org/article/2','title':'a'*64},
+            {'link':'https://example.org/article/3','title':'unsafe\nline'},
+            {'link':'https://example.org/article/4','title':'x'*241}]})
+        rows=search.search('valid phrase','safe-titles')
+        self.assertEqual(rows[0],{'url':'https://example.org/article/1','title':title})
+        self.assertTrue(all(set(row)=={'url'}for row in rows[1:]))
+        self.assertNotIn('snippet',json.dumps(rows));self.assertNotIn(search.key,json.dumps(rows))
+
     def test_yandex_preserves_query_uses_fixed_bounded_protocol_and_same_free_guard(self):
         search=YandexSerpAPISearch(self.budget);search.opener=self.search.opener
         search.opener.open.return_value=response(account());search.confirm_free(1)

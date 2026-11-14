@@ -15,7 +15,7 @@ from plagiarism.text_policy import target_too_long
 
 MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
-MATCHER_VERSION = "lexical-v4.1-cached-anchors"
+MATCHER_VERSION = "lexical-v4.2-spaced-line-wraps"
 MIN_WORDS = 6
 MIN_CHARACTERS = 35
 # These combining marks cover Cyrillic stress and Latin/Cyrillic diacritics.
@@ -79,7 +79,7 @@ def _joined_line_tokens(text, tokens):
     joined = []
     for token in tokens:
         if (joined and joined[-1].value[-1].isalpha() and token.value[0].isalpha()
-                and re.fullmatch(r"-[ \t]*(?:\r\n|\n|\r)[ \t]*", text[joined[-1].end:token.start])):
+                and re.fullmatch(r"[ \t]*-[ \t]*(?:\r\n|\n|\r)[ \t]*", text[joined[-1].end:token.start])):
             previous = joined.pop()
             joined.append(Token(previous.value + token.value, previous.start, token.end))
         else:

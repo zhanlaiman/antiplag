@@ -108,7 +108,13 @@ class SerpAPISearch:
                     self.last_usage={'credits':1}
                     raise WebSearchError('Google вернул служебные ссылки вместо адресов источников. Поиск неполный; уникальность не установлена.', 'search_redirect_unresolved')
                 if url not in seen:
-                    urls.append({'url':url});seen.add(url)
+                    row={'url':url}
+                    title=item.get('title')
+                    if (self.provider=='serpapi-yandex' and isinstance(title,str) and 0<len(title)<=240
+                            and self.key not in title
+                            and all(32<=ord(c)!=127 and not 0xD800<=ord(c)<=0xDFFF for c in title)):
+                        row['title']=title
+                    urls.append(row);seen.add(url)
         except HTTPError as error:
             status=error.code;error.close()
             code='search_credentials_invalid' if status in (401,403) else 'search_rate_limited' if status==429 else 'search_provider_error'

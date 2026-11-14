@@ -465,7 +465,7 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(self.service.beta.run_web(TEXT,'fixture',provider='serpapi-yandex'),{'ok':True})
             google.assert_not_called();factory.return_value.confirm_free.assert_called_once()
             self.assertEqual(factory.call_args.args[0].limit,180)
-            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v9-short-sentences')
+            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v10-short-center')
 
     def test_yandex_consent_is_distinct_and_switch_preserves_legacy_receipts_across_restart(self):
         providers=[]
