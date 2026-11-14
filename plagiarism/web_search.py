@@ -29,8 +29,8 @@ from plagiarism.input_references import extract_named_references
 from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 from plagiarism.query_clauses import CLAUSE_STRATEGY, clause_boundary_queries
 from plagiarism.query_keywords import KEYWORD_STRATEGY, KEYWORD_LINK_POLICY, complete_keyword_queries, metadata_anchor_matches
-from plagiarism.query_sentences import (SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, TITLE_QUERY_POLICY,
-                                        short_sentence_queries, short_center_queries, observed_title_query)
+from plagiarism.query_sentences import (SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY, TITLE_QUERY_POLICY, INPUT_QUERY_POLICY,
+                                        short_sentence_queries, short_center_queries, short_pure_candidate, observed_title_query)
 from plagiarism.text_policy import target_too_long
 from plagiarism.publication_links import POLICY as PUBLICATION_LINK_POLICY, publication_file
 
@@ -210,26 +210,26 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
-    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY):
+    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
         planned = _dense_queries(text, limit)
-        if strategy in (PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY):
+        if strategy in (PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
             protected = [query["query"] for query in _citation_queries(text)]
             planned = paragraph_redundancy_queries(text, planned, protected, limit=limit,
-                include_short_paragraphs=strategy in (SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY))
-            if strategy in (CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY):
+                include_short_paragraphs=strategy in (SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY))
+            if strategy in (CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
                 planned = clause_boundary_queries(text, planned, protected, limit=limit)
-            if strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY):
+            if strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
                 planned = complete_keyword_queries(text, planned, protected, limit=limit)
-            if strategy in (SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY):
+            if strategy in (SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
                 # Preserve complete keyword queries added by v8 as well as citations.
                 protected.extend(item['query'] for item in planned if not item['query'].startswith('"'))
                 planned = short_sentence_queries(text, planned, protected, limit=limit)
-            if strategy == SHORT_CENTER_STRATEGY:
+            if strategy in (SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY):
                 planned = short_center_queries(text, planned, limit=limit)
         return planned
     width = min(10, len(tokens))
@@ -594,10 +594,15 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     queries_attempted = queries_completed = discovered = duplicates = 0
     stopped_code = None
     metadata_queries, observed_titles = [], {}
-    adaptive_title = (query_strategy == SHORT_CENTER_STRATEGY
+    input_replacements = []
+    adaptive_title = (query_strategy in (SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY)
                       and len(plan_queries(text, strategy=SHORT_SENTENCE_STRATEGY)) < len(queries))
     protected = {q['query'] for q in _citation_queries(text)} if adaptive_title else set()
+    input_protected = (({q['query'] for q in _citation_queries(text)}
+                        | {q['query'] for q in queries if not q['query'].startswith('"')})
+                       if query_strategy == SHORT_PURE_STRATEGY else set())
     for index, item in enumerate(queries):
+        title_replaced = False
         # Only the final slot of an originally short plan may change. The hint
         # must come from the sole document actually returned by this run.
         if (adaptive_title and index == len(queries) - 1 and index > 0
@@ -613,6 +618,20 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                         'url': url, 'observed_title': hint['title'], 'query': phrase,
                         'replaced_span': {'start': queries[index]['start'], 'end': queries[index]['end']}})
                     queries[index] = item
+                    title_replaced = True
+        if (query_strategy == SHORT_PURE_STRATEGY and provider == 'serpapi-yandex'
+                and index == len(queries) - 1 and not title_replaced):
+            candidate = short_pure_candidate(text, queries, input_protected)
+            if candidate:
+                item = {key: candidate[key] for key in ('query', 'start', 'end')}
+                input_replacements.append({'query_index': index, 'query': item['query'],
+                    'selected_span': {'start': item['start'], 'end': item['end']},
+                    'replaced_query': queries[index]['query'],
+                    'replaced_span': {key: queries[index][key] for key in ('start', 'end')},
+                    'covered_words': candidate['covered_words'],
+                    'sentence_words': candidate['sentence_words'],
+                    'reason': 'short_sentence_without_pure_query'})
+                queries[index] = item
         if progress:
             progress("Ищем опубликованные источники", index, len(queries), phase="web_search")
         try:
@@ -758,14 +777,14 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                     priority_link_credit = 1
                 fully_covered = linked_coverage["matched_words"] == linked_coverage["total_words"]
             publication_link = (publication_file(fetched, seen | final_urls)
-                                if query_strategy == SHORT_CENTER_STRATEGY else None)
-            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY) and (url not in linked_urls or publication_link) and not fully_covered:
+                                if query_strategy in (SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY) else None)
+            if not zero_phase["in_extra_phase"] and query_strategy in (CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY) and (url not in linked_urls or publication_link) and not fully_covered:
                 page_matches = analyze_with_supplements(text, [sources[-1]], page_supplements)["matches"]
                 confirmed_matches.extend(page_matches)
                 coverage = _word_coverage(text, confirmed_matches)
                 fully_covered = coverage["matched_words"] == coverage["total_words"]
                 related = _canonical_url(publication_link) if publication_link else _related_link(fetched, text, seen | final_urls)
-                metadata_link = (query_strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY) and related is not None
+                metadata_link = (query_strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY) and related is not None
                     and any(_canonical_url(item.get("url")) == related
                             and metadata_anchor_matches(text, item.get("text", "")) for item in fetched.get("links", [])))
                 if related and not fully_covered and (not _word_coverage(text, page_matches)["matched_words"] or metadata_link or publication_link):
@@ -861,8 +880,8 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "input_references": input_references,
         "link_discoveries": link_discoveries,
         "priority_link_replacements": priority_link_replacements,
-        "source_followup_policy": KEYWORD_LINK_POLICY if query_strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY) else SOURCE_FOLLOWUP_POLICY,
-        "publication_link_policy": PUBLICATION_LINK_POLICY if query_strategy == SHORT_CENTER_STRATEGY else None,
+        "source_followup_policy": KEYWORD_LINK_POLICY if query_strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY, SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY) else SOURCE_FOLLOWUP_POLICY,
+        "publication_link_policy": PUBLICATION_LINK_POLICY if query_strategy in (SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY) else None,
         "priority_link_budget_remaining": priority_link_credit,
         "discovered_urls": list(dict.fromkeys(urls[:30] + reference_urls + [link["url"] for link in link_discoveries])),
         "attempted_urls": attempted_urls[:max_page_attempts], "skipped_urls": skipped_urls[:30],
@@ -884,6 +903,9 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                         "Основной поиск ограничен шестью запросами. Дополнительный поиск Википедии и число попыток чтения указаны в охвате отчёта.",
                         "Закрытые, неиндексируемые и недоступные материалы могут остаться незамеченными.",
                         "Пересказ и перевод требуют отдельной смысловой сверки; они не включены в этот процент."]})
+    if query_strategy == SHORT_PURE_STRATEGY:
+        result['web'].update(input_query_policy=INPUT_QUERY_POLICY,
+                             input_query_replacements=input_replacements)
     if not complete:
         result["issues"].append({"kind": "partial_web_check", "message": "Проверка по интернету неполная. Итоговая уникальность не установлена; найденные совпадения сохранены."})
     if use_wiki_followup:
@@ -900,7 +922,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         from plagiarism.web_related_fallback import append_related
         result = append_related(text, result, related_parent_pages, fetcher=fetcher, started_at=started, progress=progress)
     result["web"]["related_fallback_enabled"] = use_related_fallback
-    if (query_strategy == SHORT_CENTER_STRATEGY and result['web']['status'] == 'complete'
+    if (query_strategy in (SHORT_CENTER_STRATEGY, SHORT_PURE_STRATEGY) and result['web']['status'] == 'complete'
             and not result['stats']['matched_words'] and result['stats']['checked_source_count'] < 2):
         result['web']['status'] = 'partial'
         result['stats']['uniqueness_percent'] = None
