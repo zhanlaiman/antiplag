@@ -87,5 +87,21 @@ class SerpAPITests(unittest.TestCase):
         with self.assertRaises(WebSearchError)as caught:self.search.search('valid phrase','rid-1')
         self.assertNotIn(self.search.key,str(caught.exception));self.assertEqual(self.budget.finished,[])
 
+    def test_successful_encrypted_google_interstitials_are_errors_not_source_urls(self):
+        for index,url in enumerate(('https://www.google.com/goto?url=CAESopaque',
+                                    'https://google.com/url?url=CAESopaque')):
+            self.confirm()
+            self.search.opener.open.return_value=response({'search_metadata':{'status':'Success'},
+                'organic_results':[{'link':url,'displayed_link':'https://example.org/source',
+                                    'snippet':'A provider snippet is not a source'}]})
+            with self.assertRaises(WebSearchError)as caught:self.search.search('valid phrase','opaque-'+str(index))
+            self.assertEqual(caught.exception.code,'search_redirect_unresolved')
+            self.assertIn('opaque-'+str(index),self.budget.finished)
+            self.assertEqual(self.search.last_usage,{'credits':1})
+        self.confirm()
+        self.search.opener.open.return_value=response({'search_metadata':{'status':'Success'},
+            'organic_results':[{'link':'https://www.google.com/intl/en/about/'}]})
+        self.assertEqual(self.search.search('another phrase','direct-google'),[{'url':'https://www.google.com/intl/en/about/'}])
+
 
 if __name__=='__main__':unittest.main()

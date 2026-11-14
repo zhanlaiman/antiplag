@@ -3,7 +3,7 @@ import json
 import re
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener
 
 from plagiarism.auth_provider import NoRedirect
@@ -97,6 +97,15 @@ class SerpAPISearch:
                 url=_url(item.get('link'))
                 if self.key in url:
                     raise ValueError('Reflected credential')
+                parsed=urlsplit(url)
+                if parsed.hostname in ('google.com','www.google.com') and parsed.path.rstrip('/') in ('/goto','/url'):
+                    # A known provider incident can return encrypted Google
+                    # interstitials as successful organic links. They are not
+                    # source URLs. Do not infer paths from displayed text or
+                    # follow a redirect whose robots rules forbid reading it.
+                    self.budget.finish(request_id)
+                    self.last_usage={'credits':1}
+                    raise WebSearchError('Google вернул служебные ссылки вместо адресов источников. Поиск неполный; уникальность не установлена.', 'search_redirect_unresolved')
                 if url not in seen:
                     urls.append({'url':url});seen.add(url)
         except HTTPError as error:
