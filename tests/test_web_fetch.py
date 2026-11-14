@@ -78,6 +78,17 @@ class Fixture:
 
 
 class WebFetchTests(unittest.TestCase):
+    def test_regional_access_notice_is_not_a_read_scientific_source(self):
+        for value in ('Доступ разрешён только из России, Беларуси, Казахстана и Узбекистана',
+                      'Доступ разрешен только из России, Беларуси, Казахстана и Узбекистана'):
+            fixture=Fixture();fixture.add('example.org','/paper',Response(('<html><body>'+value+'</body></html>').encode()))
+            self.assert_code('source_region_restricted',lambda:fixture.fetcher().fetch('https://example.org/paper'))
+
+    def test_discussing_a_regional_notice_inside_an_article_keeps_the_source(self):
+        value='Исследователи описали сообщение «Доступ разрешён только из России, Беларуси, Казахстана и Узбекистана» и его влияние на доступность данных.'
+        self.fixture.add('example.org','/paper',Response(('<html><body>'+value+'</body></html>').encode()))
+        self.assertIn('Исследователи',self.fixture.fetcher().fetch('https://example.org/paper')['text'])
+
     def setUp(self):
         self.network = patch.object(web_fetch.socket, "create_connection", side_effect=AssertionError("Network forbidden"))
         self.dns = patch.object(web_fetch.socket, "getaddrinfo", side_effect=AssertionError("DNS network forbidden"))

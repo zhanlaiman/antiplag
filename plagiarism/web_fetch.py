@@ -507,6 +507,9 @@ class Fetcher:
                     raise FetchError("Не удалось разобрать текст HTML-страницы.", "invalid_html") from error
                 text = _normalize_whitespace("".join(parser.pieces))
                 title = _normalize_whitespace("".join(parser.title))[:300] or title
+                if len(text) <= 300 and re.fullmatch(r'Доступ разреш[её]н только из [^<>\r\n]{3,250}', text, re.I):
+                    raise FetchError('Источник ограничил доступ из региона проверки. Полный текст не прочитан.',
+                                     'source_region_restricted')
                 links = [{"url": urljoin(target["url"], link["url"]), "text": link["text"]} for link in parser.links]
                 # The complete original extraction above is authoritative for
                 # title/links and all original validity/complexity boundaries.

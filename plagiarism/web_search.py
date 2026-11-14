@@ -59,6 +59,7 @@ ZERO_FALLBACK_EXTRA_URLS = 12
 ZERO_FALLBACK_SECONDS = 300
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 FETCH_FAILURE_MESSAGES = {
+    "source_region_restricted": "Источник ограничил доступ из региона проверки. Полный текст не прочитан.",
     "fetch_timeout": "Сайт не ответил за отведённое время.",
     "robots_denied": "Сайт запрещает автоматическое чтение этой страницы.",
     "robots_unavailable": "Не удалось получить правила автоматического чтения сайта.",
