@@ -8,6 +8,7 @@ from urllib.request import Request
 
 from plagiarism.web_search import run
 from scripts.night_evaluation import select_prefix
+from scripts.night_evaluation_diagnostics import query_profile
 from scripts.night_evaluation_io import (CachedSearch, EvaluationStopped, RecordingOpener,
     digest, read_hashed, redact_response, verify_corpus, write_bytes, write_hashed)
 from scripts.night_evaluation_score import aggregate, query_coverage, score_case
@@ -209,6 +210,25 @@ def evidence_fixture():
 
 
 class ScoringTests(unittest.TestCase):
+    def test_query_profile_separates_mixed_boundary_from_pure_evidence(self):
+        case, report = evidence_fixture()
+        spans = [case['expected_evidence'][0]['target_span']]
+        mixed = query_profile(TEXT, spans, [QUOTE + ' Конец'])
+        self.assertEqual((mixed['pure_queries'], mixed['mixed_queries']), (0, 1))
+        self.assertEqual(mixed['touched_source_word_coverage'], 6)
+        self.assertEqual(mixed['pure_source_word_coverage'], 0)
+        pure = query_profile(TEXT, spans, [QUOTE])
+        self.assertEqual((pure['pure_queries'], pure['mixed_queries']), (1, 0))
+        self.assertEqual(pure['pure_source_word_coverage'], 6)
+
+    def test_query_profile_counts_external_titles_and_controls_separately(self):
+        case, report = evidence_fixture()
+        spans = [case['expected_evidence'][0]['target_span']]
+        row = query_profile(TEXT, spans, ['Unrelated external title'])
+        self.assertEqual(row['nonliteral_queries'], 1)
+        self.assertEqual(row['pure_source_word_coverage'], 0)
+        self.assertFalse(query_profile(TEXT, [], [QUOTE])['applicable'])
+
     def test_unicode_bounds_and_partial_found_are_validated(self):
         case, report = evidence_fixture()
         row = score_case(case, report, ['"' + QUOTE + '"'])
