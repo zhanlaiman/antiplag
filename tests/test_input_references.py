@@ -3,6 +3,7 @@ from urllib.parse import unquote, urlsplit
 
 from plagiarism.input_references import MAX_NAMED_REFERENCES, extract_named_references
 from plagiarism.matching import MAX_TEXT_CHARS
+from plagiarism.text_policy import owner_target_text
 
 
 PASSAGE = '«Точные измерения помогают проверить качество работы школьного датчика температуры» '
@@ -97,6 +98,20 @@ class InputReferenceTests(unittest.TestCase):
         text = ('«слова» (' * 15000) + '(Википедия, статья «Метрология»)'
         result = extract_named_references(text)
         self.assertEqual([item["title"] for item in result], ["Метрология"])
+
+    def test_owner_long_target_keeps_original_tail_offsets_and_resets_guest_bound(self):
+        text = " " * (MAX_TEXT_CHARS + 1) + '(Википедия, статья «Метрология»)'
+        with self.assertRaises(ValueError):
+            extract_named_references(text)
+        with owner_target_text(True):
+            result = extract_named_references(text)
+            self.assertEqual([item["title"] for item in result], ["Метрология"])
+            self.assertEqual(text[slice(*result[0]["title_span"])], "Метрология")
+            self.assertGreater(result[0]["title_span"][0], MAX_TEXT_CHARS)
+            with self.assertRaises(ValueError):
+                extract_named_references(None)
+        with self.assertRaises(ValueError):
+            extract_named_references(text)
 
 
 if __name__ == "__main__":

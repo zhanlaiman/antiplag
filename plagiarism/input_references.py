@@ -10,6 +10,7 @@ import unicodedata
 from urllib.parse import quote
 
 from .matching import MAX_TEXT_CHARS
+from .text_policy import target_too_long
 
 
 MAX_NAMED_REFERENCES = 6
@@ -28,7 +29,7 @@ def extract_named_references(text):
     ``unverified_input_reference``. The first occurrence supplies the spans.
     A citation can name an incorrect article; loading and matching are separate.
     """
-    if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
+    if not isinstance(text, str) or target_too_long(text, MAX_TEXT_CHARS):
         raise ValueError("Named references require text within the matching input bound.")
     references, seen = [], set()
     # Each candidate has at most 300 characters. No rescans of preceding text

@@ -89,6 +89,30 @@ class WebSearchTests(unittest.TestCase):
             self.assertEqual(report["web"]["query_strategy"], web_search.SHORT_CENTER_STRATEGY)
             self.assertIsNone(report["stats"]["uniqueness_percent"])
 
+    def test_owner_long_web_pipeline_reads_tail_with_default_named_references(self):
+        from plagiarism.text_policy import owner_target_text
+        tail = 'Сосна берёза клён кедр липа пихта дуб вяз ель.'
+        text = 'Independent authored context. ' * 7000 + tail
+        self.assertGreater(len(text), web_search.MAX_TEXT_CHARS)
+        with patch.object(web_search, 'selected_provider', return_value='serpapi-yandex'), \
+                patch.dict(os.environ, {}, clear=True):
+            search = Search()
+            with owner_target_text(True):
+                report = web_search.run(text, searcher=search, fetcher=Pages(text=tail),
+                                        use_zero_fallback=False, use_wiki_followup=False,
+                                        use_related_fallback=False)
+            self.assertEqual(report['stats']['total_characters'], len(text))
+            self.assertTrue(any(match['kind'] == 'exact' and match['excerpt'] == tail[:-1]
+                                for match in report['matches']))
+            self.assertGreater(len(search.calls), 0)
+            self.assertLessEqual(len(search.calls), 6)
+            guest_search = Search()
+            with self.assertRaises(ValueError):
+                web_search.run(text, searcher=guest_search, fetcher=Pages(text=tail),
+                               use_zero_fallback=False, use_wiki_followup=False,
+                               use_related_fallback=False)
+            self.assertEqual(guest_search.calls, [])
+
     def test_full_copy_has_zero_word_uniqueness_including_with_quote_formatting(self):
         for text in (TEXT, '«' + TEXT + '»'):
             report = web_search.run(text, searcher=Search(), fetcher=Pages())
