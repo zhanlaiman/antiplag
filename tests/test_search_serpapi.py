@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit,parse_qs
 
 from plagiarism.search_serpapi import SerpAPISearch,free_quota
-from plagiarism.web_search import WebSearchError
+from plagiarism.web_search import WebSearchError,run
 from tests.test_search_tavily import Budget
 
 
@@ -102,6 +102,20 @@ class SerpAPITests(unittest.TestCase):
         self.search.opener.open.return_value=response({'search_metadata':{'status':'Success'},
             'organic_results':[{'link':'https://www.google.com/intl/en/about/'}]})
         self.assertEqual(self.search.search('another phrase','direct-google'),[{'url':'https://www.google.com/intl/en/about/'}])
+
+    def test_unresolved_results_cannot_be_a_zero_percent_uniqueness_verdict(self):
+        self.confirm()
+        self.search.opener.open.return_value=response({'search_metadata':{'status':'Success'},
+            'organic_results':[{'link':'https://www.google.com/goto?url=CAESopaque'}]})
+        fetcher=Mock()
+        result=run('Independent authored notes describe careful botanical observations during spring.',
+                   searcher=self.search,fetcher=fetcher,use_wiki_followup=False,use_related_fallback=False)
+        fetcher.fetch.assert_not_called()
+        self.assertEqual(result['stats']['checked_source_count'],0)
+        self.assertIsNone(result['stats']['uniqueness_percent'])
+        self.assertEqual(result['web']['status'],'partial')
+        self.assertTrue(any(error['code']=='search_redirect_unresolved' and 'служебные ссылки' in error['message']
+                            for error in result['web']['errors']))
 
 
 if __name__=='__main__':unittest.main()

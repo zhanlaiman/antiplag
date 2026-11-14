@@ -605,8 +605,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 else:
                     duplicates += 1
         except (WebSearchError, OSError, ValueError) as error:
+            code = getattr(error, "code", "search_error")
             errors.append({"stage": "search", "query_index": index, "code": getattr(error, "code", "search_error"),
-                           "message": "Не удалось выполнить один из поисковых запросов."})
+                           "message": "Google вернул служебные ссылки вместо адресов источников. Уникальность не установлена."
+                           if code == "search_redirect_unresolved" else "Не удалось выполнить один из поисковых запросов."})
             if getattr(error, "code", "") in {"search_rate_limited", "search_budget_exhausted",
                                                 "search_credentials_invalid", "search_already_attempted"}:
                 stopped_code = error.code
