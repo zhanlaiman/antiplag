@@ -302,6 +302,126 @@ class BrowserChecks:
         assert not posts
         return {'Unicode_and_overlaps_preserved': True}
 
+    def async_review_badge(self, page, context, posts, reads):
+        guest = context.request.get(self.base + '/api/session').json()['beta']['id']
+        store = self.store(self.root / 'tenants' / guest / 'istok.sqlite3')
+        report = large_report()
+        report.update(id='d' * 32, text=report['text'][:300])
+        report['matches'] = report['matches'][:2]
+        report['sources'][0]['text'] = report['text']
+        store.save('report', report)
+        page.goto(self.base + '/#check/' + report['id'])
+        first = page.locator('[data-match="match-1"]')
+        second = page.locator('[data-match="match-2"]')
+        first.click()
+        card = first.element_handle()
+        listing = page.locator('.match-list').element_handle()
+        pending, submitted = [], []
+        def delay_reply(route):
+            submitted.append(route.request.post_data_json)
+            response = route.fetch()
+            assert response.status == 200
+            pending.append((route, response))
+        page.route('**/api/report-reviews', delay_reply)
+        def release():
+            deadline = time.monotonic() + 5
+            while not pending and time.monotonic() < deadline:
+                page.wait_for_timeout(10)
+            assert len(pending) == 1, 'Expected exactly one held review response'
+            route, response = pending.pop()
+            route.fulfill(response=response)
+        page.locator('#finding-comment').fill('Сохранённый комментарий')
+        page.locator('[data-finding-decision="confirmed"]').click()
+        second.click()
+        release()
+        badge = first.locator('.finding-badge')
+        expect(badge).to_have_text('Подтверждено редактором')
+        expect(badge).to_have_attribute('role', 'status')
+        expect(first).to_have_attribute('aria-pressed', 'false')
+        expect(second).to_have_attribute('aria-pressed', 'true')
+        expect(page.locator('#finding-save-status')).to_be_empty()
+        assert 'Подтверждено' not in page.locator('.finding-review').inner_text()
+        assert store.match_reviews(report['id'])['match-1']['decision'] == 'confirmed'
+        first.scroll_into_view_if_needed()
+        page.screenshot(path=str(self.output / 'async_review_badge-card.png'))
+        first.click()
+        expect(page.locator('#finding-comment')).to_have_value('Сохранённый комментарий')
+        expect(page.locator('.finding-review')).to_contain_text('Подтверждено редактором')
+        for decision, label in [('dismissed', 'Отклонено редактором'), ('pending', '')]:
+            page.locator('[data-finding-decision="' + decision + '"]').click()
+            release()
+            page.wait_for_function('(decision) => state.report.reviews["match-1"].decision === decision', arg=decision)
+            if label:
+                expect(badge).to_have_text(label)
+                expect(badge).to_have_class('finding-badge dismissed')
+            else:
+                expect(badge).to_have_count(0)
+                expect(page.locator('[data-finding-decision="pending"]')).to_be_hidden()
+            expect(page.locator('#finding-save-status')).to_have_text('Решение по находке сохранено.')
+            expect(page.locator('#finding-save-status')).to_have_attribute('role', 'status')
+            assert card.evaluate('(node) => node.isConnected')
+            assert listing.evaluate('(node) => node.isConnected')
+        # A fresh comparison panel must receive the reply without replacing a newer draft.
+        page.locator('[data-finding-decision="confirmed"]').click()
+        second.click()
+        first.click()
+        page.locator('#finding-comment').fill('Новая правка во время сохранения')
+        release()
+        expect(badge).to_have_text('Подтверждено редактором')
+        expect(page.locator('#finding-comment')).to_have_value('Новая правка во время сохранения')
+        expect(page.locator('#finding-comment')).to_be_focused()
+        expect(page.locator('#finding-save-status')).to_contain_text('Новые изменения комментария ещё не сохранены')
+        assert page.evaluate('state.findingDrafts["' + report['id'] + ':match-1"]') == 'Новая правка во время сохранения'
+        assert all(row['report_id'] == report['id'] and row['match_id'] == 'match-1' for row in submitted)
+        assert [row['decision'] for row in submitted] == ['confirmed', 'dismissed', 'pending', 'confirmed']
+        assert card.evaluate('(node) => node.isConnected')
+        assert listing.evaluate('(node) => node.isConnected')
+        card.dispose()
+        listing.dispose()
+        page.set_viewport_size({'width': 375, 'height': 900})
+        page.locator('.finding-review').scroll_into_view_if_needed()
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        assert not posts
+        return {'saved_decisions': [row['decision'] for row in submitted], 'card_and_list_retained': True,
+                'newer_draft_preserved': True, 'correct_report_and_match': True, 'mobile_no_overflow': True}
+
+    def review_report_guard(self, page, context, posts, reads):
+        guest = context.request.get(self.base + '/api/session').json()['beta']['id']
+        store = self.store(self.root / 'tenants' / guest / 'istok.sqlite3')
+        for identifier in ('d' * 32, 'e' * 32):
+            report = large_report()
+            report.update(id=identifier, text=report['text'][:300])
+            report['matches'] = report['matches'][:2]
+            report['sources'][0]['text'] = report['text']
+            store.save('report', report)
+        page.goto(self.base + '/#check/' + 'd' * 32)
+        page.locator('[data-match="match-1"]').click()
+        pending = []
+        def delay_reply(route):
+            response = route.fetch()
+            assert response.status == 200
+            pending.append((route, response))
+        page.route('**/api/report-reviews', delay_reply)
+        page.locator('[data-finding-decision="confirmed"]').click()
+        page.goto(self.base + '/#check/' + 'e' * 32)
+        page.locator('[data-match="match-1"]').click()
+        assert len(pending) == 1
+        route, response = pending.pop()
+        with page.expect_response(self.base + '/api/report-reviews') as reply:
+            route.fulfill(response=response)
+        # Flush completion of the old handler before checking the new report.
+        assert reply.value.json()['review']['decision'] == 'confirmed'
+        page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        assert page.evaluate('state.report.id') == 'e' * 32
+        expect(page.locator('[data-finding-decision="confirmed"]')).to_be_enabled()
+        expect(page.locator('.finding-badge')).to_have_count(0)
+        expect(page.locator('#finding-save-status')).to_be_empty()
+        assert not page.evaluate('state.report.reviews?.["match-1"]')
+        assert store.match_reviews('d' * 32)['match-1']['decision'] == 'confirmed'
+        assert not store.match_reviews('e' * 32)
+        assert not posts
+        return {'old_report_saved': True, 'new_report_with_same_match_id_unchanged': True}
+
     def score_states(self, page, context, posts, reads):
         guest = context.request.get(self.base + '/api/session').json()['beta']['id']
         store = self.store(self.root / 'tenants' / guest / 'istok.sqlite3')
@@ -417,7 +537,8 @@ def main():
                         checks = BrowserChecks(browser, engine, base, root, output, calls, queued, started, Store)
                         for name in ['lost_accepted_reply', 'lost_before_acceptance', 'lost_poll_reply', 'offline_after_acceptance', 'reload_queued',
                                      'reload_complete', 'double_click', 'http_errors', 'quota_rejection',
-                                     'corrupt_document', 'expired_owner', 'score_states', 'overlapping_unicode', 'large']:
+                                     'corrupt_document', 'expired_owner', 'score_states', 'overlapping_unicode',
+                                     'async_review_badge', 'review_report_guard', 'large']:
                             row = checks.run(name, getattr(checks, name))
                             print(json.dumps({k: row[k] for k in ['engine', 'scenario', 'verdict']}), flush=True)
                         rows.extend(checks.rows)

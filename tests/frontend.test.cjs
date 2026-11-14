@@ -313,9 +313,14 @@ test('file import accepts Cyrillic/emoji and rejects oversize before changing th
 
 test('registered review save preserves a newer typed comment and its draft across rerenders', async () => {
   const response = deferred();
-  const app = fixture({ fetch: url => url === '/api/report-reviews' ? response.promise : undefined });
+  let submitted;
+  const app = fixture({ fetch: (url, body) => {
+    if (url !== '/api/report-reviews') return;
+    submitted = body;
+    return response.promise;
+  } });
   await settle();
-  for (const id of ['finding-comment', 'finding-save-status', 'quote-button', 'paraphrase-button', 'judge-button']) {
+  for (const id of ['finding-comment', 'finding-save-status', 'finding-review-summary', 'finding-review-pending', 'quote-button', 'paraphrase-button', 'judge-button']) {
     app.document.elements.set(id, new FixtureElement(app.document, id));
   }
   const field = app.element('finding-comment');
@@ -338,6 +343,13 @@ test('registered review save preserves a newer typed comment and its draft acros
   assert.equal(app.evaluate("state.findingDrafts['report-a:match-a']"), 'Новый комментарий во время сохранения');
   assert.equal(JSON.parse(app.storage.get('istok.review-drafts.v1')).findings['report-a:match-a'], field.value);
   assert.ok(app.evaluate("matchReviewHTML({id:'match-a'})").includes('Новый комментарий во время сохранения'));
+  assert.deepEqual(JSON.parse(JSON.stringify(submitted)), {
+    report_id: 'report-a', match_id: 'match-a', decision: 'confirmed', comment: 'Первый комментарий',
+  });
+  assert.equal(app.element('finding-comment'), field, 'Saving must retain the current editor DOM');
+  assert.match(app.element('finding-review-summary').textContent, /Подтверждено редактором/);
+  assert.equal(app.element('finding-review-pending').hidden, false);
+  assert.match(app.element('finding-save-status').textContent, /Новые изменения комментария ещё не сохранены/);
 });
 
 test('persisted job observer survives a transient connection failure and clears ID only after completion', async () => {

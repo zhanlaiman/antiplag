@@ -2008,7 +2008,7 @@ function matchCardHTML(match, index) {
       <strong>${escapeHTML(match.source_title)}</strong>
       <p>${escapeHTML(match.excerpt.slice(0, 120))}${match.excerpt.length > 120 ? '…' : ''}</p>
       ${match.quoted ? '<div class="subtle">Есть признаки оформления цитаты</div>' : ''}
-      ${label ? `<div class="finding-badge ${state.report.reviews[match.id].decision}">${escapeHTML(label)}</div>` : ''}
+      ${label ? `<div class="finding-badge ${state.report.reviews[match.id].decision}" role="status">${escapeHTML(label)}</div>` : ''}
     </button>
     ${state.report?.scope === 'web_search' ? safeLink(match.source_url, 'Открыть страницу-источник') : ''}
     </div>`;
@@ -2804,6 +2804,29 @@ function reviewLabel(matchId) {
   return '';
 }
 
+function updateMatchReviewBadge(reportId, matchId) {
+  if (state.report?.id !== reportId) return;
+  const card = [...document.querySelectorAll('#report-area [data-match]')].find(button => button.dataset.match === matchId);
+  if (!card) return;
+  const label = reviewLabel(matchId);
+  let badge = card.querySelector('.finding-badge');
+  if (!label) {
+    badge?.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('div');
+    card.appendChild(badge);
+  }
+  badge.className = `finding-badge ${state.report.reviews[matchId].decision}`;
+  badge.setAttribute('role', 'status');
+  badge.textContent = label;
+}
+
+function reviewSummary(matchId) {
+  return `${reviewLabel(matchId) || 'Сравните фрагменты и сохраните своё решение.'} Доля совпадений отражает исходный результат поиска.`;
+}
+
 function matchReviewHTML(match) {
   const review = state.report?.reviews?.[match.id];
   const key = `${state.report.id}:${match.id}`;
@@ -2811,12 +2834,12 @@ function matchReviewHTML(match) {
   return `
     <div class="finding-review">
       <h3>Решение редактора</h3>
-      <p class="field-help">${escapeHTML(reviewLabel(match.id) || 'Сравните фрагменты и сохраните своё решение.')} Доля совпадений отражает исходный результат поиска.</p>
+      <p class="field-help" id="finding-review-summary">${escapeHTML(reviewSummary(match.id))}</p>
       <input class="field" id="finding-comment" maxlength="2000" value="${escapeHTML(comment)}" aria-label="Комментарий к находке" placeholder="Комментарий · необязательно">
       <div class="action-row">
         <button class="button small secondary" data-finding-decision="confirmed" type="button">Подтвердить</button>
         <button class="button small secondary" data-finding-decision="dismissed" type="button">Отклонить находку</button>
-        ${review && review.decision !== 'pending' ? '<button class="text-button" data-finding-decision="pending" type="button">Вернуть на проверку</button>' : ''}
+        <button class="text-button" id="finding-review-pending" data-finding-decision="pending" type="button" ${review && review.decision !== 'pending' ? '' : 'hidden'}>Вернуть на проверку</button>
       </div>
       <p class="field-help" id="finding-save-status" role="status"></p>
     </div>`;
@@ -2892,11 +2915,15 @@ function bindComparison(match) {
       }
       if (state.report?.id !== reportId) return;
       state.report.reviews = { ...state.report.reviews, [match.id]: review };
+      updateMatchReviewBadge(reportId, match.id);
       if (currentComparison(reportId, match.id)) {
+        document.querySelector('#finding-review-summary').textContent = reviewSummary(match.id);
+        document.querySelector('#finding-review-pending').hidden = review.decision === 'pending';
         if (changedWhileSaving) {
           document.querySelector('#finding-save-status').textContent = 'Решение сохранено. Новые изменения комментария ещё не сохранены.';
         } else {
-          renderReport();
+          document.querySelector('#finding-comment').value = review.comment ?? comment;
+          document.querySelector('#finding-save-status').textContent = 'Решение по находке сохранено.';
         }
       }
       toast('Решение по находке сохранено.');
