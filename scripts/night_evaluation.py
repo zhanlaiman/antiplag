@@ -140,6 +140,12 @@ def live_run(out):
         return
     corpus = Path(config['corpus'])
     cases = {c['id']: c for c in read_json(corpus / 'manifest.json')['cases']}
+    completed_queries = []
+    for cid in config['selection']['case_ids']:
+        directory = out / 'results' / cid
+        if (directory / 'report.json').exists():
+            read_hashed(directory / 'report.json')
+            completed_queries.extend(read_hashed(directory / 'queries.json'))
     budget = web_search.SearchBudget(out / 'budget.sqlite3', limit=config['physical_cap'])
     client = YandexSerpAPISearch(budget)
     if not (out / 'quota-before.json').exists():
@@ -147,7 +153,8 @@ def live_run(out):
         write_hashed(out / 'environment.json', {'python': platform.python_version(),
             'pypdf': pypdf.__version__, 'pypdfium2': version('pypdfium2'),
             'parser_version': PARSER_VERSION, 'pdf_engine': os.environ.get('ISTOK_PDF_ALTERNATIVE_ENGINE')})
-    search = CachedSearch(client, out, config['selection']['allowed_queries'], config['physical_cap'])
+    search = CachedSearch(client, out, config['selection']['allowed_queries'], config['physical_cap'],
+                          completed_queries=completed_queries)
     for cid in config['selection']['case_ids']:
         directory = out / 'results' / cid
         if (directory / 'report.json').exists():

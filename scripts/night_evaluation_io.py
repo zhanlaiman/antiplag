@@ -163,11 +163,30 @@ class RecordingOpener:
 class CachedSearch:
     provider = 'serpapi-yandex'
 
-    def __init__(self, client, directory, allowed_queries, physical_cap):
+    def __init__(self, client, directory, allowed_queries, physical_cap, completed_queries=()):
         self.client, self.directory = client, Path(directory)
         self.allowed = frozenset(allowed_queries)
         self.cap = physical_cap
-        self.logical, self.hits, self.physical, self.last_usage = [], 0, 0, None
+        # Count attempts, including unknown deliveries, from the durable journal.
+        # Completed case receipts are the authority for prior logical/cache use.
+        intents = {p.parent.name: read_hashed(p)
+                   for p in (self.directory / 'physical').glob('*/intent.json')}
+        self.physical, self.last_usage = len(intents), None
+        self.logical = deepcopy(list(completed_queries))
+        seen = set()
+        for event in self.logical:
+            physical_id = event['physical_request_id']
+            intent = intents.get(physical_id)
+            if (event['request_id'] in seen or intent is None
+                    or intent['query'] != event['query']
+                    or intent['request_id'] != physical_id
+                    or not isinstance(event['cache_hit'], bool)):
+                raise EvaluationStopped('Inconsistent completed query receipt')
+            result = read_hashed(self.directory / 'physical' / physical_id / 'result.json')
+            if result['state'] != 'complete' or result['query'] != event['query']:
+                raise EvaluationStopped('Completed receipt references an unknown outcome')
+            seen.add(event['request_id'])
+        self.hits = sum(event['cache_hit'] for event in self.logical)
         self.opener = None
         if hasattr(client, 'opener'):
             self.opener = RecordingOpener(client.opener, client.key)

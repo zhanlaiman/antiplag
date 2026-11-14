@@ -1,16 +1,21 @@
 from copy import deepcopy
+from contextlib import ExitStack
 from hashlib import sha256
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
 from urllib.request import Request
 
 from plagiarism.web_search import run
 from scripts.night_evaluation import select_prefix
+from scripts import night_evaluation as driver
 from scripts.night_evaluation_diagnostics import query_profile
 from scripts.night_evaluation_io import (CachedSearch, EvaluationStopped, RecordingOpener,
-    digest, read_hashed, redact_response, verify_corpus, write_bytes, write_hashed)
+    digest, read_hashed, redact_response, verify_corpus, write_bytes, write_hashed, write_json)
 from scripts.night_evaluation_score import aggregate, query_coverage, score_case
 
 
@@ -110,6 +115,7 @@ class TransportTests(TemporaryEvidence):
             resumed.search('phrase', 'new-request-id')
         self.assertEqual(client.calls, [('phrase', 'first')])
         self.assertEqual(len(list((self.root / 'physical').glob('*/intent.json'))), 1)
+        self.assertEqual(resumed.physical, 1)
 
     def test_37th_physical_call_is_blocked_before_quota_or_transport(self):
         client = FakeClient()
@@ -188,6 +194,108 @@ class TransportTests(TemporaryEvidence):
         (self.root / 'input.txt').write_text('different')
         with self.assertRaises(ValueError):
             verify_corpus(self.root)
+
+
+class ResumeTests(TemporaryEvidence):
+    def fixture(self, remaining=False):
+        out, corpus = self.root / 'out', self.root / 'corpus'
+        ids = ['saved', 'remaining'] if remaining else ['saved']
+        write_json(corpus / 'manifest.json', {'cases': [
+            {'id': cid, 'text_sha256': digest('synthetic text')} for cid in ids]})
+        queries = ['synthetic-one', 'synthetic-two']
+        original = CachedSearch(FakeClient(), out, queries, 36)
+        for index, query in enumerate([*queries, queries[0]]):
+            original.search(query, f'first-{index}')
+        write_hashed(out / 'results/saved/report.json', {'id': 'first-report'})
+        write_hashed(out / 'results/saved/queries.json', original.logical)
+        write_hashed(out / 'quota-before.json', {'synthetic': True})
+        config = {'corpus': str(corpus), 'physical_cap': 36,
+            'selection': {'case_ids': ids, 'allowed_queries': queries},
+            'request_ids': {'remaining': 'second-case'},
+            'query_strategy': 'synthetic', 'matcher_version': 'synthetic'}
+        return out, config, queries
+
+    def resume(self, out, config, client, pipeline):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(driver, 'checked_config', return_value=config))
+            stack.enter_context(patch('plagiarism.search_serpapi.YandexSerpAPISearch', return_value=client))
+            stack.enter_context(patch('plagiarism.web_search.run', side_effect=pipeline))
+            stack.enter_context(patch.object(driver, 'input_text', return_value='synthetic text'))
+            driver.live_run(out)
+
+    def test_completed_case_resume_preserves_all_three_counters(self):
+        out, config, queries = self.fixture()
+        first_bytes = {p: p.read_bytes() for p in out.rglob('*') if p.is_file()}
+        client = FakeClient()
+        self.resume(out, config, client, AssertionError('Completed case rerun'))
+        receipt = read_hashed(out / 'run-complete.json')
+        self.assertEqual((receipt['physical_calls'], receipt['logical_primary_calls'], receipt['cache_hits']), (2, 3, 1))
+        self.assertEqual(client.calls, [])
+        for path, data in first_bytes.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_partial_resume_adds_cache_hits_once_and_complete_run_is_immutable(self):
+        out, config, queries = self.fixture(remaining=True)
+        client = FakeClient()
+        def pipeline(text, **kwargs):
+            for index, query in enumerate([*queries, queries[0]]):
+                kwargs['searcher'].search(query, f'second-{index}')
+            return {'text': text, 'web': {'matcher_version': 'synthetic'},
+                    'stats': {'checked_source_count': 0}}
+        self.resume(out, config, client, pipeline)
+        receipt = read_hashed(out / 'run-complete.json')
+        self.assertEqual((receipt['physical_calls'], receipt['logical_primary_calls'], receipt['cache_hits']), (2, 6, 4))
+        self.assertEqual(client.calls, [])
+        self.assertEqual(len(read_hashed(out / 'results/remaining/queries.json')), 3)
+        before = {p: p.read_bytes() for p in out.rglob('*') if p.is_file()}
+        with patch.object(driver, 'checked_config', return_value=config), patch(
+                'plagiarism.search_serpapi.YandexSerpAPISearch', side_effect=AssertionError('No client for complete run')):
+            driver.live_run(out)
+        self.assertEqual(before, {p: p.read_bytes() for p in out.rglob('*') if p.is_file()})
+
+    def test_unresolved_case_after_restart_cannot_retry_unknown_delivery(self):
+        out, config, queries = self.fixture(remaining=True)
+        config['selection']['allowed_queries'].append('synthetic-unknown')
+        client = FakeClient()
+        client.fail = True
+        cached = CachedSearch(client, out, config['selection']['allowed_queries'], 36)
+        with self.assertRaises(EvaluationStopped):
+            cached.search('synthetic-unknown', 'unknown-id')
+        write_hashed(out / 'results/remaining/intent.json', {'request_id': 'second-case'})
+        client.fail = False
+        with self.assertRaises(EvaluationStopped):
+            self.resume(out, config, client, AssertionError('Unresolved case rerun'))
+        self.assertEqual(client.calls, [('synthetic-unknown', 'unknown-id')])
+        self.assertFalse((out / 'run-complete.json').exists())
+
+    def test_resume_with_mock_http_counts_only_one_new_physical_call(self):
+        from plagiarism.search_serpapi import YandexSerpAPISearch
+        from plagiarism.web_search import SearchBudget
+        from tests.test_search_serpapi import account
+        out, config, queries = self.fixture(remaining=True)
+        config['selection']['allowed_queries'].append('synthetic-third')
+        with patch('plagiarism.search_serpapi.key_for', return_value='synthetic-key'):
+            client = YandexSerpAPISearch(SearchBudget(out / 'budget.sqlite3', limit=36))
+        paths = []
+        def response(request, **kwargs):
+            path = urlsplit(request.full_url).path
+            paths.append(path)
+            value = account() if path == '/account.json' else {
+                'search_metadata': {'status': 'Success'}, 'organic_results': []}
+            return io.BytesIO(json.dumps(value).encode())
+        client.opener = Mock()
+        client.opener.open.side_effect = response
+        def pipeline(text, **kwargs):
+            for index, query in enumerate(['synthetic-one', 'synthetic-third']):
+                kwargs['searcher'].search(query, f'http-{index}')
+            return {'text': text, 'web': {'matcher_version': 'synthetic'},
+                    'stats': {'checked_source_count': 0}}
+        self.resume(out, config, client, pipeline)
+        receipt = read_hashed(out / 'run-complete.json')
+        self.assertEqual((receipt['physical_calls'], receipt['logical_primary_calls'], receipt['cache_hits']), (3, 5, 2))
+        self.assertEqual(paths.count('/search.json'), 1)
+        self.assertEqual(len(list((out / 'physical').glob('*/intent.json'))), 3)
+        self.assertTrue((out / 'physical/http-1/response.raw').exists())
 
 
 QUOTE = 'Квадратные приборы измеряют направление условного потока'

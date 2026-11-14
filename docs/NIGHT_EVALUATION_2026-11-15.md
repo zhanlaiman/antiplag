@@ -84,3 +84,13 @@ CodexClaw использован через установленный CLI с с
 - **A7:** `quota-before.json`, `quota-after.json` — безопасные счетчики Free Plan, без учетных данных.
 - **A8:** `checks/` и `final-integrity.json` — свежие тесты, CLI, корпус/source hashes, неизменность первых результатов и отсутствие активного runner. Инвентаризация — `EVIDENCE_SHA256SUMS`.
 - **A9:** внешний CodexClaw devlog unit `261114_night-evaluation`, native session `01a1db0f-a240-7183-ac17-731ddea3b1d7`; phase attestations и QA receipt сохранены вне Git. Изначальный commit инструментов — `42d7191ee8c7cc9477b6aa0db78142211ffe6abe`.
+
+## Офлайн-исправление восстановления счетчиков, 15 ноября
+
+Независимый reviewer выявил Medium в reusable evaluator на `b5f155d`: после сохранения случая и перезапуска итоговая квитанция теряла накопленные physical/logical/cache counts. Жесткий лимит продолжал учитывать durable intents; обхода квоты не было. Причина — новый `CachedSearch` начинал счетчики с нуля, а готовые случаи пропускались без восстановления их query receipts.
+
+Теперь physical count восстанавливается из проверенных по SHA физических intents, включая неизвестные доставки; logical/cache counts — из неизменяемых `queries.json` завершенных случаев. Их ссылки сверяются с завершенными физическими ответами; повторы ID отклоняются. Отсутствующий или измененный receipt останавливает возобновление. Unknown outcome остается без retry; уже полный сохраненный run возвращает прежнюю квитанцию без ее перезаписи.
+
+Регрессионные проверки до исправления показали `0/0/0` вместо `2/3/1` и `0/3/3` вместо `2/6/4`; после исправления оба сценария проходят без новых физических вызовов. Дополнительный тест с native Yandex adapter и mock HTTP добавляет ровно один физический вызов: итог `3/5/2`. Повтор полного запуска сохраняет все файлы побайтно. Исходный reviewer repro также проходит: два старых вызова, итог `2/2/0`, новых вызовов 0. Свежие suites: **88 evaluation + 108 search/matching**, exit0; сетевых попыток 0 под socket/HTTP denial.
+
+Proofs этого исправления хранятся отдельно: `.runtime/night-evaluation-counter-fix-20261115/` в исходном рабочем каталоге (`red-counters.log`, `evaluation-green.log`, `affected-green.log`, `independent-repro-green.log`, `integrity.json`). Первые метрики **29/90/61**, конфиг, frozen identities, сырые ответы, Gold и первые отчеты не перезаписывались. Старый freeze закрепляет прежние driver hashes: исправленный runner намеренно не исполнялся на нем. Новых поисков, моделей, push/deploy и запуска live runner не было.
