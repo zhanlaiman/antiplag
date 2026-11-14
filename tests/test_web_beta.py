@@ -460,12 +460,12 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(budget.path,self.service.beta.root/'search-budget.sqlite3')
             self.assertIs(pipeline.call_args.kwargs['searcher'],factory.return_value)
 
-    def test_yandex_uses_its_guarded_adapter_keyword_plan_and_unchanged_site_budget(self):
+    def test_yandex_uses_its_guarded_adapter_short_sentence_plan_and_unchanged_site_budget(self):
         with patch('cloud.web_beta.YandexSerpAPISearch')as factory,patch('cloud.web_beta.SerpAPISearch')as google,patch('cloud.web_beta.MediaWikiSearch'),patch('cloud.web_beta.web_search.run',return_value={'ok':True})as pipeline:
             self.assertEqual(self.service.beta.run_web(TEXT,'fixture',provider='serpapi-yandex'),{'ok':True})
             google.assert_not_called();factory.return_value.confirm_free.assert_called_once()
             self.assertEqual(factory.call_args.args[0].limit,180)
-            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v8-complete-keywords')
+            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v9-short-sentences')
 
     def test_yandex_consent_is_distinct_and_switch_preserves_legacy_receipts_across_restart(self):
         providers=[]

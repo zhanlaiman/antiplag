@@ -29,6 +29,7 @@ from plagiarism.input_references import extract_named_references
 from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 from plagiarism.query_clauses import CLAUSE_STRATEGY, clause_boundary_queries
 from plagiarism.query_keywords import KEYWORD_STRATEGY, KEYWORD_LINK_POLICY, complete_keyword_queries, metadata_anchor_matches
+from plagiarism.query_sentences import SHORT_SENTENCE_STRATEGY, short_sentence_queries
 from plagiarism.text_policy import target_too_long
 
 
@@ -206,21 +207,25 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")
-    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY):
+    if strategy not in (QUERY_STRATEGY, DISTINCTIVE_STRATEGY, HYBRID_STRATEGY, CITATION_STRATEGY, COVERAGE_STRATEGY, DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY):
         raise ValueError("Неизвестный способ выбора поисковых фраз.")
     tokens = _tokens(text)
     if len(tokens) < MIN_WORDS:
         raise ValueError("Для поиска источников нужно не менее шести слов.")
-    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY):
+    if strategy in (DENSE_STRATEGY, PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY):
         planned = _dense_queries(text, limit)
-        if strategy in (PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY):
+        if strategy in (PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY):
             protected = [query["query"] for query in _citation_queries(text)]
             planned = paragraph_redundancy_queries(text, planned, protected, limit=limit,
-                include_short_paragraphs=strategy in (SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY))
-            if strategy in (CLAUSE_STRATEGY, KEYWORD_STRATEGY):
+                include_short_paragraphs=strategy in (SHORT_PARAGRAPH_STRATEGY, CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY))
+            if strategy in (CLAUSE_STRATEGY, KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY):
                 planned = clause_boundary_queries(text, planned, protected, limit=limit)
-            if strategy == KEYWORD_STRATEGY:
+            if strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY):
                 planned = complete_keyword_queries(text, planned, protected, limit=limit)
+            if strategy == SHORT_SENTENCE_STRATEGY:
+                # Preserve complete keyword queries added by v8 as well as citations.
+                protected.extend(item['query'] for item in planned if not item['query'].startswith('"'))
+                planned = short_sentence_queries(text, planned, protected, limit=limit)
         return planned
     width = min(10, len(tokens))
     count = min(limit, max(1, (len(tokens) + 79) // 80))
@@ -263,7 +268,7 @@ def status():
     zero_fallback = os.environ.get("ISTOK_WEB_ZERO_FALLBACK", "1" if DEFAULT_ZERO_FALLBACK else "0") == "1"
     wiki_followup = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP", "1" if DEFAULT_WIKI_FOLLOWUP else "0") == "1"
     return {"provider": provider, "configured": configured,
-            "query_strategy": KEYWORD_STRATEGY if provider == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY,
+            "query_strategy": SHORT_SENTENCE_STRATEGY if provider == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY,
             "max_queries": MAX_QUERIES + (2 if wiki_followup else 0),
             "max_primary_queries": MAX_QUERIES, "max_secondary_queries": 2 if wiki_followup else 0,
             "secondary_provider": "mediawiki" if wiki_followup else None,
@@ -554,7 +559,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     max_page_attempts = MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if use_zero_fallback else MAX_URLS
     if query_strategy is None:
         query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY",
-            KEYWORD_STRATEGY if selected_provider() == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY)
+            SHORT_SENTENCE_STRATEGY if selected_provider() == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
     request_id = request_id or uuid4().hex
     if searcher is None:
@@ -732,7 +737,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                 coverage = _word_coverage(text, confirmed_matches)
                 fully_covered = coverage["matched_words"] == coverage["total_words"]
                 related = _related_link(fetched, text, seen | final_urls)
-                metadata_link = (query_strategy == KEYWORD_STRATEGY and related is not None
+                metadata_link = (query_strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY) and related is not None
                     and any(_canonical_url(item.get("url")) == related
                             and metadata_anchor_matches(text, item.get("text", "")) for item in fetched.get("links", [])))
                 if related and not fully_covered and (not _word_coverage(text, page_matches)["matched_words"] or metadata_link):

@@ -21,7 +21,7 @@ import server
 from plagiarism import access,auth_provider,saas,web_search
 from plagiarism.search_credentials import key_for,selected_provider
 from plagiarism.search_serpapi import SerpAPISearch,YandexSerpAPISearch
-from plagiarism.query_keywords import KEYWORD_STRATEGY
+from plagiarism.query_sentences import SHORT_SENTENCE_STRATEGY
 from plagiarism.search_mediawiki import MediaWikiSearch
 from plagiarism.search_tavily import TavilySearch
 from plagiarism.tenants import TenantRegistry
@@ -336,7 +336,7 @@ class BetaRuntime:
         if engine not in ('google','yandex'):
             raise SearchNotStarted('Выбранный поиск недоступен. Запросы не отправлены.','web_not_configured')
         label='Яндекса' if engine=='yandex' else 'Google'
-        strategy=KEYWORD_STRATEGY if engine=='yandex' else web_search.DEFAULT_QUERY_STRATEGY
+        strategy=SHORT_SENTENCE_STRATEGY if engine=='yandex' else web_search.DEFAULT_QUERY_STRATEGY
         if self.quota_cooldown():
             raise SearchNotStarted('Поиск временно ограничил обращения. Повторите вручную позже; запросы не отправлены.','free_quota_rate_limited')
         if progress:progress('Проверяем бесплатную квоту поиска '+label,0,0,phase='preflight')
