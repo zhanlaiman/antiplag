@@ -10,6 +10,18 @@ from plagiarism.web_search import _citation_queries, plan_queries, run
 
 
 class ShortSentenceTests(unittest.TestCase):
+    def test_one_unmatched_page_does_not_claim_one_hundred_percent_uniqueness(self):
+        class Search:
+            def search(self,q,rid):return [{'url':'https://example.org/unrelated'}]
+        class Fetch:
+            def fetch(self,url):return {'url':url,'text':'Совершенно посторонняя научная работа рассматривает другие вопросы развития различных вычислительных систем.'}
+        result=run('Наблюдатели аккуратно отмечали изменения уровня воды рядом с границей экспериментальной исследовательской площадки.',
+                   searcher=Search(),fetcher=Fetch(),query_strategy=SHORT_CENTER_STRATEGY)
+        self.assertEqual(result['stats']['matched_words'],0)
+        self.assertIsNone(result['stats']['uniqueness_percent'])
+        self.assertEqual(result['web']['status'],'partial')
+        self.assertTrue(any(x['code']=='too_few_sources_for_uniqueness'for x in result['web']['errors']))
+
     def setUp(self):
         self.text = ('В начале занятия участники собрали вымышленную мастерскую для обсуждения правил хранения карточек. '
                      'На длинном столе стояли цветные коробки и пронумерованные деревянные рамки. '

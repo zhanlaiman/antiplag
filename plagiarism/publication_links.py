@@ -2,13 +2,14 @@
 import re
 from urllib.parse import urlsplit
 
-POLICY = 'observed-publication-file-v1'
+POLICY = 'observed-publication-file-v2-single-pdf'
 
 
 def publication_file(fetched, seen):
     """Return one same-origin, queryless link with the same publication ID.
 
     OJS article/file paths and PDF catalogue information pages are supported.
+    Another content page may expose exactly one explicitly labelled PDF file.
     Every returned URL must be present in the fetched page's actual links.
     No URL, host, filename, or document identifier is inferred or constructed.
     """
@@ -18,7 +19,7 @@ def publication_file(fetched, seen):
         return None
     article = re.fullmatch(r'(.*?/article/)(?:view|viewFile)/(\d+)(?:/\d+)?/?', parent.path)
     catalogue = re.fullmatch(r'(.+\.pdf)/(?:[a-z]{2}/)?(?:info|details)/?', parent.path, re.I)
-    if not article and not catalogue:
+    if not article and not catalogue and len(parent.path.strip('/').split('/')) < 2:
         return None
     candidates = []
     for link in fetched.get('links', []):
@@ -41,7 +42,11 @@ def publication_file(fetched, seen):
             if not re.fullmatch(re.escape(prefix) + r'(?:view|viewFile|download)/'
                                 + re.escape(identifier) + r'/\d+(?:\.pdf)?/?', target.path):
                 continue
-        elif target.path != catalogue.group(1):
+        elif catalogue and target.path != catalogue.group(1):
+            continue
+        elif not catalogue and not target.path.lower().endswith('.pdf'):
             continue
         candidates.append(url)
+    if not article and not catalogue and len(set(candidates)) != 1:
+        return None
     return min(candidates) if candidates else None

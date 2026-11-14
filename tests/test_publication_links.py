@@ -3,6 +3,12 @@ from plagiarism.publication_links import publication_file
 
 
 class PublicationLinkTests(unittest.TestCase):
+    def test_one_explicit_pdf_on_a_content_page_without_ojs_identifiers(self):
+        page={'url':'https://journal.example/issues/2025/article-name','links':[
+            {'url':'https://journal.example/files/fulltext.pdf','text':'Скачать статью в pdf-формате'}]}
+        self.assertEqual(publication_file(page,set()),page['links'][0]['url'])
+        page['links'].append({'url':'https://journal.example/files/other.pdf','text':'PDF'})
+        self.assertIsNone(publication_file(page,set()))
     def test_pipeline_follows_bounded_viewer_then_download_and_keeps_partial_evidence(self):
         from plagiarism.web_search import run
         from plagiarism.query_sentences import SHORT_CENTER_STRATEGY

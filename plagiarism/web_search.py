@@ -899,6 +899,16 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         from plagiarism.web_related_fallback import append_related
         result = append_related(text, result, related_parent_pages, fetcher=fetcher, started_at=started, progress=progress)
     result["web"]["related_fallback_enabled"] = use_related_fallback
+    if (query_strategy == SHORT_CENTER_STRATEGY and result['web']['status'] == 'complete'
+            and not result['stats']['matched_words'] and result['stats']['checked_source_count'] < 2):
+        result['web']['status'] = 'partial'
+        result['stats']['uniqueness_percent'] = None
+        result['stats'].pop('uniqueness_upper_bound_percent', None)
+        result['web']['errors'].append({'stage':'coverage','code':'too_few_sources_for_uniqueness',
+            'message':'Одной доступной страницы недостаточно, чтобы подтвердить уникальность текста.'})
+        if not any(issue.get('kind') == 'partial_web_check' for issue in result['issues']):
+            result['issues'].append({'kind':'partial_web_check',
+                'message':'Охват источников недостаточен. Совпадения не подтверждены; уникальность пока не установлена.'})
     if progress:
         progress("Сохраняем проверку уникальности", len(ordered), len(ordered), phase="saving")
     return result
