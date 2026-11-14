@@ -7,6 +7,8 @@ from plagiarism.matching import MIN_WORDS, _tokens
 
 SHORT_SENTENCE_STRATEGY = "hybrid-citation-v9-short-sentences"
 SHORT_CENTER_STRATEGY = "hybrid-citation-v10-short-center"
+SHORT_PURE_STRATEGY = "hybrid-citation-v11-short-pure"
+INPUT_QUERY_POLICY = "least-covered-pure-short-sentence-v1"
 TITLE_QUERY_POLICY = "single-document-observed-title-v1"
 
 
@@ -90,6 +92,60 @@ def short_center_queries(text, plan, *, limit=6):
         planned.insert(max(1, len(planned) - 1),
                        {'query': phrase, 'start': window[0].start, 'end': window[-1].end})
     return planned
+
+
+def short_pure_candidate(text, plan, protected_queries=(), *, limit=6):
+    """Propose one whole short sentence lacking a pure discovery phrase.
+
+    This reallocates the final slot; it does not claim that slot was redundant.
+    The caller retains valid observed-title priority. Only input words and their
+    original positions participate in selection, never a source or its metadata.
+    """
+    if limit != 6 or len(plan) != 6:
+        return None
+    protected = set(protected_queries)
+    final = plan[-1]
+    if not final['query'].startswith('"') or final['query'] in protected:
+        return None
+    tokens = _tokens(text)
+    if not MIN_WORDS <= len(tokens) <= 160:
+        return None
+    segments, start = [], 0
+    for index in range(1, len(tokens)):
+        if re.search(r"[.!?…\r\n]", text[tokens[index - 1].end:tokens[index].start]):
+            segments.append(tokens[start:index])
+            start = index
+    segments.append(tokens[start:])
+
+    # Mere overlap can include words from another sentence. Require the whole
+    # actual query and its original span to describe a contiguous input clue.
+    pure_spans = []
+    for item in plan:
+        if not (item['query'].startswith('"') and item['query'].endswith('"')):
+            continue
+        query_words = _tokens(item['query'])
+        span_words = [t for t in tokens if item['start'] <= t.start and t.end <= item['end']]
+        if (len(query_words) >= MIN_WORDS and span_words
+                and item['start'] == span_words[0].start and item['end'] == span_words[-1].end
+                and [t.value for t in query_words] == [t.value for t in span_words]):
+            pure_spans.append((item['start'], item['end']))
+    candidates = []
+    existing = {item['query'] for item in plan}
+    for words in segments:
+        if not MIN_WORDS <= len(words) <= 9 or any(len(w.value) > 40 for w in words):
+            continue
+        a, b = words[0].start, words[-1].end
+        if any(a <= left and right <= b for left, right in pure_spans):
+            continue
+        phrase = '"' + ' '.join(w.value for w in words) + '"'
+        if phrase in existing or len(phrase) > 390:
+            continue
+        covered = sum(any(q['start'] <= w.start and w.end <= q['end'] for q in plan[:5])
+                      for w in words)
+        candidates.append((Fraction(covered, len(words)), a, {
+            'query': phrase, 'start': a, 'end': b,
+            'covered_words': covered, 'sentence_words': len(words)}))
+    return min(candidates, key=lambda item: item[:2])[2] if candidates else None
 
 
 def observed_title_query(url, title):
