@@ -1704,6 +1704,9 @@ test('authenticated owner can submit and restore long text without changing gues
   assert.equal(app.evaluate('restoreDraft().length'),250000);
   app.evaluate("state.batch=[{id:'b'.repeat(32),name:'long.txt',text:longText}];saveBatch()");
   assert.equal(app.evaluate('restoreBatch()[0].text.length'),250000);
+  await app.navigate('check');
+  assert.match(app.element('main-content').innerHTML,/Без лимита знаков · владелец/);
+  assert.doesNotMatch(app.element('main-content').innerHTML,/До 10 000 знаков · владелец/);
   app.evaluate("state.session.beta.owner=false;state.session.beta.max_characters=10000");
   assert.match(app.evaluate("textLengthError('x'.repeat(10001))"),/10.?000/);
   assert.equal(app.evaluate('restoreBatch().length'),0);

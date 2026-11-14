@@ -1795,8 +1795,9 @@ function renderCheck() {
             placeholder="Вставьте текст, который хотите проверить…&#10;&#10;Добавьте источники в библиотеку или начните с готового примера."></textarea>
           <div class="editor-meta">
             <span><span id="character-count">0 знаков</span> · <span id="word-count">0 слов</span></span>
-            <span>${isBeta() ? state.session.beta.owner ? 'До 10 000 знаков · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
+            <span>${isBeta() ? state.session.beta.owner ? (ownerWithoutTextLimit() ? 'Без лимита знаков' : `До ${number(checkTextLimit())} знаков`) + ' · владелец · общая бесплатная квота' : 'До 10 000 знаков · 6 интернет-проверок в сутки' : isSaas() ? 'До 6 000 знаков в сутки' : 'До 200 000 знаков'}</span>
           </div>
+          ${ownerWithoutTextLimit() ? '<p class="field-help">Один запрос — до 2 МБ. Интернет-поиск выбирает до 6 фраз из всего текста; больший объём не увеличивает число запросов и не гарантирует полный охват.</p>' : ''}
           <details class="card text-statistics"><summary>SEO-анализ: статистика и повторы</summary><div id="text-statistics-content"></div></details>
           ${proofreaderHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
