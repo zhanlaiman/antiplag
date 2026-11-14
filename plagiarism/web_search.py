@@ -830,7 +830,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "input_references": input_references,
         "link_discoveries": link_discoveries,
         "priority_link_replacements": priority_link_replacements,
-        "source_followup_policy": KEYWORD_LINK_POLICY if query_strategy == KEYWORD_STRATEGY else SOURCE_FOLLOWUP_POLICY,
+        "source_followup_policy": KEYWORD_LINK_POLICY if query_strategy in (KEYWORD_STRATEGY, SHORT_SENTENCE_STRATEGY) else SOURCE_FOLLOWUP_POLICY,
         "priority_link_budget_remaining": priority_link_credit,
         "discovered_urls": list(dict.fromkeys(urls[:30] + reference_urls + [link["url"] for link in link_discoveries])),
         "attempted_urls": attempted_urls[:max_page_attempts], "skipped_urls": skipped_urls[:30],

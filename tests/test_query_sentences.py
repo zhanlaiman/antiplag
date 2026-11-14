@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from plagiarism.matching import _tokens
-from plagiarism.query_keywords import KEYWORD_STRATEGY
+from plagiarism.query_keywords import KEYWORD_STRATEGY, KEYWORD_LINK_POLICY
 from plagiarism.query_sentences import SHORT_SENTENCE_STRATEGY, short_sentence_queries
 from plagiarism.web_search import _citation_queries, plan_queries, run
 
@@ -79,6 +79,7 @@ class ShortSentenceTests(unittest.TestCase):
         b=run(text,searcher=Search(),fetcher=Fetch(),query_strategy=SHORT_SENTENCE_STRATEGY)
         self.assertEqual(a['stats']['matched_words'],0)
         self.assertEqual(b['stats']['matched_words'],9)
+        self.assertEqual(b['web']['source_followup_policy'],KEYWORD_LINK_POLICY)
         self.assertEqual(a['web']['queries_attempted'],b['web']['queries_attempted'])
         for m in b['matches']:
             if m['kind']=='exact':self.assertEqual(m['excerpt'],m['source_excerpt'])
