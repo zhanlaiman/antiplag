@@ -449,6 +449,7 @@ test('lost submission is never automatically repeated and an explicit retry pres
       if (!firstRequest) { firstRequest = body; throw new TypeError('Учебный обрыв связи'); }
       return json({ job: { id: body.request_id, status: 'complete', result: { judgment: { relation: 'unrelated', explanation: 'Учебный ответ после восстановления' } } } });
     }
+    if (firstRequest && url === `/api/jobs/${firstRequest.request_id}` && posts.length === 1) return json({error:'Задание не было принято'},404);
     if (firstRequest && url === `/api/jobs/${firstRequest.request_id}`) return json({ job: {
       id: firstRequest.request_id, status: 'complete', result: { judgment: { relation: 'unrelated', explanation: 'Учебный ответ после восстановления' } },
     } });
@@ -1316,6 +1317,7 @@ test('an explicit web retry reuses its original request and consent without send
       if (attempts.length === 1) throw new TypeError('Учебный обрыв связи');
       return json({ job: { id: body.request_id, status: 'queued' } });
     }
+    if (attempts.length && url === `/api/jobs/${attempts[0].request_id}` && attempts.length === 1) return json({error:'Задание не было принято'},404);
     if (attempts.length && url === `/api/jobs/${attempts[0].request_id}`) return json({ job: { id: attempts[0].request_id, status: 'complete', result: { report: webReport(attempts[0].text) } } });
   } });
   await settle();
@@ -1843,4 +1845,58 @@ test('changing the search destination clears consent and reloads while preservin
   assert.equal(app.evaluate('state.internetConsent'),false);assert.equal(app.evaluate('state.homeConsent'),false);
   assert.equal(app.evaluate('restoreDraft()'),'Новый черновик.');
   assert.equal(app.evaluate("state.modelJobs[prior.request_id].body.search_provider"),'serpapi');
+});
+
+test('accepted web submission with a lost reply recovers through GET without another POST', async () => {
+  const attempts = [];
+  let reads = 0;
+  const app = fixture({ fetch(url, body) {
+    if (url === '/api/session') return json({ mode: 'local', beta: { id: 'recovery-guest', max_characters: 10000 }, web: { configured: true } });
+    if (url === '/api/web-check-jobs') {
+      attempts.push(body);
+      throw new TypeError('Учебная потеря ответа после принятия');
+    }
+    if (attempts.length && url === '/api/jobs/' + attempts[0].request_id) {
+      reads++;
+      return json({ job: { id: attempts[0].request_id, status: 'complete', result: { report: webReport(attempts[0].text) } } });
+    }
+  } });
+  await settle();
+  app.evaluate("saveDraft('Исходный учебный текст'); state.internetConsent=true");
+  await app.evaluate('startWebCheck()');
+  assert.equal(attempts.length, 1);
+  assert.ok(reads > 0);
+  assert.equal(app.evaluate('state.report.id'), '8'.repeat(32));
+  assert.equal(app.evaluate('state.text'), 'Исходный учебный текст');
+  assert.equal(app.evaluate('Object.values(state.modelJobs)[0].status'), 'complete');
+});
+
+test('unknown submission remains unknown when one status lookup is offline and never repeats POST', async () => {
+  let posts = 0, reads = 0;
+  const app = fixture({ fetch(url) {
+    if (url === '/api/session') return json({ mode: 'local', web: { configured: true } });
+    if (url === '/api/web-check-jobs') { posts++; throw new TypeError('Учебная потеря связи'); }
+    if (url.startsWith('/api/jobs/')) { reads++; throw new TypeError('Связь ещё недоступна'); }
+  } });
+  await settle();
+  app.evaluate("saveDraft('Сохранённый учебный текст'); state.internetConsent=true");
+  await assert.rejects(app.evaluate('startWebCheck()'), /потеря связи/);
+  assert.equal(posts, 1);
+  assert.equal(reads, 1);
+  assert.equal(app.evaluate('Object.values(state.modelJobs)[0].status'), 'delivery_unknown');
+  assert.equal(app.evaluate('state.text'), 'Сохранённый учебный текст');
+});
+
+test('HTTP errors retain their status with HTML as well as JSON bodies', async () => {
+  for (const status of [401, 429]) {
+    for (const html of [false, true]) {
+      const app = fixture({ fetch(url) {
+        if (url === '/api/status-fault') return html
+          ? { ok: false, status, json: async () => { throw new SyntaxError('HTML is not JSON'); } }
+          : json({ error: 'Учебная ошибка сервера' }, status);
+      } });
+      await settle();
+      await assert.rejects(app.evaluate("api('/api/status-fault')"), error => error.status === status);
+    }
+  }
 });

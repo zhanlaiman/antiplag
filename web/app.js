@@ -332,7 +332,11 @@ async function api(path, data, method) {
   });
   let result;
   try { result = await response.json(); }
-  catch { throw new Error('Сервер вернул неожиданный ответ. Проверьте, что локальная версия запущена.'); }
+  catch {
+    const message = 'Не удалось прочитать ответ сервиса.';
+    if (response.ok) throw new Error(message);
+    result = { error: message };
+  }
   if (!response.ok) {
     const error = new Error(result.error || result.message || 'Не удалось выполнить запрос.');
     error.status = response.status;
@@ -868,6 +872,24 @@ async function submitModelJob(entry) {
     entry.watchMessage = error.message;
     saveModelJobs();
     renderModelJobs();
+    if (entry.status === 'delivery_unknown' && !authError(error) && privateAccess()) {
+      try {
+        // The POST may already have started work. Read its durable ID once;
+        // an unavailable lookup leaves the outcome unknown and never resends it.
+        const prefix = entry.path === '/api/correction' ? '/api/correction-jobs' : '/api/jobs';
+        const { job } = await api(`${prefix}/${entry.request_id}`);
+        if (job.id !== entry.request_id) throw new Error('Не удалось подтвердить идентификатор задания.');
+        entry.job = job;
+        entry.status = job.status;
+        entry.watchMessage = '';
+        delete entry.submission_error;
+        saveModelJobs();
+        renderModelJobs();
+        return;
+      } catch {
+        // Keep the original unknown delivery, input and ID for an explicit retry.
+      }
+    }
     throw error;
   }
 }
@@ -2171,13 +2193,26 @@ function renderReport() {
       )}
     <div id="comparison-area" tabindex="-1">${selected ? comparisonHTML(selected) : ''}</div>
     <section class="retrieval-section" id="retrieval-area"></section>`;
-  bindMatchSelection(area, id => {
+  const selectMatch = id => {
     state.selectedMatch = id;
     state.rewrite = null;
     state.judgment = null;
-    renderReport();
+    area.querySelectorAll('[data-match]').forEach(button => {
+      const active = button.dataset.match === id;
+      button.classList.toggle('selected', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    const annotation = area.querySelector('.annotated-text');
+    annotation.innerHTML = annotatedText(report);
+    bindMatchSelection(annotation, selectMatch);
+    const selected = matches.find(match => match.id === id);
+    document.querySelector('#comparison-area').innerHTML = selected ? comparisonHTML(selected) : '';
+    bindComparison(selected);
+    updateReportFreshness();
+    updateModelActionControls();
     showComparison('#comparison-area');
-  });
+  };
+  bindMatchSelection(area, selectMatch);
   document.querySelector('#download-report').addEventListener('click', () => {
     download(`istok-report-${report.id}.json`, JSON.stringify(report, null, 2), 'application/json');
   });

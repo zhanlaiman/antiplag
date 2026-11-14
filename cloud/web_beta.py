@@ -164,7 +164,13 @@ class BetaRuntime:
             cookies=SimpleCookie();cookies.load(headers.get('Cookie',''));value=cookies[COOKIE].value
             identifier,signature=value.split('.')
             expected=hmac.new(self.key,identifier.encode(),sha256).hexdigest()
-            if re.fullmatch(r'[a-f0-9]{64}',identifier) and hmac.compare_digest(expected,signature):return identifier,None
+            if re.fullmatch(r'[a-f0-9]{64}',identifier) and hmac.compare_digest(expected,signature):
+                # The first guest space may have been adopted by the owner.
+                # Its old guest cookie must not unlock it after owner expiry.
+                with closing(self.connect()) as db:
+                    has_owner=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_account'").fetchone()
+                    owner=db.execute('SELECT guest FROM owner_account WHERE id=1').fetchone() if has_owner else None
+                if not owner or identifier!=owner[0]:return identifier,None
         except (CookieError,KeyError,ValueError):pass
         identifier=secrets.token_hex(32)
         signature=hmac.new(self.key,identifier.encode(),sha256).hexdigest();cookie=SimpleCookie()

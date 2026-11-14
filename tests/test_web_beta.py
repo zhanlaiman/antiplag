@@ -323,6 +323,35 @@ class WebBetaTests(unittest.TestCase):
         self.assertEqual(self.http('/api/correction-quota',cookie=alice)[1],before)
         self.assertEqual(len(calls),1)
 
+    def test_guest_cookie_cannot_reenter_owner_workspace_after_owner_session_ends(self):
+        from hashlib import pbkdf2_hmac
+        salt='34'*32
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,identifier=self.guest()
+            status,_,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
+            self.assertEqual(status,200);owner=cookie.split(';')[0]
+            # Preserve the original adoption contract and all already saved rows.
+            self.assertEqual(self.http('/api/session',cookie=owner)[1]['beta']['id'],identifier)
+            report_id=self.check(owner,'e'*32)
+            before=self.http('/api/reports/'+report_id,cookie=owner)[1]
+            calls=list(self.calls)
+            self.assertEqual(self.http('/api/owner/logout',{},owner)[0],200)
+            status,_,replacement=self.http('/api/reports/'+report_id,cookie=guest)
+            self.assertEqual(status,404)
+            self.assertIsNotNone(replacement)
+            new_guest=replacement.split(';')[0]
+            session=self.http('/api/session',cookie=new_guest)[1]['beta']
+            self.assertFalse(session['owner']);self.assertNotEqual(session['id'],identifier)
+            self.assertEqual(self.http('/api/report-exports/'+report_id,cookie=guest)[0],404)
+            self.assertEqual(self.http('/api/data',cookie=new_guest)[1]['reports'],[])
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=owner)[1],before)
+            self.stop();self.start()
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=guest)[0],404)
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=owner)[1],before)
+            self.assertEqual(self.http('/api/session',cookie=owner)[1]['beta']['id'],identifier)
+            self.assertEqual(self.calls,calls)
+
     def test_owner_password_stable_workspace_and_no_guest_daily_limit(self):
         from hashlib import pbkdf2_hmac
         salt='12'*32
