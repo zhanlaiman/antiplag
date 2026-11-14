@@ -45,6 +45,15 @@ function isBeta() { return Boolean(state.session?.beta); }
 function ownerWithoutTextLimit() { return isBeta() && state.session.beta.owner === true && state.session.beta.max_characters === null; }
 function checkTextLimit() { return ownerWithoutTextLimit() ? Infinity : isBeta() ? state.session.beta.max_characters : 200000; }
 function documentTextLimit() { return ownerWithoutTextLimit() ? Infinity : 200000; }
+function webProviderLabel() { return webStatus().provider === 'serpapi' ? 'Google через SerpApi' : 'Tavily'; }
+function webCheckBody(text, extra = {}) {
+  return { text, internet_consent: true,
+    ...(isBeta() && webStatus().provider === 'serpapi' ? {search_provider:'serpapi',provider_consent:'serpapi'} : {}), ...extra };
+}
+function pendingWebRequest(text) {
+  return pendingModelRequest('/api/web-check',webCheckBody(text))
+    || pendingModelRequest('/api/web-check',{text,internet_consent:true});
+}
 function privateAccess() {
   return state.sessionReady && !state.sessionExpired && !state.sessionTransition
     && (!isSaas() || Boolean(state.session.user?.email_verified));
@@ -577,7 +586,7 @@ function updateQuotaUI() {
       : `На новую проверку ${number(length)} знаков. Осталось ${number(quotaRemaining())} из ${number(quota?.limit || 6000)} сегодня.${quota?.reset_at ? ` Лимит обновится ${date(quota.reset_at)}.` : ''}`;
   }
   const button = document.querySelector('#check-button');
-  const pendingWeb = internetMode() && pendingModelRequest('/api/web-check', { text: state.text, internet_consent: true });
+  const pendingWeb = internetMode() && pendingWebRequest(state.text);
   if (button) button.disabled = Boolean(button.dataset.busy) || !privateAccess()
     || Boolean(isSaas() && entry?.status !== 'complete' && length > quotaRemaining())
     || Boolean(entry && entry.status !== 'complete')
@@ -955,8 +964,8 @@ async function startWebCheck({ text = state.text, consent = state.internetConsen
   if (textLengthError(text)) throw new Error(textLengthError(text));
   if (!consent) throw new Error('Подтвердите отправку поисковых фрагментов для проверки по интернету.');
   if (isSaas() && chars(text).length > quotaRemaining()) throw new Error('Текст превышает остаток дневного лимита. Черновик сохранён целиком.');
-  const body = { text, internet_consent: true };
-  const pending = pendingModelRequest('/api/web-check', body);
+  const body = webCheckBody(text);
+  const pending = pendingWebRequest(text);
   if (pending) throw new Error('Для этого текста уже есть задание. Его состояние и повторная отправка доступны в уведомлении.');
   const id = crypto.randomUUID().replaceAll('-', '');
   const entry = { request_id: id, path: '/api/web-check', body, context: { surface }, created_at: new Date().toISOString(), status: 'submitting' };
@@ -972,7 +981,7 @@ async function startWebCheck({ text = state.text, consent = state.internetConsen
 function updateHomeControls() {
   const button = document.querySelector('#home-check-button');
   if (!button) return;
-  const pending = pendingModelRequest('/api/web-check', { text: state.homeText, internet_consent: true });
+  const pending = pendingWebRequest(state.homeText);
   const length = chars(state.homeText).length;
   button.disabled = Boolean(button.dataset.busy) || !webConfigured() || !state.homeConsent || !state.homeText.trim()
     || documentReading('home-text') || Boolean(pending) || Boolean(isSaas() && length > quotaRemaining());
@@ -1448,7 +1457,7 @@ function renderHome() {
             <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>${ownerWithoutTextLimit() ? 'Без лимита знаков' : `До ${number(checkTextLimit())} знаков`}${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
             ${ownerWithoutTextLimit() ? '<p class="field-help">Один запрос — до 2 МБ. Интернет-поиск выбирает до 6 фраз из всего текста; больший объём не увеличивает число запросов и не гарантирует полный охват.</p>' : ''}
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; остальные документы до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текст для интернет-проверки"></label>
-            <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска источников.</span></label>
+            <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста ${webProviderLabel()} и Википедии для поиска источников.</span></label>
             <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
             <p class="home-quota" id="home-quota" hidden></p>
@@ -1711,7 +1720,7 @@ async function startBatchChecks(mode, consent) {
     for (const doc of pending) {
       const id = crypto.randomUUID().replaceAll('-','');
       const entry = {request_id:id,path:mode === 'internet' ? '/api/web-check' : '/api/library-check',
-        body:{text:doc.text,...(mode === 'internet' ? {internet_consent:true,...(doc.source_url ? {source_url:doc.source_url} : {})} : {})},
+        body:mode === 'internet' ? webCheckBody(doc.text,doc.source_url ? {source_url:doc.source_url} : {}) : {text:doc.text},
         context:{surface:'batch',batchName:doc.name,batchMode:mode},created_at:new Date().toISOString(),status:'submitting'};
       doc.request_id=id; state.modelJobs[id]=entry;
       if (!saveModelJobs() || !saveBatch()) {
@@ -1730,7 +1739,7 @@ function renderBatch() {
     <p>TXT/MD/DOC/DOCX/PDF/ODT/RTF/HTML. До 1 МиБ на файл, до 3 МиБ за загрузку. Сначала извлекаем текст без поиска. Проверьте порядок и полноту текста, особенно в PDF и таблицах.</p>
     <p class="field-help">Пакет и тексты хранятся в этом браузере. Сервер сохраняет каждый отправленный документ и отчёт. Извлечение DOCX/PDF/ODT/RTF/HTML/DOC выполняется на сервере Истока. Предел одной проверки — 10 000 знаков. <a href="/privacy.html">Подробнее о данных</a></p>
     <label class="field-label" for="batch-mode">Область проверки</label><select class="field" id="batch-mode"><option value="internet">Интернет</option><option value="library">Моя библиотека</option></select>
-    <label class="consent-row"><input type="checkbox" id="batch-consent">Разрешаю отправить поисковые фрагменты всех документов пакета Tavily и Википедии. Для проверки по библиотеке это согласие не требуется.</label>
+    <label class="consent-row"><input type="checkbox" id="batch-consent">Разрешаю отправить поисковые фрагменты всех документов пакета ${webProviderLabel()} и Википедии. Для проверки по библиотеке это согласие не требуется.</label>
     <p>Проверки идут последовательно. Интернет-пакет использует обычные дневные и общие лимиты, до 6 поисковых запросов на документ. При ошибке пакет останавливается; ID уже отправленного документа сохраняется. После reload автоматически восстанавливаем только статусы, оставшиеся документы запускаете сами.</p>
     <div class="batch-actions"><button class="button" id="batch-start" type="button">Проверить неотправленные документы</button><button class="text-button" id="batch-clear" type="button">Новый пакет</button></div><p id="batch-error" role="alert"></p></section>
     <section class="card batch-controls"><h2>Страницы сайта</h2><p>Загрузим выбранную публичную страницу и до двух ссылок на том же сайте. Соблюдаем robots.txt; закрытые страницы, формы входа и адреса с параметрами не поддерживаются. Это ограниченная проверка страниц, полный обход сайта не выполняется.</p><label class="field-label" for="batch-site-url">Адрес публичной страницы</label><input class="field" id="batch-site-url" type="url" placeholder="https://example.org/article"><label class="consent-row"><input id="batch-site-consent" type="checkbox">Подтверждаю, что это публичные страницы без секретных ссылок, и разрешаю Истоку загрузить их текст.</label><p class="field-help">До 2 загрузок в день на пространство, 6 на весь сайт и 30 в месяц. Ошибка также занимает попытку. Загрузка может занять до минуты, поиска она не запускает. Текст страниц остаётся в пакете этого браузера до отправки на проверку. При интернет-проверке исходный сайт исключается из сравнения; это видно в ограничениях отчёта.</p><button class="button secondary" id="batch-site-start" type="button">Добавить страницы в пакет</button><p id="batch-site-error" role="alert"></p></section>
@@ -1801,7 +1810,7 @@ function renderCheck() {
           <details class="card text-statistics"><summary>SEO-анализ: статистика и повторы</summary><div id="text-statistics-content"></div></details>
           ${proofreaderHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
-            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска страниц-источников.</label>
+            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста ${webProviderLabel()} и Википедии для поиска страниц-источников.</label>
           </div>
           <div class="editor-footer">
             <p id="draft-status">Черновик сохраняется на этом Mac</p>

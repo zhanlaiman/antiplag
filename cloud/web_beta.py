@@ -19,7 +19,8 @@ from urllib.request import Request,build_opener
 
 import server
 from plagiarism import access,auth_provider,saas,web_search
-from plagiarism.search_credentials import key_for
+from plagiarism.search_credentials import key_for,selected_provider
+from plagiarism.search_serpapi import SerpAPISearch
 from plagiarism.search_mediawiki import MediaWikiSearch
 from plagiarism.search_tavily import TavilySearch
 from plagiarism.tenants import TenantRegistry
@@ -330,7 +331,30 @@ class BetaRuntime:
         return {'counts':counts,'quota':self.remaining('',owner=True),'monthly_limit':MONTHLY_SEARCHES,
                 'storage_limit_bytes':256*1024*1024,'as_of':datetime.now(timezone.utc).isoformat()}
 
-    def run_web(self,text,request_id,progress=None,source_url=None):
+    def run_google(self,text,request_id,progress=None,source_url=None):
+        if self.quota_cooldown():
+            raise SearchNotStarted('Поиск временно ограничил обращения. Повторите вручную позже; запросы не отправлены.','free_quota_rate_limited')
+        if progress:progress('Проверяем бесплатную квоту Google-поиска',0,0,phase='preflight')
+        persist=self.persist
+        class Budget(web_search.SearchBudget):
+            def reserve(self,identifier):super().reserve(identifier);persist()
+            def finish(self,identifier):super().finish(identifier);persist()
+        try:
+            search=SerpAPISearch(Budget(self.root/'search-budget.sqlite3',limit=MONTHLY_SEARCHES))
+            search.confirm_free(len(web_search.plan_queries(text)))
+        except (web_search.WebSearchError,ValueError,OSError):
+            raise SearchNotStarted('Не удалось подтвердить бесплатный Google-поиск. Запросы не отправлены, дневная попытка сохранена.','free_quota_unconfirmed') from None
+        wiki=MediaWikiSearch(path=self.root/'private/mediawiki.sqlite3')
+        result=web_search.run(text,request_id,progress=progress,searcher=search,wiki_searcher=wiki,
+            **({'fetcher':ExcludingFetcher(source_url)} if source_url else {}))
+        if source_url:
+            result['web']['excluded_source_host']=public_page_url(source_url)['host']
+            result['web']['limitations'].append('Собственный сайт '+public_page_url(source_url)['host']+' исключён из сравнения. Недоступные и исключённые страницы не подтверждают уникальность.')
+        return result
+
+    def run_web(self,text,request_id,progress=None,source_url=None,provider='tavily'):
+        if provider=='serpapi':return self.run_google(text,request_id,progress,source_url)
+        if provider!='tavily':raise SearchNotStarted('Выбранный поиск недоступен. Запросы не отправлены.','web_not_configured')
         # No paid fallback: confirm the included allowance before any search.
         cooldown=self.quota_cooldown()
         if cooldown:
@@ -523,11 +547,25 @@ class BetaHandler(server.Handler):
             saas.ensure_job_identifier(store,identifier)
             remote_id=sha256((self.guest+'\0'+identifier).encode()).hexdigest()[:32]
             source_url=public_page_url(body['source_url'])['url'] if body.get('source_url') else None
+            # Old clients consented to Tavily. Their stored fingerprints and
+            # destination remain unchanged even after a default provider switch.
+            provider=body.get('search_provider')
+            if provider is None and body.get('provider_consent') is not None:
+                raise access.AccessError('Укажите поисковый сервис вместе с согласием.','invalid_search_provider',400)
+            if provider is not None:
+                if provider not in ('tavily','serpapi'):
+                    raise access.AccessError('Выбранный поисковый сервис недоступен.','invalid_search_provider',400)
+                if body.get('provider_consent')!=provider:
+                    raise access.AccessError('Подтвердите передачу фрагментов выбранному поисковому сервису.','provider_consent_required',400)
+                if provider=='serpapi' and selected_provider()!='serpapi' and not self.owner:
+                    raise access.AccessError('Этот поисковый режим пока доступен владельцу.','owner_required',403)
+            provider_fields={'search_provider':provider,'provider_consent':provider} if provider is not None else {}
             owner=bool(self.owner)
             def operation(progress):
                 try:
                     with owner_target_text(owner):
-                        payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}))
+                        payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}),
+                                            **({'provider':provider} if provider is not None else {}))
                 except SearchNotStarted:
                     beta.release_unstarted_check(self.guest,identifier)
                     raise
@@ -540,7 +578,7 @@ class BetaHandler(server.Handler):
                           or store.get('model-job',identifier) or jobs.items.get(identifier))
                 beta.admit_check(self.guest,identifier,text,owner=bool(self.owner),rearm=not existing)
                 try:
-                    return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True,**({'source_url':source_url} if source_url else {})},operation,store)}
+                    return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True,**({'source_url':source_url} if source_url else {}),**provider_fields},operation,store)}
                 except Exception:
                     if not store.get('model-request','model-request:'+identifier) and identifier not in jobs.items:
                         beta.release_unstarted_check(self.guest,identifier)

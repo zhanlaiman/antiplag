@@ -249,12 +249,13 @@ def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
 
 def status():
     provider = selected_provider()
-    configured = (bool(key_for(provider)) and provider in {"tavily", "brave"}
+    configured = (bool(key_for(provider)) and provider in {"tavily", "brave", "serpapi"}
                   and (provider != "brave" or os.environ.get("ISTOK_BRAVE_STORAGE_RIGHTS") == "1"))
     error = ("Поиск по интернету ещё не подключён. Нужен серверный ключ поискового API."
              if provider == "tavily" else
              "Поиск по интернету ещё не подключён. Нужны ключ Brave и подтверждённые условия хранения результатов."
-             if provider == "brave" else "Выбранный поисковый сервис недоступен.")
+             if provider == "brave" else "Google-поиск временно недоступен на этом сайте."
+             if provider == "serpapi" else "Выбранный поисковый сервис недоступен.")
     zero_fallback = os.environ.get("ISTOK_WEB_ZERO_FALLBACK", "1" if DEFAULT_ZERO_FALLBACK else "0") == "1"
     wiki_followup = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP", "1" if DEFAULT_WIKI_FOLLOWUP else "0") == "1"
     return {"provider": provider, "configured": configured,
@@ -555,6 +556,10 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         if provider == "tavily":
             from plagiarism.search_tavily import TavilySearch
             searcher = TavilySearch(SearchBudget())
+        elif provider == "serpapi":
+            from plagiarism.search_serpapi import SerpAPISearch
+            searcher = SerpAPISearch(SearchBudget())
+            searcher.confirm_free(len(queries))
         elif provider == "brave":
             searcher = BraveSearch()
         else:

@@ -53,15 +53,21 @@ def serve_beta():
     Thread(target=service.serve_forever,name='istok-http',daemon=True).start()
 
 
-def build_app(directory,key):
+def build_app(directory,key,*,google_key=None,default_search_provider='tavily'):
     import modal
+    if default_search_provider not in ('tavily','serpapi') or default_search_provider=='serpapi' and not google_key:
+        raise ValueError('A reviewed search provider and its credential are required')
     volume=modal.Volume.from_name(VOLUME_NAME,create_if_missing=True,version=2)
     image=(modal.Image.debian_slim(python_version='3.14')
         .apt_install('hunspell','antiword')
         .pip_install('pypdf==7.0.1','pypdfium2==5.14.0')
         .add_local_dir(directory,REMOTE_ROOT,copy=True)
-        .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':'tavily','ISTOK_MODEL_PROVIDER':'local'}))
+        .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':default_search_provider,'ISTOK_MODEL_PROVIDER':'local'}))
     secret_values={'ISTOK_TAVILY_API_KEY':key}
+    if google_key:
+        if not isinstance(google_key,str) or len(google_key)>1024 or any(not 33<=ord(c)<=126 for c in google_key):
+            raise ValueError('Invalid Google search credential')
+        secret_values['ISTOK_SERPAPI_API_KEY']=google_key
     corrector_path=ROOT/'.runtime/corrector-deployment.json'
     if corrector_path.exists():
         corrector=json.loads(corrector_path.read_text())

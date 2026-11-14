@@ -1724,3 +1724,30 @@ test('oversized UTF-8 request is rejected before sending and leaves the owner dr
   app.evaluate('state.session.beta.owner=false');
   assert.notEqual(app.evaluate("textLengthError('x'.repeat(10001))"),'');
 });
+
+test('Google destination is named before consent and included in the submitted request', async () => {
+  const posts=[];let requestID;
+  const app=fixture({view:'home',fetch(url,body){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'google-guest',max_characters:10000},web:{provider:'serpapi',configured:true}});
+    if(url==='/api/web-check-jobs'){posts.push(body);requestID=body.request_id;return json({job:{id:requestID,status:'failed',error:'Synthetic terminal receipt'}});}
+    if(url==='/api/jobs/'+requestID)return json({job:{id:requestID,status:'failed',error:'Synthetic terminal receipt'}});
+  }});await settle();
+  assert.match(app.element('main-content').innerHTML,/Google через SerpApi и Википедии/);
+  await assert.rejects(app.evaluate("startWebCheck({text:'Авторский текст для проверки выбранного поискового сервиса.',consent:true,surface:'home'})"));
+  assert.equal(posts.length,1);assert.equal(posts[0].search_provider,'serpapi');assert.equal(posts[0].provider_consent,'serpapi');assert.equal(posts[0].internet_consent,true);
+  await app.navigate('check');assert.match(app.element('main-content').innerHTML,/Google через SerpApi и Википедии/);
+  await app.navigate('batch');assert.match(app.element('main-content').innerHTML,/Google через SerpApi и Википедии/);
+});
+
+test('a prior unknown Tavily request still blocks duplicate submission after Google becomes the default', async () => {
+  let posts=0;
+  const app=fixture({fetch(url){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'google-guest',max_characters:10000},web:{provider:'serpapi',configured:true}});
+    if(url==='/api/web-check-jobs')posts++;
+  }});await settle();
+  app.expose('legacyEntry',{request_id:'c'.repeat(32),path:'/api/web-check',body:{text:'Сохранённый текст.',internet_consent:true},status:'delivery_unknown'});
+  app.evaluate('state.modelJobs[legacyEntry.request_id]=legacyEntry');
+  await assert.rejects(app.evaluate("startWebCheck({text:'Сохранённый текст.',consent:true})"));
+  assert.equal(posts,0);assert.equal(app.evaluate("pendingWebRequest('Сохранённый текст.').request_id"),'c'.repeat(32));
+  assert.equal(app.evaluate("state.modelJobs[legacyEntry.request_id].body.search_provider"),undefined);
+});

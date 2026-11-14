@@ -63,6 +63,15 @@ class SearchCredentialsTests(unittest.TestCase):
                     search_credentials.save_local('tavily', key)
             self.assertFalse((Path(directory) / 'search-api.json').exists())
 
+    def test_google_credential_is_separate_private_and_requires_explicit_provider_switch(self):
+        with tempfile.TemporaryDirectory()as directory,patch.dict(os.environ,{'ISTOK_RUNTIME_DIR':directory},clear=True):
+            search_credentials.save_local('tavily','tvly-not-a-real-key-for-offline-tests')
+            path=Path(directory)/'serpapi-api.json';path.write_text(json.dumps({'provider':'serpapi','api_key':'a'*64}));path.chmod(0o600)
+            self.assertEqual(search_credentials.key_for('serpapi'),'a'*64)
+            self.assertEqual(search_credentials.selected_provider(),'tavily')
+            with patch.dict(os.environ,{'ISTOK_SEARCH_PROVIDER':'serpapi'}):self.assertEqual(search_credentials.selected_provider(),'serpapi')
+            path.chmod(0o644);self.assertEqual(search_credentials.key_for('serpapi'),'')
+
 
 if __name__ == '__main__':
     unittest.main()

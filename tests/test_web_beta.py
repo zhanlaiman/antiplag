@@ -406,6 +406,60 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(self.http('/api/web-check-jobs',body,owner)[1]['job']['result']['report'],report)
             self.assertEqual(len(self.calls),1)
 
+    def test_google_requires_destination_consent_and_preserves_legacy_receipts_after_switch(self):
+        providers=[]
+        def routed(text,rid,progress,provider='tavily'):
+            providers.append(provider)
+            return {**analyze(text,[]),'text':text,'scope':'web_search','sources':[],'web':{'provider':provider}}
+        self.runner=self.service.beta.runner=routed
+        guest,_=self.guest();base={'request_id':'e'*32,'text':TEXT,'internet_consent':True}
+        for extra in ({'search_provider':'serpapi'},{'search_provider':'serpapi','provider_consent':'tavily'},
+                      {'search_provider':'unknown','provider_consent':'unknown'},{'provider_consent':'serpapi'}):
+            self.assertEqual(self.http('/api/web-check-jobs',{**base,**extra},guest)[0],400)
+        self.assertEqual(providers,[])
+        self.assertEqual(self.http('/api/web-check-jobs',{**base,'search_provider':'serpapi','provider_consent':'serpapi'},guest)[0],403)
+        rid=self.check(guest,'a'*32);old=self.http('/api/reports/'+rid,cookie=guest)[1]
+        with patch.dict(os.environ,{'ISTOK_SEARCH_PROVIDER':'serpapi'}):
+            legacy={'request_id':'a'*32,'text':TEXT,'internet_consent':True}
+            self.assertEqual(self.http('/api/web-check-jobs',legacy,guest)[1]['job']['result']['report'],old['report'])
+            self.assertEqual(providers,['tavily'])
+            body={**base,'search_provider':'serpapi','provider_consent':'serpapi'}
+            self.assertEqual(self.http('/api/web-check-jobs',body,guest)[0],200)
+            for _ in range(100):
+                job=self.http('/api/jobs/'+base['request_id'],cookie=guest)[1]['job']
+                if job['status'] in {'complete','failed'}:break
+                time.sleep(.01)
+            self.assertEqual(job['status'],'complete',job);self.assertEqual(job['result']['report']['web']['provider'],'serpapi')
+            self.stop();self.start()
+            self.assertEqual(self.http('/api/web-check-jobs',body,guest)[1]['job']['result']['report'],job['result']['report'])
+            self.assertEqual(providers,['tavily','serpapi'])
+            self.assertEqual(self.http('/api/web-check-jobs',legacy,guest)[1]['job']['result']['report'],old['report'])
+
+    def test_google_quota_failure_makes_no_search_and_preserves_guest_daily_slot(self):
+        from cloud.web_beta import SearchNotStarted
+        self.service.beta.runner=self.service.beta.run_web
+        guest,_=self.guest();before=self.http('/api/session',cookie=guest)[1]['beta']['daily_remaining']
+        body={'request_id':'b'*32,'text':TEXT,'internet_consent':True,'search_provider':'serpapi','provider_consent':'serpapi'}
+        with patch.dict(os.environ,{'ISTOK_SEARCH_PROVIDER':'serpapi'}),patch('cloud.web_beta.SerpAPISearch')as factory,patch('cloud.web_beta.web_search.run')as pipeline:
+            factory.return_value.confirm_free.side_effect=SearchNotStarted('Free quota unavailable','free_quota_unconfirmed')
+            self.assertEqual(self.http('/api/web-check-jobs',body,guest)[0],200)
+            for _ in range(100):
+                job=self.http('/api/jobs/'+body['request_id'],cookie=guest)[1]['job']
+                if job['status']=='failed':break
+                time.sleep(.01)
+            self.assertEqual(job['code'],'free_quota_unconfirmed');pipeline.assert_not_called()
+            self.assertEqual(self.http('/api/session',cookie=guest)[1]['beta']['daily_remaining'],before)
+            self.assertEqual(self.http('/api/web-check-jobs',body,guest)[1]['job']['status'],'failed')
+            self.assertEqual(factory.return_value.confirm_free.call_count,1)
+
+    def test_google_free_confirmation_precedes_pipeline_and_uses_same_persistent_search_budget(self):
+        with patch('cloud.web_beta.SerpAPISearch')as factory,patch('cloud.web_beta.MediaWikiSearch'),patch('cloud.web_beta.web_search.run',return_value={'ok':True})as pipeline:
+            self.assertEqual(self.service.beta.run_web(TEXT,'fixture',provider='serpapi'),{'ok':True})
+            factory.return_value.confirm_free.assert_called_once()
+            budget=factory.call_args.args[0];self.assertEqual(budget.limit,180)
+            self.assertEqual(budget.path,self.service.beta.root/'search-budget.sqlite3')
+            self.assertIs(pipeline.call_args.kwargs['searcher'],factory.return_value)
+
     def test_invalid_cookie_creates_a_new_isolated_guest(self):
         cookie,_=self.guest();report=self.check(cookie,'1'*32)
         parts=SimpleCookie();parts.load(cookie);value=parts['istok_beta'].value

@@ -10,17 +10,22 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _path():
-    return Path(os.environ.get("ISTOK_RUNTIME_DIR", ROOT / ".runtime")) / "search-api.json"
+def _path(provider="tavily"):
+    name = {"tavily":"search-api.json", "serpapi":"serpapi-api.json"}.get(provider)
+    if name is None:
+        return None
+    return Path(os.environ.get("ISTOK_RUNTIME_DIR", ROOT / ".runtime")) / name
 
 
-def _saved():
-    path = _path()
+def _saved(provider="tavily"):
+    path = _path(provider)
+    if path is None:
+        return {}
     try:
         if path.is_symlink() or path.stat().st_size > 4096 or path.stat().st_mode & 0o077:
             return {}
         value = json.loads(path.read_text(encoding="utf-8"))
-        if (not isinstance(value, dict) or value.get("provider") != "tavily"
+        if (not isinstance(value, dict) or value.get("provider") != provider
                 or not isinstance(value.get("api_key"), str)):
             return {}
         return value
@@ -29,22 +34,22 @@ def _saved():
 
 
 def key_for(provider):
-    if provider not in {"tavily", "brave"}:
+    if provider not in {"tavily", "brave", "serpapi"}:
         return ""
     environment = os.environ.get("ISTOK_" + provider.upper() + "_API_KEY", "").strip()
     if environment:
         return environment
-    saved = _saved()
+    saved = _saved(provider)
     return saved.get("api_key", "") if saved.get("provider") == provider else ""
 
 
 def selected_provider():
     explicit = os.environ.get("ISTOK_SEARCH_PROVIDER", "")
     if explicit:
-        return explicit if explicit in {"tavily", "brave"} else "unavailable"
+        return explicit if explicit in {"tavily", "brave", "serpapi"} else "unavailable"
     if key_for("tavily"):
         return "tavily"
-    return "brave" if key_for("brave") else "tavily"
+    return "brave" if key_for("brave") else "serpapi" if key_for("serpapi") else "tavily"
 
 
 def save_local(provider, api_key):
