@@ -19,6 +19,30 @@ TEXT='В мастерской сотрудники подготовили дли
 
 
 class WebBetaTests(unittest.TestCase):
+    def test_noindex_covers_beta_success_exports_and_early_origin_errors(self):
+        guest,_=self.guest();identifier=self.check(guest,'9'*32)
+        def read(path,origin='http://beta.example'):
+            connection=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
+            try:
+                connection.request('GET',path,headers={'Host':'beta.example','Origin':origin,'Cookie':guest})
+                response=connection.getresponse()
+                return response.status,dict(response.getheaders()),response.read()
+            finally:connection.close()
+        for path,mime in [('/api/reports/'+identifier,'application/json'),('/api/report-exports/'+identifier,'application/json'),('/reports/'+identifier+'.html','text/html'),('/api/data-export','application/zip')]:
+            status,headers,body=read(path)
+            self.assertEqual(status,200);self.assertTrue(headers['Content-Type'].startswith(mime))
+            self.assertEqual(headers.get('X-Robots-Tag'),'noindex, nofollow')
+            self.assertEqual(headers.get('Cache-Control'),'no-store')
+            if mime=='text/html':self.assertIn("default-src 'none'",headers['Content-Security-Policy'])
+        for path in ['/api/status','/api/session','/api/missing','/reports/'+identifier+'.html','/setup-search.html']:
+            status,headers,body=read(path,'https://external.example')
+            self.assertIn(status,[403,404]);self.assertEqual(headers.get('X-Robots-Tag'),'noindex, nofollow')
+        for path in ['/','/privacy.html','/api-guide.html','/robots.txt','/sitemap.xml']:
+            status,headers,body=read(path)
+            self.assertEqual(status,200);self.assertNotIn('X-Robots-Tag',headers)
+        manifest={item['path'] for item in source_manifest()}
+        self.assertTrue({'web/robots.txt','web/sitemap.xml'} <= manifest)
+
     def setUp(self):
         self.directory=TemporaryDirectory();self.root=Path(self.directory.name)
         self.environment=patch.dict(os.environ,{});self.environment.start();self.calls=[]

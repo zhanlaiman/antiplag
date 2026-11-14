@@ -3612,7 +3612,7 @@ function renderView() {
     if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
   document.querySelector('#breadcrumb-title').textContent = viewNames[state.view];
-  document.title = `${viewNames[state.view]} · Исток`;
+  document.title = state.view === 'home' ? 'Исток: проверка заимствований в тексте' : `${viewNames[state.view]} · Исток`;
   if (state.view === 'home') renderHome();
   else if (state.view === 'check') renderCheck();
   else if (state.view === 'batch') renderBatch();

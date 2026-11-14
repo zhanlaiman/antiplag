@@ -82,6 +82,17 @@ def status_payload(counts):
 class Handler(BaseHTTPRequestHandler):
     server_version = "Istok/0.1"
 
+    def end_headers(self):
+        try:
+            path = urlsplit(getattr(self,'path','')).path
+        except ValueError:
+            # Keep the existing 400 response for malformed request targets.
+            path = ''
+        if (path in {'/api','/reports','/owner.html','/owner.js','/setup-search.html','/setup-search.js'}
+                or path.startswith(('/api/','/reports/'))):
+            self.send_header('X-Robots-Tag','noindex, nofollow')
+        super().end_headers()
+
     def check_text(self, body):
         return field(body, "text")
 
@@ -243,6 +254,8 @@ class Handler(BaseHTTPRequestHandler):
                  "/motion.js": "motion.js", "/motion.css": "motion.css",
                  "/setup-search.html": "setup-search.html", "/setup-search.js": "setup-search.js"}
         files["/privacy.html"] = "privacy.html"
+        files["/robots.txt"] = "robots.txt"
+        files["/sitemap.xml"] = "sitemap.xml"
         files["/api-guide.html"] = "api-guide.html"
         files["/dictionary-license.txt"] = "dictionary-license.txt"
         files["/rtf-license.txt"] = "rtf-license.txt"
@@ -263,8 +276,8 @@ class Handler(BaseHTTPRequestHandler):
             raise KeyError(path)
         content = file.read_bytes()
         self.send_response(200)
-        content_type = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
-        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+        content_type = {"robots.txt":"text/plain", "sitemap.xml":"application/xml"}.get(file.name) or mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json", "application/xml"}:
             content_type += "; charset=utf-8"
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))

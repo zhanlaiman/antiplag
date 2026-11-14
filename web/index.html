@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#173c2e">
   <meta name="description" content="Исток находит заимствования в тексте и показывает совпавшие фрагменты рядом с источниками. Проверяйте статьи, курсовые и исследования.">
-  <title>Исток · Проверка заимствований</title>
+  <title>Исток: проверка заимствований в тексте</title>
+  <link rel="canonical" href="https://istoktext.online/">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/motion.css">
   <script src="/motion.js" defer></script>
@@ -33,7 +34,24 @@
     <div class="main-shell">
       <header class="topbar"><div class="breadcrumb">Личное пространство <span>/</span> <strong id="breadcrumb-title">Проверка текста</strong></div><div class="account-tools"><a class="text-button" id="owner-link" href="/owner.html" hidden>Вход владельца</a><button class="text-button" id="logout-button" type="button" hidden>Выйти из аккаунта</button><span id="quota-summary" class="quota-summary" hidden></span><button class="model-pill" id="model-settings" type="button"><span class="status-dot muted" id="model-dot"></span><span id="model-label">Подключение Qwen</span><span aria-hidden="true">⌄</span></button></div></header>
       <section id="model-jobs-panel" class="model-jobs-panel" aria-label="Серверные задания" hidden></section>
-      <main id="main-content" tabindex="-1"></main>
+      <main id="main-content" tabindex="-1">
+        <section class="auth-loading auth-intro" aria-labelledby="public-intro-title">
+          <div class="page-heading"><div>
+            <p class="field-help">Исток · Антиплагиат</p>
+            <h1 id="public-intro-title">Проверка заимствований в тексте</h1>
+            <p>Проверяйте оригинальность статей, курсовых и исследований: находите совпавшие фрагменты и сверяйте их с источниками.</p>
+          </div></div>
+          <h2>От текста к источнику — за три шага</h2>
+          <ol>
+            <li><p><strong>Добавьте текст.</strong> Вставьте его в редактор или загрузите документ и проверьте извлечённый текст.</p></li>
+            <li><p><strong>Выберите область проверки.</strong> Интернет — поиск по доступным страницам после вашего согласия; личная библиотека — сравнение с добавленными вами источниками.</p></li>
+            <li><p><strong>Сверьте результат.</strong> Откройте подсвеченный фрагмент: выдержки из вашего текста и источника показаны рядом, а ссылка позволяет перейти к оригиналу.</p></li>
+          </ol>
+          <p class="warning">Недоступные страницы и отсутствие найденных совпадений не доказывают уникальность. Процент относится только к прочитанным источникам; при неполной проверке показывается верхняя граница или «не установлена».</p>
+          <p><a href="/privacy.html">Как хранятся тексты и кто имеет доступ к отчётам</a></p>
+          <noscript><p class="field-help">Для запуска проверки и работы с отчётами включите JavaScript. Описание сервиса и правила хранения текстов доступны без него.</p></noscript>
+        </section>
+      </main>
       <footer class="app-footer"><span>Исток · ваша библиотека</span><span>Каждое совпадение ведёт к источнику</span></footer>
     </div>
   </div>

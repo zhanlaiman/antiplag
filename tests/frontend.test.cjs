@@ -172,6 +172,13 @@ function deferred() {
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+test('home keeps its descriptive public title while workspace views keep their own titles', async () => {
+  const app=fixture({view:'home'});await settle();
+  assert.equal(app.document.title,'Исток: проверка заимствований в тексте');
+  await app.navigate('check');assert.equal(app.document.title,'Проверка текста · Исток');
+  await app.navigate('home');assert.equal(app.document.title,'Исток: проверка заимствований в тексте');
+});
+
 test('online beta isolates browser drafts and displays its real input limit', async () => {
   const app = fixture({ view: 'home', stored: { 'istok.home-draft.v1': 'Локальный черновик' },
     fetch: async url => url === '/api/session' ? json({ mode: 'local', beta: { id: 'guest-one', max_characters: 10000 } }) : undefined });

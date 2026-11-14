@@ -12,12 +12,14 @@ test('fixed upstream preserves path, query, cookies and streams a private respon
     assert.equal(options.redirect, 'manual');
     assert.equal(options.cache, 'no-store');
     assert.equal(options.cf, undefined);
-    return new Response('private report', {headers: {'Set-Cookie': 'istok_beta=signed; Secure; HttpOnly; SameSite=Lax', 'Cache-Control': 'public', 'Access-Control-Allow-Origin': '*'}});
+    return new Response('private report', {headers: {'Set-Cookie': 'istok_beta=signed; Secure; HttpOnly; SameSite=Lax', 'Cache-Control': 'public', 'Access-Control-Allow-Origin': '*', 'X-Robots-Tag':'noindex, nofollow', 'Content-Security-Policy':"default-src 'none'"}});
   });
   assert.equal(await result.text(), 'private report');
   assert.equal(result.headers.get('Cache-Control'), 'no-store');
   assert.match(result.headers.get('Set-Cookie'), /HttpOnly/);
   assert.equal(result.headers.get('Access-Control-Allow-Origin'), null);
+  assert.equal(result.headers.get('X-Robots-Tag'),'noindex, nofollow');
+  assert.equal(result.headers.get('Content-Security-Policy'),"default-src 'none'");
 });
 
 test('cookie mutations require exact incoming origin before trusted rewrite', async () => {
@@ -58,4 +60,18 @@ test('rewrite only upstream redirects, never follow them with credentials', asyn
 
 test('opening a link from another site is allowed without granting a mutation', async () => {
   assert.equal((await proxy(new Request('https://istoktext.online/', {headers:{'Sec-Fetch-Site':'cross-site'}}), async () => new Response('home'))).status, 200);
+});
+
+test('private noindex survives upstream success and errors while public pages stay indexable', async () => {
+  for (const status of [200,403,404,500]) {
+    const result=await proxy(new Request('https://istoktext.online/api/reports/example'),async()=>
+      new Response('synthetic response',{status,headers:{'X-Robots-Tag':'noindex, nofollow','Cache-Control':'no-store'}}));
+    assert.equal(result.status,status);
+    assert.equal(result.headers.get('X-Robots-Tag'),'noindex, nofollow');
+    assert.equal(result.headers.get('Cache-Control'),'no-store');
+  }
+  for (const path of ['/','/privacy.html','/api-guide.html','/robots.txt','/sitemap.xml']) {
+    const result=await proxy(new Request('https://www.istoktext.online'+path),async()=>new Response('public page'));
+    assert.equal(result.headers.get('X-Robots-Tag'),null);
+  }
 });

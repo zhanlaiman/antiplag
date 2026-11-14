@@ -23,6 +23,71 @@ SOURCE_TEXT = "Исследователи обнаружили необычны�
 
 
 class ServerTests(unittest.TestCase):
+    def raw_get(self,path,headers=None):
+        connection=HTTPConnection('127.0.0.1',self.httpd.server_port,timeout=5)
+        try:
+            connection.request('GET',path,headers=headers or {})
+            response=connection.getresponse()
+            return response.status,dict(response.getheaders()),response.read()
+        finally:connection.close()
+
+    def test_public_seo_metadata_and_crawlable_initial_main(self):
+        from xml.etree import ElementTree
+        class Page(HTMLParser):
+            def __init__(self):
+                super().__init__();self.canonical=[];self.description=[];self.title='';self.in_title=False;self.in_main=False;self.h1=0;self.steps=0;self.forms=0;self.links=[]
+            def handle_starttag(self,tag,attrs):
+                attrs=dict(attrs)
+                if tag=='link' and attrs.get('rel')=='canonical':self.canonical.append(attrs.get('href'))
+                if tag=='meta' and attrs.get('name')=='description':self.description.append(attrs.get('content'))
+                if tag=='title':self.in_title=True
+                if tag=='main':self.in_main=True
+                if self.in_main:
+                    self.h1+=tag=='h1';self.steps+=tag=='li';self.forms+=tag=='form'
+                    if tag=='a':self.links.append(attrs.get('href'))
+            def handle_endtag(self,tag):
+                if tag=='title':self.in_title=False
+                if tag=='main':self.in_main=False
+            def handle_data(self,data):
+                if self.in_title:self.title+=data
+        for path,title,url in [('/','Исток: проверка заимствований в тексте','https://istoktext.online/'),('/privacy.html','Хранение текстов и доступ к отчётам · Исток','https://istoktext.online/privacy.html')]:
+            status,headers,body=self.raw_get(path);self.assertEqual(status,200)
+            page=Page();page.feed(body.decode());self.assertEqual(page.title,title);self.assertEqual(page.canonical,[url]);self.assertEqual(len(page.description),1)
+            self.assertNotIn('X-Robots-Tag',headers)
+            if path=='/':
+                self.assertEqual((page.h1,page.steps,page.forms),(1,3,0));self.assertIn('/privacy.html',page.links)
+        status,headers,body=self.raw_get('/robots.txt');self.assertEqual(status,200)
+        self.assertEqual(headers['Content-Type'],'text/plain; charset=utf-8')
+        self.assertEqual(body.decode(),'User-agent: *\nAllow: /\nSitemap: https://istoktext.online/sitemap.xml\n')
+        status,headers,body=self.raw_get('/sitemap.xml');self.assertEqual(status,200)
+        self.assertEqual(headers['Content-Type'],'application/xml; charset=utf-8')
+        tree=ElementTree.fromstring(body);ns='{http://www.sitemaps.org/schemas/sitemap/0.9}'
+        self.assertEqual(tree.tag,ns+'urlset')
+        self.assertEqual([node.text for node in tree.findall(ns+'url/'+ns+'loc')],['https://istoktext.online/','https://istoktext.online/privacy.html'])
+        self.assertEqual(len(list(tree.iter())),5)
+
+    def test_header_hook_preserves_malformed_request_target_error_response(self):
+        status,headers,body=self.raw_get('http://[',{'Host':f'127.0.0.1:{self.httpd.server_port}'})
+        self.assertEqual(status,400)
+        self.assertEqual(headers['Cache-Control'],'no-store')
+        self.assertNotIn('X-Robots-Tag',headers)
+
+    def test_private_success_error_html_zip_and_public_prefix_counterexamples(self):
+        self.enterContext(patch.object(application.llm,'status',return_value={'provider':'disabled','available':False,'models':[]}))
+        self.add_source();report=self.check();identifier=report['id']
+        paths=['/api','/api/status','/api/reports/'+identifier,'/api/report-exports/'+identifier,'/reports/'+identifier+'.html','/api/data-export','/api/missing','/reports/missing','/owner.html','/owner.js','/setup-search.html','/setup-search.js']
+        for path in paths:
+            with self.subTest(path=path):
+                status,headers,body=self.raw_get(path)
+                self.assertEqual(headers.get('X-Robots-Tag'),'noindex, nofollow')
+                if path.startswith('/api/') or path.startswith('/reports/'):
+                    self.assertEqual(headers['Cache-Control'],'no-store')
+        for path in ['/','/privacy.html','/api-guide.html','/robots.txt','/sitemap.xml','/api-guide.html?from=api','/api-public','/reports-public','/owner.html-public']:
+            self.assertNotIn('X-Robots-Tag',self.raw_get(path)[1],path)
+        for path in ['/api/reports/'+identifier,'/reports/'+identifier+'.html']:
+            status,headers,body=self.raw_get(path,{'Host':'untrusted.example'})
+            self.assertEqual(status,403);self.assertEqual(headers.get('X-Robots-Tag'),'noindex, nofollow')
+
     @classmethod
     def setUpClass(cls):
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), application.Handler)
