@@ -33,7 +33,7 @@ MODEL_ROUTES = {"/api/compare", "/api/judge", "/api/rewrite", "/api/evaluate",
 
 def field(body, key, maximum=MAX_TEXT_CHARS, required=True):
     value = body.get(key, "")
-    if not isinstance(value, str) or len(value) > maximum:
+    if not isinstance(value, str) or (maximum is not None and len(value) > maximum):
         raise ValueError(f"Некорректное значение поля «{key}».")
     if required and not value.strip():
         raise ValueError(f"Заполните поле «{key}».")
@@ -81,6 +81,9 @@ def status_payload(counts):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Istok/0.1"
+
+    def check_text(self, body):
+        return field(body, "text")
 
     def log_message(self, message, *arguments):
         logging.info(message, *arguments)
@@ -424,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 raise
         if method == "POST" and path == "/api/check":
-            text = field(body, "text")
+            text = self.check_text(body)
             reservation = None
             if runtime:
                 reservation = runtime.ledger.reserve_check(self.identity.user["id"], self.identity.device,

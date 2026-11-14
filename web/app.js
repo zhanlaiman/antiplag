@@ -42,7 +42,9 @@ function storageSet(key, value) {
 
 function isSaas() { return state.session?.mode === 'saas'; }
 function isBeta() { return Boolean(state.session?.beta); }
-function checkTextLimit() { return isBeta() ? state.session.beta.max_characters : 200000; }
+function ownerWithoutTextLimit() { return isBeta() && state.session.beta.owner === true && state.session.beta.max_characters === null; }
+function checkTextLimit() { return ownerWithoutTextLimit() ? Infinity : isBeta() ? state.session.beta.max_characters : 200000; }
+function documentTextLimit() { return ownerWithoutTextLimit() ? Infinity : 200000; }
 function privateAccess() {
   return state.sessionReady && !state.sessionExpired && !state.sessionTransition
     && (!isSaas() || Boolean(state.session.user?.email_verified));
@@ -296,9 +298,16 @@ async function api(path, data, method) {
   const verb = method || (data === undefined ? 'GET' : 'POST');
   const headers = data === undefined ? {} : { 'Content-Type': 'application/json' };
   if (isSaas() && verb !== 'GET') headers['X-Istok-CSRF'] = state.session.csrf_token || '';
+  const body = data === undefined ? undefined : JSON.stringify(data);
+  if (isBeta() && body !== undefined && new TextEncoder().encode(body).byteLength > (state.session.beta.max_request_bytes || 2000000)) {
+    const error = new Error('Размер одного запроса превышает 2 МБ. Разделите текст на части; исходный текст сохранён в редакторе.');
+    error.status = 413;
+    error.code = 'request_too_large';
+    throw error;
+  }
   const response = await fetch(path, {
     method: verb, headers, credentials: 'same-origin',
-    body: data === undefined ? undefined : JSON.stringify(data),
+    body,
   });
   let result;
   try { result = await response.json(); }
@@ -1267,12 +1276,13 @@ function updateCharacterCount() {
   const wordCount = document.querySelector('#word-count');
   if (wordCount) wordCount.textContent = `${number(textStatistics(state.text).words)} ${wordUnit(textStatistics(state.text).words)}`;
 }
-function textLengthError(text) {
-  return chars(text).length > checkTextLimit() ? `В тексте больше ${number(checkTextLimit())} знаков. Сократите его перед проверкой.` : '';
+function textLengthError(text, maximum = checkTextLimit()) {
+  return chars(text).length > maximum ? `В тексте больше ${number(maximum)} знаков. Сократите его перед проверкой.` : '';
 }
 
 function validateTextLength(target) {
-  const message = textLengthError(target.value);
+  const maximum = target.id === 'source-text' && isBeta() ? 10000 : checkTextLimit();
+  const message = textLengthError(target.value, maximum);
   target.setCustomValidity(message);
   target.setAttribute('aria-invalid', message ? 'true' : 'false');
   const error = document.getElementById(target.id === 'check-text' ? 'check-error' : 'source-text-limit-error');
@@ -1315,7 +1325,7 @@ function decodeTextFile(buffer) {
   if (/[\u0000-\u0008\u000b\u000e-\u001f\u007f-\u009f]/u.test(text)) {
     throw new Error('Файл содержит двоичные данные или неподдерживаемую кодировку. Сохраните обычный текст в UTF-8.');
   }
-  if (chars(text).length > 200000) {
+  if (chars(text).length > documentTextLimit()) {
     throw new Error('В файле больше 200 000 знаков. Выберите более короткий текст.');
   }
   return { text, encoding, guessed };
@@ -1435,7 +1445,8 @@ function renderHome() {
             <textarea id="home-text" aria-label="Текст для проверки уникальности" placeholder="Вставьте текст вашей работы…"></textarea>
             <p id="home-text-import-hint" class="field-help" role="status" hidden></p>
             ${proofreaderHTML('home')}
-            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>До ${number(checkTextLimit())} знаков${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
+            <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>${ownerWithoutTextLimit() ? 'Без лимита знаков' : `До ${number(checkTextLimit())} знаков`}${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
+            ${ownerWithoutTextLimit() ? '<p class="field-help">Один запрос — до 2 МБ. Интернет-поиск выбирает до 6 фраз из всего текста; больший объём не увеличивает число запросов и не гарантирует полный охват.</p>' : ''}
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; остальные документы до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текст для интернет-проверки"></label>
             <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста Tavily и Википедии для поиска источников.</span></label>
             <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
@@ -1583,10 +1594,10 @@ function restoreBatch() {
     let total = 0;
     return saved.filter(doc => {
       if (!doc || !/^[a-f0-9]{32}$/.test(doc.id) || typeof doc.name !== 'string' || doc.name.length > 255
-        || typeof doc.text !== 'string' || chars(doc.text).length > 200000
+        || typeof doc.text !== 'string' || chars(doc.text).length > documentTextLimit()
         || doc.request_id && !/^[a-f0-9]{32}$/.test(doc.request_id)) return false;
       total += chars(doc.text).length;
-      return total <= 200000;
+      return total <= documentTextLimit();
     });
   } catch { return []; }
 }
@@ -1620,7 +1631,7 @@ async function importBatchFiles(files) {
       try {
         const decoded = await decodeBatchFile(file);
         if (!decoded.text.trim()) throw new Error('Текст не извлечён.');
-        if (state.batch.reduce((sum,doc) => sum + chars(doc.text).length,0) + chars(decoded.text).length > 200000) throw new Error('Суммарный предел пакета — 200 000 знаков.');
+        if (state.batch.reduce((sum,doc) => sum + chars(doc.text).length,0) + chars(decoded.text).length > documentTextLimit()) throw new Error('Суммарный предел пакета — 200 000 знаков.');
         state.batch.push({id:crypto.randomUUID().replaceAll('-',''),name:file.name.slice(0,255),text:decoded.text,
           note:(decoded.notes || []).join(' ') || (decoded.guessed ? 'Предположительно Windows-1251. Проверьте текст.' : ''),request_id:null});
         if (!saveBatch()) throw new Error('Не удалось сохранить пакет в браузере. Освободите место перед проверкой.');
@@ -1645,7 +1656,7 @@ async function importSiteToBatch(url, consent) {
   try {
     result=await api('/api/import-site',{url,site_consent:true,request_id,limit:Math.min(3,available)});
     for (const page of result.pages) {
-      if (state.batch.reduce((sum,doc)=>sum+chars(doc.text).length,0)+chars(page.text).length>200000) throw new Error('Суммарный предел пакета — 200 000 знаков.');
+      if (state.batch.reduce((sum,doc)=>sum+chars(doc.text).length,0)+chars(page.text).length>documentTextLimit()) throw new Error('Суммарный предел пакета — 200 000 знаков.');
       state.batch.push({id:crypto.randomUUID().replaceAll('-',''),name:page.title.slice(0,255),text:page.text,
         source_url:page.url,note:'Страница '+page.url+'. Собственный сайт исключается при интернет-проверке.',request_id:null});
       if (!saveBatch()) throw new Error('Не удалось сохранить страницы в браузере.');
@@ -1740,7 +1751,7 @@ function renderBatch() {
   document.getElementById('batch-clear').addEventListener('click', () => {if (!state.batchBusy) {state.batch=[];saveBatch();renderBatch();}});
   for (const doc of state.batch) document.getElementById(`batch-text-${doc.id}`).addEventListener('input', event => {
     if (doc.request_id) return;
-    if (state.batchBusy || state.batch.reduce((sum,item) => sum + chars(item === doc ? event.target.value : item.text).length,0) > 200000) {
+    if (state.batchBusy || state.batch.reduce((sum,item) => sum + chars(item === doc ? event.target.value : item.text).length,0) > documentTextLimit()) {
       event.target.value=doc.text;
       showError(new Error('Дождитесь завершения операции; суммарный предел пакета — 200 000 знаков.'));
       return;

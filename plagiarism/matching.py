@@ -10,6 +10,8 @@ from difflib import SequenceMatcher
 import re
 import unicodedata
 
+from plagiarism.text_policy import target_too_long
+
 
 MAX_TEXT_CHARS = 200_000
 MAX_SOURCES = 100
@@ -296,7 +298,7 @@ def analyze(text, sources):
     """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Добавьте текст для проверки.")
-    if len(text) > MAX_TEXT_CHARS:
+    if target_too_long(text, MAX_TEXT_CHARS):
         raise ValueError(f"Текст должен содержать не больше {MAX_TEXT_CHARS} символов.")
     if len(sources) > MAX_SOURCES:
         raise ValueError(f"За одну проверку можно сравнить до {MAX_SOURCES} источников.")

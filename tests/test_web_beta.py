@@ -350,6 +350,62 @@ class WebBetaTests(unittest.TestCase):
             status,_,cleared=self.http('/api/owner/logout',{},owner)
             self.assertEqual(status,200);self.assertIn('Max-Age=0',cleared)
 
+    def test_owner_long_checks_are_complete_idempotent_and_do_not_unlock_guests(self):
+        from hashlib import pbkdf2_hmac
+        original_runner=self.runner
+        def full_runner(text,rid,progress):return {**original_runner(text,rid,progress),'text':text}
+        self.runner=self.service.beta.runner=full_runner
+        salt='56'*32
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,_=self.guest()
+            _,_,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
+            owner=cookie.split(';')[0]
+            session=self.http('/api/session',cookie=owner)[1]['beta']
+            self.assertIsNone(session['max_characters']);self.assertEqual(session['max_request_bytes'],2000000)
+            text='Independent authored background. '*6500+TEXT
+            self.assertGreater(len(text),200000)
+            body={'request_id':'c'*32,'text':text,'internet_consent':True}
+            status,result,_=self.http('/api/web-check-jobs',body,owner)
+            self.assertEqual(status,200,result)
+            for _ in range(1000):
+                job=self.http('/api/jobs/'+body['request_id'],cookie=owner)[1]['job']
+                if job['status'] in {'complete','failed'}:break
+                time.sleep(.01)
+            self.assertEqual(job['status'],'complete',job)
+            report=job['result']['report'];self.assertEqual(report['stats']['total_characters'],len(text))
+            self.assertTrue(any(m['start']>200000 and m['kind']=='exact' for m in report['matches']))
+            self.assertEqual(report['text'],text)
+            self.assertEqual(self.http('/api/web-check-jobs',body,owner)[1]['job']['result']['report'],report)
+            self.assertEqual(len(self.calls),1)
+            self.assertEqual(self.http('/api/web-check-jobs',{**body,'owner':True},guest)[0],400)
+            self.assertEqual(self.http('/api/library-check-jobs',body,guest)[0],400)
+            self.assertEqual(self.http('/api/check',body,guest)[0],400)
+            outsider,_=self.guest()
+            self.assertEqual(self.http('/api/reports/'+report['id'],cookie=outsider)[0],404)
+            self.assertEqual(self.http('/api/session',cookie=guest)[1]['beta']['max_characters'],10000)
+            # The separate library path also removes the beta character allowance.
+            library_text='Unrelated authored context. '*400+TEXT
+            body2={'request_id':'d'*32,'text':library_text}
+            status,result,_=self.http('/api/library-check-jobs',body2,owner)
+            self.assertEqual(status,200,result)
+            for _ in range(1000):
+                library=self.http('/api/jobs/'+body2['request_id'],cookie=owner)[1]['job']
+                if library['status'] in {'complete','failed'}:break
+                time.sleep(.01)
+            self.assertEqual(library['status'],'complete',library)
+            self.assertEqual(library['result']['report']['text'],library_text)
+            self.assertEqual(self.http('/api/check',{'text':library_text},owner)[0],200)
+            # Byte-size protection is independent from the removed character cap.
+            connection=HTTPConnection('127.0.0.1',self.service.server_port,timeout=5)
+            connection.request('POST','/api/web-check-jobs',b'{}',{'Host':'beta.example',
+                'Origin':'http://beta.example','Cookie':owner,'Content-Type':'application/json','Content-Length':'2000001'})
+            response=connection.getresponse();self.assertEqual(response.status,400);response.read();connection.close()
+            self.stop();self.start()
+            self.assertEqual(self.http('/api/reports/'+report['id'],cookie=owner)[1]['report'],report)
+            self.assertEqual(self.http('/api/web-check-jobs',body,owner)[1]['job']['result']['report'],report)
+            self.assertEqual(len(self.calls),1)
+
     def test_invalid_cookie_creates_a_new_isolated_guest(self):
         cookie,_=self.guest();report=self.check(cookie,'1'*32)
         parts=SimpleCookie();parts.load(cookie);value=parts['istok_beta'].value

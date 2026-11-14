@@ -35,7 +35,7 @@ class ModalPreparationTests(unittest.TestCase):
 
     def test_upload_covers_direct_project_import_dependencies(self):
         allowed = set(runner.UPLOAD_FILES)
-        self.assertEqual(len(allowed), 19)
+        self.assertEqual(len(allowed), 20)
         self.assertTrue({"plagiarism/llm.py", "plagiarism/cloud_transport.py",
                          "plagiarism/cloud_contract.py", "plagiarism/data_management.py"}.issubset(allowed))
         for relative in allowed:

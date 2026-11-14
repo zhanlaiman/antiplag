@@ -28,6 +28,7 @@ from plagiarism.html_evidence import POLICY as HTML_EVIDENCE_POLICY, source_view
 from plagiarism.input_references import extract_named_references
 from plagiarism.query_paragraphs import PARAGRAPH_STRATEGY, SHORT_PARAGRAPH_STRATEGY, paragraph_redundancy_queries
 from plagiarism.query_clauses import CLAUSE_STRATEGY, clause_boundary_queries
+from plagiarism.text_policy import target_too_long
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -200,7 +201,7 @@ def _dense_queries(text, limit):
 
 
 def plan_queries(text, limit=MAX_QUERIES, strategy=DEFAULT_QUERY_STRATEGY):
-    if not isinstance(text, str) or not 35 <= len(text) <= MAX_TEXT_CHARS:
+    if not isinstance(text, str) or len(text) < 35 or target_too_long(text, MAX_TEXT_CHARS):
         raise ValueError("Для проверки по интернету нужен текст от 35 до 200 000 символов.")
     if type(limit) is not int or not 1 <= limit <= MAX_QUERIES:
         raise ValueError("Неверный лимит поисковых запросов.")

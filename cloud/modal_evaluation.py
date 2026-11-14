@@ -26,7 +26,7 @@ UPLOAD_FILES = (
     "cloud/modal_evaluation.py",
     "plagiarism/__init__.py", "plagiarism/cloud_contract.py", "plagiarism/cloud_transport.py",
     "plagiarism/demo.py", "plagiarism/evaluation.py", "plagiarism/data_management.py",
-    "plagiarism/jobs.py", "plagiarism/llm.py", "plagiarism/matching.py",
+    "plagiarism/jobs.py", "plagiarism/llm.py", "plagiarism/matching.py", "plagiarism/text_policy.py",
     "plagiarism/pipeline_evaluation.py", "plagiarism/retrieval.py",
     "plagiarism/retrieval_evaluation.py", "plagiarism/source_packs.py", "plagiarism/storage.py",
     "scripts/evaluate_pipeline.py", "scripts/benchmark_model.py",

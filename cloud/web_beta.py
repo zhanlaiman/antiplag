@@ -28,6 +28,7 @@ from plagiarism.correction_jobs import CorrectionQuota,ModalCorrector,internal_i
 from plagiarism.ai_proofreading import request_payload
 from plagiarism.jobs import Jobs
 from plagiarism.site_import import fetch_site,public_page_url,ExcludingFetcher
+from plagiarism.text_policy import owner_target_text
 
 COOKIE='istok_beta'
 MAX_CHARACTERS=10000
@@ -373,6 +374,9 @@ class BetaRuntime:
 
 
 class BetaHandler(server.Handler):
+    def check_text(self,body):
+        return server.field(body,'text',None if self.owner else MAX_CHARACTERS)
+
     def trusted_request(self):
         if getattr(self,'api_token',None) and urlsplit(self.path).path.startswith('/api/v1/'):
             return self.server.beta.trusted_api(self.headers)
@@ -422,7 +426,8 @@ class BetaHandler(server.Handler):
                     ('POST','/api/v1/checks'):('checks:write','/api/web-check-jobs')}
             if method=='GET' and path=='/api/v1/quota':
                 require_scope(self.api_token,'quota:read')
-                return {'quota':beta.remaining(self.guest,owner=True),'max_characters':MAX_CHARACTERS,'monthly_search_queries':MONTHLY_SEARCHES}
+                return {'quota':beta.remaining(self.guest,owner=True),'max_characters':None,
+                        'max_request_bytes':server.MAX_BODY,'monthly_search_queries':MONTHLY_SEARCHES}
             match=re.fullmatch(r'/api/v1/(reports|jobs)/([a-f0-9]{32})',path)
             if method=='GET' and match:
                 require_scope(self.api_token,'reports:read')
@@ -457,7 +462,8 @@ class BetaHandler(server.Handler):
         if method=='GET' and path=='/api/status' and self.tenant is None:
             return server.status_payload(beta.status_counts(self.guest))
         if method=='GET' and path=='/api/session':
-            return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,'max_characters':MAX_CHARACTERS,
+            return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,
+                'max_characters':None if self.owner else MAX_CHARACTERS,'max_request_bytes':server.MAX_BODY,
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES,
                 'ai_correction':{'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}}}
         if method=='GET' and path=='/api/correction-quota':
@@ -467,13 +473,15 @@ class BetaHandler(server.Handler):
         if method=='POST' and path=='/api/import-site':
             return beta.import_site(self.guest,body)
         if method=='POST' and path=='/api/library-check-jobs':
-            text=server.field(body,'text',MAX_CHARACTERS)
+            text=self.check_text(body)
             identifier=body.get('request_id');store=self.tenant.store
             saas.ensure_job_identifier(store,identifier)
+            owner=bool(self.owner)
             def operation(progress):
                 progress('Сверяем с вашей библиотекой',0,1)
                 sources=store.sources()
-                result=server.analyze(text,sources)
+                with owner_target_text(owner):
+                    result=server.analyze(text,sources)
                 report=store.save('report',{**result,'id':saas.report_identifier(identifier),
                     'text':text,'sources':sources,'scope':'local_library'})
                 return {'report':server.public_report(report,store.match_reviews(report['id']))}
@@ -503,20 +511,23 @@ class BetaHandler(server.Handler):
         if not allowed:raise access.AccessError('Эта операция недоступна в онлайн-бете.','operation_forbidden',403)
         if method=='POST':
             text=body.get('text','')
-            if not isinstance(text,str) or len(text)>MAX_CHARACTERS:
+            owner_check=bool(self.owner) and path in {'/api/check','/api/web-check-jobs'}
+            if not isinstance(text,str) or (not owner_check and len(text)>MAX_CHARACTERS):
                 raise access.AccessError('В онлайн-бете проверяем до 10 000 знаков за один раз.','beta_text_limit',400)
             if path=='/api/sources' and self.tenant.store.data_summary()['totals']['sources']>=37:
                 raise access.AccessError('В бете можно добавить до пяти собственных источников.','beta_source_limit',429)
         if method=='POST' and path=='/api/web-check-jobs':
             if body.get('internet_consent') is not True:raise access.AccessError('Нужно согласие на интернет-поиск.','internet_consent_required',400)
-            text=server.field(body,'text',MAX_CHARACTERS);identifier=body.get('request_id')
+            text=self.check_text(body);identifier=body.get('request_id')
             store,jobs=self.tenant.store,self.tenant.jobs
             saas.ensure_job_identifier(store,identifier)
             remote_id=sha256((self.guest+'\0'+identifier).encode()).hexdigest()[:32]
             source_url=public_page_url(body['source_url'])['url'] if body.get('source_url') else None
+            owner=bool(self.owner)
             def operation(progress):
                 try:
-                    payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}))
+                    with owner_target_text(owner):
+                        payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}))
                 except SearchNotStarted:
                     beta.release_unstarted_check(self.guest,identifier)
                     raise
@@ -534,6 +545,9 @@ class BetaHandler(server.Handler):
                     if not store.get('model-request','model-request:'+identifier) and identifier not in jobs.items:
                         beta.release_unstarted_check(self.guest,identifier)
                     raise
+        if method=='POST' and path=='/api/check':
+            with owner_target_text(bool(self.owner)):
+                return super().route(method,path,body)
         return super().route(method,path,body)
 
     def send_json(self,result,status=200):

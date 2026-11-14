@@ -121,7 +121,7 @@ function fixture({ stored = {}, fetch: customFetch, view = 'check', turnstile } 
   initial.innerHTML = documentHTML;
   const location = { hash: `#${view}`, reload() { reloads.push(true); } };
   const context = vm.createContext({
-    document, location, console, btoa: value => Buffer.from(value,'binary').toString('base64'), TextDecoder, Uint8Array, Event, Blob, crypto: webcrypto,
+    document, location, console, btoa: value => Buffer.from(value,'binary').toString('base64'), TextEncoder, TextDecoder, Uint8Array, Event, Blob, crypto: webcrypto,
     URL: class extends URL {
       static createObjectURL(blob) { const url = `blob:fixture-${blobs.size}`; blobs.set(url, blob); return url; }
       static revokeObjectURL(url) { blobs.delete(url); }
@@ -1686,4 +1686,38 @@ test('site preview needs consent and only checks imported pages after explicit b
   assert.equal(imports,1);assert.equal(checks,0);
   assert.equal(app.evaluate('state.batch[0].source_url'),'https://example.org/page');
   assert.equal(app.evaluate('state.batch[0].request_id'),null);
+});
+
+test('authenticated owner can submit and restore long text without changing guest limits', async () => {
+  let checks=0;
+  const app=fixture({view:'home',fetch(url,body){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'owner-space',owner:true,max_characters:null,max_request_bytes:2000000}});
+    if(url==='/api/web-check-jobs'){checks++;assert.equal(body.text.length,250000);return json({job:{id:body.request_id,status:'failed',error:'Synthetic terminal receipt'}});}
+  }});await settle();
+  assert.equal(app.evaluate("textLengthError('x'.repeat(250000))"),'');
+  assert.match(app.element('main-content').innerHTML,/Без лимита знаков/);
+  assert.doesNotMatch(app.element('main-content').innerHTML,/Infinity/);
+  app.expose('longText','x'.repeat(250000));
+  await app.evaluate("api('/api/web-check-jobs',{text:longText,request_id:'a'.repeat(32),internet_consent:true})");
+  assert.equal(checks,1);
+  app.evaluate("saveDraft(longText)");
+  assert.equal(app.evaluate('restoreDraft().length'),250000);
+  app.evaluate("state.batch=[{id:'b'.repeat(32),name:'long.txt',text:longText}];saveBatch()");
+  assert.equal(app.evaluate('restoreBatch()[0].text.length'),250000);
+  app.evaluate("state.session.beta.owner=false;state.session.beta.max_characters=10000");
+  assert.match(app.evaluate("textLengthError('x'.repeat(10001))"),/10.?000/);
+  assert.equal(app.evaluate('restoreBatch().length'),0);
+});
+
+test('oversized UTF-8 request is rejected before sending and leaves the owner draft intact', async () => {
+  let posts=0;
+  const app=fixture({fetch(url){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'owner-space',owner:true,max_characters:null,max_request_bytes:2000000}});
+    if(url==='/api/web-check-jobs')posts++;
+  }});await settle();
+  app.expose('longText','🙂'.repeat(500000));app.evaluate('saveDraft(longText)');
+  await assert.rejects(app.evaluate("api('/api/web-check-jobs',{text:longText})"),error=>error.status===413&&error.code==='request_too_large');
+  assert.equal(posts,0);assert.equal(app.evaluate('restoreDraft()===longText'),true);
+  app.evaluate('state.session.beta.owner=false');
+  assert.notEqual(app.evaluate("textLengthError('x'.repeat(10001))"),'');
 });
