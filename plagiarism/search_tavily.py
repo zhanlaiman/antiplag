@@ -32,7 +32,11 @@ def _url(value):
 class TavilySearch:
     provider = "tavily"
 
-    def __init__(self, budget):
+    def __init__(self, budget, *, exact_match=False):
+        if type(exact_match) is not bool:
+            raise ValueError("Exact phrase policy requires a boolean")
+        self.exact_match = exact_match
+        self.query_policy = "tavily-basic-exact-phrases-v1" if exact_match else "tavily-basic-legacy-v1"
         self.key = key_for("tavily")
         if not self.key or len(self.key) > 1024 or any(not 33 <= ord(char) <= 126 for char in self.key):
             raise WebSearchError("Поиск Tavily ещё не подключён. Нужен серверный ключ API.", "web_not_configured")
@@ -45,9 +49,13 @@ class TavilySearch:
                 or any(ord(char) < 32 for char in query)
                 or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id)):
             raise WebSearchError("Некорректный поисковый запрос.", "invalid_search_query")
+        if self.exact_match and (not query.startswith('"') or not query.endswith('"') or query.count('"') != 2):
+            raise WebSearchError("Для точного поиска нужна одна фраза в кавычках.", "invalid_search_query")
         body = {"query": query, "search_depth": "basic", "auto_parameters": False,
                 "topic": "general", "max_results": 5, "include_answer": False,
                 "include_raw_content": False, "include_usage": True}
+        if self.exact_match:
+            body["exact_match"] = True
         try:
             data = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
         except UnicodeError:

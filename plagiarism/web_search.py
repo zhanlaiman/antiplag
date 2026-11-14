@@ -782,6 +782,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         source_snapshots = zero_phase["prefix_sources"] + [source for source in source_snapshots if source["id"] not in prefix_ids]
     result.update(text=text, sources=source_snapshots, scope="web_search", web={
         "provider": provider, "status": "complete" if complete else "partial",
+        "provider_query_policy": getattr(searcher, "query_policy", None),
         "post_wiki_enabled": False,
         "query_strategy": query_strategy, "url_strategy": url_strategy, "matcher_version": MATCHER_VERSION,
         "zero_fallback_enabled": use_zero_fallback,

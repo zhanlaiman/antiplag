@@ -71,6 +71,30 @@ class TavilySearchTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "search_already_attempted")
         self.assertEqual(self.searcher.opener.open.call_count, 1)
 
+    def test_exact_phrase_opt_in_changes_only_the_flag_and_keeps_basic_credit_and_url_evidence(self):
+        exact=search_tavily.TavilySearch(Budget(),exact_match=True)
+        exact.opener=Mock()
+        values={"results":[{"url":"https://example.org/article","content":"Unverified snippet"}],"usage":{"credits":1}}
+        exact.opener.open.return_value=response(values)
+        self.searcher.opener.open.return_value=response(values)
+        phrase='"шесть исходных слов остаются в прежнем порядке"'
+        exact_result=exact.search(phrase,'exact-1');legacy_result=self.searcher.search(phrase,'legacy-1')
+        exact_body=json.loads(exact.opener.open.call_args.args[0].data)
+        legacy_body=json.loads(self.searcher.opener.open.call_args.args[0].data)
+        self.assertEqual(exact_body,{**legacy_body,'exact_match':True})
+        self.assertEqual(exact_result,legacy_result)
+        self.assertEqual(exact.last_usage,{'credits':1})
+        self.assertEqual(exact.query_policy,'tavily-basic-exact-phrases-v1')
+        self.assertEqual(exact.budget.finished,['exact-1'])
+
+    def test_exact_policy_rejects_ambiguous_flags_and_unquoted_phrases_before_network_or_budget(self):
+        for flag in (1,0,'true',None):
+            with self.assertRaises(ValueError):search_tavily.TavilySearch(self.budget,exact_match=flag)
+        exact=search_tavily.TavilySearch(self.budget,exact_match=True);exact.opener=Mock()
+        for phrase in ('unquoted words','"one" "two"','"only one end'):
+            with self.assertRaises(WebSearchError):exact.search(phrase,'invalid-exact')
+        exact.opener.open.assert_not_called();self.assertEqual(self.budget.reserved,set())
+
     def test_malformed_or_http_200_error_is_not_successful_empty_search(self):
         invalid = [{}, [], {"error": "private provider details", "results": []},
                    {"detail": {"error": "bad request"}, "results": []}, {"success": False, "results": []},
