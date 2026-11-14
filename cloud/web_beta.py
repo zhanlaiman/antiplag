@@ -232,6 +232,10 @@ class BetaRuntime:
             db.execute('INSERT OR IGNORE INTO owner_account VALUES (1,?)',(guest,))
             guest=db.execute('SELECT guest FROM owner_account WHERE id=1').fetchone()[0]
             db.execute('DELETE FROM owner_attempts')
+        self.admit_space(guest)
+        # Failed passwords use owner_attempts; only authenticated mutations may
+        # enter rates, whose historic rows are promoted into admitted spaces.
+        self.mutation(guest)
         expiry=str(int(time.time())+7*86400);nonce=secrets.token_hex(16)
         value='.'.join((guest,expiry,nonce))
         signature=hmac.new(self.key,('owner.'+value).encode(),sha256).hexdigest()
@@ -439,10 +443,14 @@ class BetaHandler(server.Handler):
                     self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
                 if cookie:self.response_headers.append(('Set-Cookie',cookie))
                 self.tenant=None
-                if not (method=='GET' and path in {'/api/session','/api/status'}):
+                # Authentication needs no new guest tenant. Admit the stable
+                # owner ID only after owner_login validates the credentials.
+                if not ((method=='GET' and path in {'/api/session','/api/status'})
+                        or (method=='POST' and path=='/api/owner/login')):
                     self.server.beta.admit_space(self.guest)
                     self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
-                if method not in {'GET','HEAD'}:self.server.beta.mutation(self.guest)
+                if method not in {'GET','HEAD'} and not (method=='POST' and path=='/api/owner/login'):
+                    self.server.beta.mutation(self.guest)
             except access.AccessError as error:
                 payload={'error':str(error),'code':error.code}
                 if getattr(error,'retry_after',None) is not None:
