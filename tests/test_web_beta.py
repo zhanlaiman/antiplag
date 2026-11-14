@@ -12,6 +12,7 @@ from unittest.mock import Mock,patch
 
 from cloud.web_beta import BetaRuntime,create_server
 from cloud.modal_web import source_manifest
+from plagiarism import web_search
 from plagiarism.matching import analyze
 from plagiarism.saas import report_identifier
 
@@ -636,13 +637,14 @@ class WebBetaTests(unittest.TestCase):
             budget=factory.call_args.args[0];self.assertEqual(budget.limit,180)
             self.assertEqual(budget.path,self.service.beta.root/'search-budget.sqlite3')
             self.assertIs(pipeline.call_args.kwargs['searcher'],factory.return_value)
+            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],web_search.DEFAULT_QUERY_STRATEGY)
 
     def test_yandex_uses_its_guarded_adapter_short_sentence_plan_and_unchanged_site_budget(self):
         with patch('cloud.web_beta.YandexSerpAPISearch')as factory,patch('cloud.web_beta.SerpAPISearch')as google,patch('cloud.web_beta.MediaWikiSearch'),patch('cloud.web_beta.web_search.run',return_value={'ok':True})as pipeline:
             self.assertEqual(self.service.beta.run_web(TEXT,'fixture',provider='serpapi-yandex'),{'ok':True})
             google.assert_not_called();factory.return_value.confirm_free.assert_called_once()
             self.assertEqual(factory.call_args.args[0].limit,180)
-            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v10-short-center')
+            self.assertEqual(pipeline.call_args.kwargs['query_strategy'],'hybrid-citation-v11-short-pure')
 
     def test_yandex_consent_is_distinct_and_switch_preserves_legacy_receipts_across_restart(self):
         providers=[]

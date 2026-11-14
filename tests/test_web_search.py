@@ -60,6 +60,35 @@ class WebSearchTests(unittest.TestCase):
             self.assertNotIn("internal detail", error["message"])
             self.assertIsNone(report["stats"]["uniqueness_percent"])
 
+    def test_provider_defaults_agree_with_executed_report_without_network(self):
+        # Promoting Yandex must not promote the other adapters with it.
+        for provider, strategy in (("serpapi-yandex", web_search.SHORT_PURE_STRATEGY),
+                                   ("serpapi", web_search.DEFAULT_QUERY_STRATEGY),
+                                   ("tavily", web_search.DEFAULT_QUERY_STRATEGY),
+                                   ("brave", web_search.DEFAULT_QUERY_STRATEGY)):
+            with self.subTest(provider=provider), patch.object(web_search, "selected_provider", return_value=provider), \
+                    patch.dict(os.environ, {}, clear=True):
+                search = Search([])
+                report = web_search.run(TEXT, searcher=search, fetcher=Pages(),
+                                        use_zero_fallback=False, use_wiki_followup=False,
+                                        use_related_fallback=False)
+                self.assertEqual(web_search.status()["query_strategy"], strategy)
+                self.assertEqual(report["web"]["query_strategy"], strategy)
+                self.assertEqual([call[0] for call in search.calls],
+                                 [item["query"] for item in web_search.plan_queries(TEXT, strategy=strategy)])
+                self.assertLessEqual(len(search.calls), 6)
+                self.assertIsNone(report["stats"]["uniqueness_percent"])
+
+    def test_promoted_yandex_keeps_explicit_v10_available(self):
+        with patch.object(web_search, "selected_provider", return_value="serpapi-yandex"), \
+                patch.dict(os.environ, {}, clear=True):
+            report = web_search.run(TEXT, searcher=Search([]), fetcher=Pages(),
+                                    query_strategy=web_search.SHORT_CENTER_STRATEGY,
+                                    use_zero_fallback=False, use_wiki_followup=False,
+                                    use_related_fallback=False)
+            self.assertEqual(report["web"]["query_strategy"], web_search.SHORT_CENTER_STRATEGY)
+            self.assertIsNone(report["stats"]["uniqueness_percent"])
+
     def test_full_copy_has_zero_word_uniqueness_including_with_quote_formatting(self):
         for text in (TEXT, '«' + TEXT + '»'):
             report = web_search.run(text, searcher=Search(), fetcher=Pages())

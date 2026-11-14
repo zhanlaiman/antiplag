@@ -273,7 +273,7 @@ def status():
     zero_fallback = os.environ.get("ISTOK_WEB_ZERO_FALLBACK", "1" if DEFAULT_ZERO_FALLBACK else "0") == "1"
     wiki_followup = os.environ.get("ISTOK_WEB_WIKI_FOLLOWUP", "1" if DEFAULT_WIKI_FOLLOWUP else "0") == "1"
     return {"provider": provider, "configured": configured,
-            "query_strategy": SHORT_CENTER_STRATEGY if provider == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY,
+            "query_strategy": SHORT_PURE_STRATEGY if provider == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY,
             "max_queries": MAX_QUERIES + (2 if wiki_followup else 0),
             "max_primary_queries": MAX_QUERIES, "max_secondary_queries": 2 if wiki_followup else 0,
             "secondary_provider": "mediawiki" if wiki_followup else None,
@@ -564,7 +564,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
     max_page_attempts = MAX_URLS + ZERO_FALLBACK_EXTRA_URLS if use_zero_fallback else MAX_URLS
     if query_strategy is None:
         query_strategy = os.environ.get("ISTOK_WEB_QUERY_STRATEGY",
-            SHORT_CENTER_STRATEGY if selected_provider() == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY)
+            SHORT_PURE_STRATEGY if selected_provider() == "serpapi-yandex" else DEFAULT_QUERY_STRATEGY)
     queries = plan_queries(text, strategy=query_strategy)
     request_id = request_id or uuid4().hex
     if searcher is None:
