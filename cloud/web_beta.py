@@ -184,12 +184,15 @@ class BetaRuntime:
         with closing(self.connect()) as db,db:
             if db.execute('SELECT 1 FROM active_guests WHERE id=? AND month=?',(guest,month)).fetchone():return
             db.execute('BEGIN IMMEDIATE')
-            if db.execute('SELECT 1 FROM active_guests WHERE id=? AND month=?',(guest,month)).fetchone():return
-            if db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0]>=100:
-                raise access.AccessError('На этот месяц места в бесплатной бете закончились.','beta_capacity',429)
-            db.execute('INSERT INTO active_guests VALUES (?,?)',(guest,month))
-            db.execute('INSERT OR IGNORE INTO guests VALUES (?,?)',(guest,month))
+            self._admit_space(db,guest,month)
         self.persist()
+
+    def _admit_space(self,db,guest,month):
+        if db.execute('SELECT 1 FROM active_guests WHERE id=? AND month=?',(guest,month)).fetchone():return
+        if db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0]>=100:
+            raise access.AccessError('На этот месяц места в бесплатной бете закончились.','beta_capacity',429)
+        db.execute('INSERT INTO active_guests VALUES (?,?)',(guest,month))
+        db.execute('INSERT OR IGNORE INTO guests VALUES (?,?)',(guest,month))
 
     def status_counts(self,guest):
         path=self.root/'tenants'/guest/'istok.sqlite3'
@@ -218,6 +221,7 @@ class BetaRuntime:
         password=body.get('password','');login=body.get('username','')
         if not isinstance(password,str) or len(password)>256 or not isinstance(login,str):raise ValueError('Некорректный вход')
         with closing(self.connect()) as db,db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS owner_attempts(at REAL)')
             db.execute('DELETE FROM owner_attempts WHERE at<?',(time.time()-900,))
             if db.execute('SELECT count(*) FROM owner_attempts').fetchone()[0]>=20:
@@ -228,19 +232,24 @@ class BetaRuntime:
         if not (hmac.compare_digest(login.encode(),username.encode()) and hmac.compare_digest(candidate,digest)):
             raise access.AccessError('Неверный логин или пароль.','owner_login_failed',401)
         with closing(self.connect()) as db,db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS owner_account(id INTEGER PRIMARY KEY CHECK(id=1),guest TEXT NOT NULL)')
+            existing=db.execute('SELECT guest FROM owner_account WHERE id=1').fetchone()
+            guest=existing[0] if existing else guest
+            day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            self._admit_space(db,guest,day[:7])
+            self._reserve_mutation(db,guest,day)
+            self._check_storage()
+            # Prepare the credential before committing any ownership change.
+            # Rejections roll back admission, daily usage and adoption together.
+            expiry=str(int(time.time())+7*86400);nonce=secrets.token_hex(16)
+            value='.'.join((guest,expiry,nonce))
+            signature=hmac.new(self.key,('owner.'+value).encode(),sha256).hexdigest()
+            cookie='istok_owner='+value+'.'+signature+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+('; Secure' if self.secure else '')
             db.execute('INSERT OR IGNORE INTO owner_account VALUES (1,?)',(guest,))
-            guest=db.execute('SELECT guest FROM owner_account WHERE id=1').fetchone()[0]
             db.execute('DELETE FROM owner_attempts')
-        self.admit_space(guest)
-        # Failed passwords use owner_attempts; only authenticated mutations may
-        # enter rates, whose historic rows are promoted into admitted spaces.
-        self.mutation(guest)
-        expiry=str(int(time.time())+7*86400);nonce=secrets.token_hex(16)
-        value='.'.join((guest,expiry,nonce))
-        signature=hmac.new(self.key,('owner.'+value).encode(),sha256).hexdigest()
         self.persist()
-        return 'istok_owner='+value+'.'+signature+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800'+('; Secure' if self.secure else '')
+        return cookie
 
     def trusted(self,headers,method):
         host=headers.get('Host','')
@@ -258,9 +267,15 @@ class BetaRuntime:
         day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
         with closing(self.connect()) as db,db:
             db.execute('BEGIN IMMEDIATE')
-            row=db.execute('SELECT count FROM rates WHERE guest=? AND day=?',(guest,day)).fetchone()
-            if row and row[0]>=40:raise access.AccessError('Лимит действий беты на сегодня исчерпан.','beta_rate_limit',429)
-            db.execute('INSERT INTO rates VALUES (?,?,1) ON CONFLICT(guest,day) DO UPDATE SET count=count+1',(guest,day))
+            self._reserve_mutation(db,guest,day)
+        self._check_storage()
+
+    def _reserve_mutation(self,db,guest,day):
+        row=db.execute('SELECT count FROM rates WHERE guest=? AND day=?',(guest,day)).fetchone()
+        if row and row[0]>=40:raise access.AccessError('Лимит действий беты на сегодня исчерпан.','beta_rate_limit',429)
+        db.execute('INSERT INTO rates VALUES (?,?,1) ON CONFLICT(guest,day) DO UPDATE SET count=count+1',(guest,day))
+
+    def _check_storage(self):
         # Bound all beta files well below the free storage allowance.
         used=0
         for path in self.root.rglob('*.sqlite3*'):

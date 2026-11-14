@@ -397,6 +397,85 @@ class WebBetaTests(unittest.TestCase):
             status,result,_=self.http('/api/owner/login',login,stale)
             self.assertEqual((status,result['code']),(429,'beta_rate_limit'))
 
+    def test_rejected_first_adoption_preserves_guest_report_after_forty_real_mutations(self):
+        from hashlib import pbkdf2_hmac
+        from contextlib import closing
+        salt='67'*32
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,identifier=self.guest();report_id=self.check(guest,'c'*32)
+            before=self.http('/api/reports/'+report_id,cookie=guest)[1]
+            for _ in range(39):self.assertEqual(self.http('/api/owner/logout',{},guest)[0],200)
+            status,result,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
+            self.assertEqual((status,result['code']),(429,'beta_rate_limit'))
+            self.assertNotIn('istok_owner=',cookie or '')
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=guest)[1],before)
+            with closing(self.service.beta.connect()) as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_account'").fetchone())
+                self.assertEqual(db.execute('SELECT count FROM rates WHERE guest=?',(identifier,)).fetchone()[0],40)
+            self.stop();self.start()
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=guest)[1],before)
+
+    def test_owner_transition_rolls_back_storage_and_cookie_preparation_failures(self):
+        from hashlib import pbkdf2_hmac
+        from contextlib import closing
+        from plagiarism.access import AccessError
+        salt='89'*32;runtime=self.service.beta
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,identifier=self.guest();report_id=self.check(guest,'b'*32)
+            before=self.http('/api/reports/'+report_id,cookie=guest)[1]
+            for failure in ['storage','cookie']:
+                with self.subTest(failure=failure):
+                    _,unadmitted=self.guest()
+                    target=patch.object(runtime,'_check_storage',side_effect=AccessError('Synthetic full storage','beta_storage_limit',429),create=True) if failure=='storage' else patch('cloud.web_beta.secrets.token_hex',side_effect=RuntimeError('Synthetic cookie preparation failure'))
+                    with target,self.assertRaises((AccessError,RuntimeError)):
+                        runtime.owner_login({'username':'owner','password':'test-password'},unadmitted)
+                    self.assertEqual(self.http('/api/reports/'+report_id,cookie=guest)[1],before)
+                    with closing(runtime.connect()) as db:
+                        self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_account'").fetchone())
+                        self.assertEqual(db.execute('SELECT count FROM rates WHERE guest=?',(identifier,)).fetchone()[0],1)
+                        self.assertEqual(db.execute('SELECT count(*) FROM rates').fetchone()[0],1)
+                        self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],1)
+
+    def test_concurrent_first_owner_logins_use_one_committed_identity(self):
+        from hashlib import pbkdf2_hmac
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from contextlib import closing
+        salt='ab'*32;runtime=self.service.beta
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guests=[self.guest()[1] for _ in range(2)];barrier=Barrier(2)
+            def login(guest):
+                barrier.wait();return runtime.owner_login({'username':'owner','password':'test-password'},guest)
+            with ThreadPoolExecutor(max_workers=2) as pool:cookies=list(pool.map(login,guests))
+            identities=[runtime.owner_identity({'Cookie':cookie}) for cookie in cookies]
+            self.assertEqual(identities[0],identities[1]);self.assertIn(identities[0],guests)
+            with closing(runtime.connect()) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM owner_account').fetchone()[0],1)
+                self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],1)
+                self.assertEqual(db.execute('SELECT count FROM rates WHERE guest=?',(identities[0],)).fetchone()[0],2)
+
+    def test_first_owner_capacity_rejection_commits_no_adoption_or_daily_usage(self):
+        from hashlib import pbkdf2_hmac
+        from contextlib import closing
+        from datetime import datetime,timezone
+        salt='cd'*32;runtime=self.service.beta
+        with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
+                'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
+            guest,identifier=self.guest();month=datetime.now(timezone.utc).strftime('%Y-%m')
+            with closing(runtime.connect()) as db,db:
+                db.executemany('INSERT INTO active_guests VALUES (?,?)',[(format(i,'064x'),month)for i in range(100)])
+            status,result,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
+            self.assertEqual((status,result['code']),(429,'beta_capacity'))
+            self.assertNotIn('istok_owner=',cookie or '')
+            with closing(runtime.connect()) as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_account'").fetchone())
+                self.assertEqual(db.execute('SELECT count(*) FROM rates').fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],100)
+            self.assertFalse(list((self.root/'tenants').glob('*/istok.sqlite3')))
+
     def test_owner_password_stable_workspace_and_no_guest_daily_limit(self):
         from hashlib import pbkdf2_hmac
         salt='12'*32

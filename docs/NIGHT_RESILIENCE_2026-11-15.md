@@ -65,7 +65,42 @@
 
 ## Доказательства и повторный запуск
 
-### Repair после независимого C4 review: вход при 100 местах
+### Текущий repair: атомарный переход входа владельца
+
+Независимый повторный review подтвердил full-cap repair, но нашёл второй High: первый вход с правильным паролем после 40 реальных HTTP-мутаций возвращал 429 уже после закрепления владельца. Без выданной owner cookie прежний guest report становился недоступен (200→404), в том числе после restart. Причина обоих блокеров общая: аутентификация, закрепление владельца и квоты выполнялись отдельными транзакциями. Перестановки отдельных вызовов были недостаточны. Оба замечания приняты; первый repair ниже сохранён как история, его раздельные транзакции заменены.
+
+RCA: гипотеза H1 «adoption коммитится до отказа daily/storage» подтверждена реальным HTTP-контрпримером и новым RED. H2 «неправильная подпись/expiry» отвергнута: cookie не выдавалась, прежняя guest cookie работала до входа. H3 «потерян сам report» отвергнута: данные оставались и были доступны с valid owner cookie; prior-guard сохранял guest200 на той же последовательности. Фальсификатор H1 — отсутствие adoption и неизменный guest200 после 429 — теперь подтверждён до/после restart.
+
+Переход теперь устроен так:
+
+```text
+durable global attempt reservation (BEGIN IMMEDIATE) → verify password
+→ BEGIN IMMEDIATE
+  read existing stable owner ID, or select candidate guest without adopting
+  → admission SQL → daily mutation SQL → storage check
+  → prepare signed owner cookie → adopt owner ID → clear successful attempts
+→ COMMIT → persist → return prepared cookie
+```
+
+Все изменения owner/admission/daily принадлежат одной SQLite-транзакции. Ошибка проверки, storage или подготовки cookie откатывает их вместе; компенсирующего удаления owner row нет. Два одновременных первых входа сериализуются и получают один закреплённый ID. Глобальный журнал попыток намеренно отдельный: отказ сохраняет попытку входа, но не меняет принадлежность пространства и доступ к отчёту. Это атомарность решения и состояния SQLite; доставка HTTP-cookie и внешний persist не являются общей распределённой транзакцией.
+
+Полный новый diff относительно `121b5cb` воспроизводится `git diff 121b5cb..HEAD -- cloud/web_beta.py tests/test_web_beta.py docs/NIGHT_RESILIENCE_2026-11-15.md`; операторская копия — `atomic-login.patch`. В `cloud/web_beta.py` SQL admission и daily вынесены в помощники с явным открытым соединением; они не выполняют BEGIN/COMMIT/persist. Обычные публичные wrapper-методы сохраняют прежнее поведение. Login использует оба помощника с одним соединением и готовит cookie до commit. Новых таблиц, полей API, миграций или изменений guest guard нет.
+
+Изменившиеся проверки:
+
+| Проверка | Выход и артефакт |
+|---|---|
+| Реальные 40 HTTP-мутаций → отклонённый первый вход | RED в `atomic-login-red.log`; GREEN: guest report идентичен, owner_account не появился, daily40 сохранён, restart оставляет guest200 |
+| Storage/cookie preparation failure | GREEN: rollback owner row, нового admission и daily row; прежний report доступен. Storage отказ инъецирован в проверяющую функцию, cookie failure — в генератор nonce |
+| Первая adoption при 100 чужих слотах | GREEN: 429 capacity, owner/admission/rates не изменены, tenant не создан |
+| Два одновременных первых входа | GREEN: один owner ID/row, одно admitted space, две разрешённые мутации |
+| Targeted HTTP | `atomic-login-web-beta.log`: 44 tests OK до добавления capacity case; `atomic-login-rollback-concurrency.log`: 3 tests OK, включая новый capacity case и усиленные rollback-assertions |
+| Полный набор | `atomic-login-python-all.log`: **1065 tests, 1 skipped, 0 failures/errors**, 77,118 с; все 45 WebBeta cases входят в него |
+| Неизменённые reviewer counterexamples | Отдельные авторские копии: first-adoption 1/1, gates 4/4, full-cap 1/1, independent owner probes 3/3; везде external network0 |
+
+Логи авторского повтора: `atomic-login-review-{first,gates,capacity,independent}.log`, JSON в `atomic-review-replay/`. Исходные reviewer файлы и результаты не перезаписаны. Full-cap, global20, daily40, legacy ID, исходная утечка и restart остаются зелёными. Frontend/корпус/search/README/HANDOFF не менялись, Node/browser не перезапускались. Deploy/push/реальные поиски/модели/GPU — 0. Тот же независимый reviewer ещё должен проверить этот commit; авторский повтор не считается независимым одобрением.
+
+### Первый repair после C4 review: вход при 100 местах (заменён атомарным выше)
 
 Независимый reviewer обнаружил High в первом пакете: при заполненных 100 местах старый guest cookie владельца превращался в новый guest ID, и admission блокировал правильный пароль до аутентификации. На исходном коде вход давал 200, на первом guard — 429 `beta_capacity`. Находка принята; исправление поверх `295a23c` оставляет guard и стабильный owner ID.
 
