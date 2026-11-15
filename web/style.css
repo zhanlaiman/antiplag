@@ -956,6 +956,24 @@ main {
   gap:9px
 }
 
+@media (min-width:901px) {
+  .report-grid>.match-list {
+    position:sticky;
+    top:16px;
+    max-height:calc(100vh - 32px);
+    max-height:calc(100dvh - 32px);
+    overflow-y:auto;
+    overscroll-behavior-y:contain;
+    scrollbar-gutter:stable;
+    scroll-padding-block:4px;
+    padding:4px;
+    min-width:0
+  }
+  .report-grid>.match-list>.match-entry {
+    flex-shrink:0
+  }
+}
+
 .match-item {
   display:block;
   width:100%;
