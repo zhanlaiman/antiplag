@@ -28,8 +28,12 @@ def free_quota(account, needed):
             or account['searches_per_month'] != FREE_MONTHLY_SEARCHES
             or account['extra_credits'] != 0
             or not 0 <= account['this_month_usage'] <= FREE_MONTHLY_SEARCHES
-            or not needed <= account['total_searches_left'] == account['plan_searches_left'] <= FREE_MONTHLY_SEARCHES):
+            or not 0 <= account['total_searches_left'] == account['plan_searches_left'] <= FREE_MONTHLY_SEARCHES
+            or account['this_month_usage'] + account['total_searches_left'] != FREE_MONTHLY_SEARCHES):
         raise WebSearchError('Не удалось подтвердить бесплатный тариф и остаток Google-поиска.', 'free_quota_unconfirmed')
+    if account['total_searches_left'] < needed:
+        from plagiarism.search_provider_policy import FreeQuotaExhausted
+        raise FreeQuotaExhausted()
     return {k:account[k] for k in (*counters,'plan_name','plan_monthly_price')}
 
 
@@ -59,11 +63,14 @@ class SerpAPISearch:
         return value
 
     def confirm_free(self,needed):
+        from plagiarism.search_provider_policy import FreeQuotaExhausted
         self.free_slots=0;self.free_at=None
         try:
             quota=free_quota(self._request('account.json',{},12),needed)
             self.free_slots=needed;self.free_at=time.monotonic()
             return quota
+        except FreeQuotaExhausted:
+            raise
         except HTTPError as error:
             error.close()
         except (WebSearchError,URLError,OSError,ValueError,TypeError,UnicodeError):

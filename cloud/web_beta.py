@@ -24,6 +24,7 @@ from plagiarism.search_serpapi import SerpAPISearch,YandexSerpAPISearch
 from plagiarism.query_sentences import SHORT_PURE_STRATEGY
 from plagiarism.search_mediawiki import MediaWikiSearch
 from plagiarism.search_tavily import TavilySearch
+from plagiarism.search_provider_policy import request_fields as automatic_request_fields, contract as automatic_contract, CONSENT_VERSION
 from plagiarism.tenants import TenantRegistry
 from plagiarism.client_api import APIKeys,require_scope
 from plagiarism.correction_jobs import CorrectionQuota,ModalCorrector,internal_id,correction_id
@@ -418,7 +419,30 @@ class BetaRuntime:
             result['web']['limitations'].append('Собственный сайт '+public_page_url(source_url)['host']+' исключён из сравнения. Недоступные и исключённые страницы не подтверждают уникальность.')
         return result
 
+    def run_automatic(self,text,request_id,progress=None,source_url=None):
+        from plagiarism.search_router import select_search
+        queries=web_search.plan_queries(text,strategy=SHORT_PURE_STRATEGY)
+        try:
+            if self.quota_cooldown():
+                raise web_search.WebSearchError('Поиск временно ограничен.','free_quota_rate_limited')
+            search=select_search(self.root/'search-budget.sqlite3',len(queries),
+                                 limit=MONTHLY_SEARCHES,persist=self.persist)
+        except (web_search.WebSearchError,ValueError,OSError) as error:
+            code=getattr(error,'code','free_quota_unconfirmed')
+            raise SearchNotStarted('Бесплатный поиск не начат. Дневная попытка сохранена.',code) from None
+        wiki=MediaWikiSearch(path=self.root/'private/mediawiki.sqlite3')
+        result=web_search.run(text,request_id,progress=progress,searcher=search,wiki_searcher=wiki,
+            query_strategy=SHORT_PURE_STRATEGY,
+            **({'fetcher':ExcludingFetcher(source_url)} if source_url else {}))
+        result['web']['automatic_search']={'consent_version':CONSENT_VERSION,
+                                          'selected_provider':search.provider,'skipped':search.skipped}
+        if source_url:
+            result['web']['excluded_source_host']=public_page_url(source_url)['host']
+            result['web']['limitations'].append('Собственный сайт исключён из сравнения. Недоступные и исключённые страницы не подтверждают уникальность.')
+        return result
+
     def run_web(self,text,request_id,progress=None,source_url=None,provider='tavily'):
+        if provider=='auto':return self.run_automatic(text,request_id,progress,source_url)
         if provider=='serpapi':return self.run_google(text,request_id,progress,source_url)
         if provider=='serpapi-yandex':return self.run_google(text,request_id,progress,source_url,engine='yandex')
         if provider!='tavily':raise SearchNotStarted('Выбранный поиск недоступен. Запросы не отправлены.','web_not_configured')
@@ -563,7 +587,9 @@ class BetaHandler(server.Handler):
             self.response_headers.append(('Set-Cookie','istok_owner=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'+('; Secure' if beta.secure else '')))
             return {'ok':True}
         if method=='GET' and path=='/api/status' and self.tenant is None:
-            return server.status_payload(beta.status_counts(self.guest))
+            payload=server.status_payload(beta.status_counts(self.guest))
+            payload['web']['automatic_search']=automatic_contract()
+            return payload
         if method=='GET' and path=='/api/session':
             return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,
                 'max_characters':None if self.owner else MAX_CHARACTERS,'max_request_bytes':server.MAX_BODY,
@@ -629,16 +655,32 @@ class BetaHandler(server.Handler):
             # Old clients consented to Tavily. Their stored fingerprints and
             # destination remain unchanged even after a default provider switch.
             provider=body.get('search_provider')
-            if provider is None and body.get('provider_consent') is not None:
+            if provider=='auto' and body.get('provider_consent') is None and isinstance(body.get('provider_consent_version'),str):
+                archived_body={'request_id':identifier,'text':text,'internet_consent':True,
+                    **({'source_url':source_url} if source_url else {}),'search_provider':'auto',
+                    'provider_consent_version':body['provider_consent_version']}
+                with jobs.lock:
+                    archived=(store.get('model-request','model-request:'+identifier)
+                              or store.get('model-job',identifier) or jobs.items.get(identifier))
+                    if archived:
+                        if archived.get('request_fingerprint')!=saas.fingerprint({'path':'/api/web-check','body':archived_body}):
+                            raise access.AccessError('Идентификатор уже использован для другого запроса.','request_conflict',409)
+                        # A stored exact body is an observation of the old job,
+                        # even after consent policy/availability changed. No run.
+                        return {'job':jobs.get(identifier,store)}
+            automatic_fields=automatic_request_fields(body)
+            if automatic_fields is None and provider is None and body.get('provider_consent') is not None:
                 raise access.AccessError('Укажите поисковый сервис вместе с согласием.','invalid_search_provider',400)
-            if provider is not None:
+            if automatic_fields is None and provider is not None:
                 if provider not in ('tavily','serpapi','serpapi-yandex'):
                     raise access.AccessError('Выбранный поисковый сервис недоступен.','invalid_search_provider',400)
                 if body.get('provider_consent')!=provider:
                     raise access.AccessError('Подтвердите передачу фрагментов выбранному поисковому сервису.','provider_consent_required',400)
                 if provider in ('serpapi','serpapi-yandex') and selected_provider()!=provider and not self.owner:
                     raise access.AccessError('Этот поисковый режим пока доступен владельцу.','owner_required',403)
-            provider_fields={'search_provider':provider,'provider_consent':provider} if provider is not None else {}
+            provider_fields=automatic_fields if automatic_fields is not None else ({'search_provider':provider,'provider_consent':provider} if provider is not None else {})
+            operation_body={'request_id':identifier,'text':text,'internet_consent':True,
+                            **({'source_url':source_url} if source_url else {}),**provider_fields}
             owner=bool(self.owner)
             def operation(progress):
                 try:
@@ -655,9 +697,11 @@ class BetaHandler(server.Handler):
             with jobs.lock:
                 existing=(store.get('model-request','model-request:'+identifier)
                           or store.get('model-job',identifier) or jobs.items.get(identifier))
+                if existing and existing.get('request_fingerprint')!=saas.fingerprint({'path':'/api/web-check','body':operation_body}):
+                    raise access.AccessError('Идентификатор уже использован для другого запроса.','request_conflict',409)
                 beta.admit_check(self.guest,identifier,text,owner=bool(self.owner),rearm=not existing)
                 try:
-                    return {'job':jobs.submit_model(identifier,'/api/web-check',{'request_id':identifier,'text':text,'internet_consent':True,**({'source_url':source_url} if source_url else {}),**provider_fields},operation,store)}
+                    return {'job':jobs.submit_model(identifier,'/api/web-check',operation_body,operation,store)}
                 except Exception:
                     if not store.get('model-request','model-request:'+identifier) and identifier not in jobs.items:
                         beta.release_unstarted_check(self.guest,identifier)

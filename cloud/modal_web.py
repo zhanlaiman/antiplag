@@ -53,7 +53,8 @@ def serve_beta():
     Thread(target=service.serve_forever,name='istok-http',daemon=True).start()
 
 
-def build_app(directory,key,*,google_key=None,default_search_provider='tavily'):
+def build_app(directory,key,*,google_key=None,default_search_provider='tavily',
+              automatic_search=False,serper_key=None,exa_key=None,pool_grants=None):
     import modal
     if default_search_provider not in ('tavily','serpapi','serpapi-yandex') or default_search_provider in ('serpapi','serpapi-yandex') and not google_key:
         raise ValueError('A reviewed search provider and its credential are required')
@@ -64,6 +65,21 @@ def build_app(directory,key,*,google_key=None,default_search_provider='tavily'):
         .add_local_dir(directory,REMOTE_ROOT,copy=True)
         .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':default_search_provider,'ISTOK_MODEL_PROVIDER':'local'}))
     secret_values={'ISTOK_TAVILY_API_KEY':key}
+    if type(automatic_search) is not bool:
+        raise ValueError('Automatic search must be explicitly reviewed')
+    if automatic_search:
+        from plagiarism.search_pool import checked_grant
+        credentials={'serpapi':google_key,'serper':serper_key,'exa':exa_key,'tavily':key}
+        for provider,value in credentials.items():
+            if not isinstance(value,str) or not value or len(value)>1024 or any(not 33<=ord(c)<=126 for c in value):
+                raise ValueError('All four search credentials are required')
+        if not isinstance(pool_grants,dict) or set(pool_grants)!={'serper','exa'}:
+            raise ValueError('Both bounded free grants are required')
+        for provider in ('serper','exa'):
+            checked_grant(pool_grants[provider],provider,credentials[provider])
+        secret_values.update(ISTOK_AUTOMATIC_SEARCH='1',ISTOK_SERPER_API_KEY=serper_key,
+                             ISTOK_EXA_API_KEY=exa_key,
+                             ISTOK_SEARCH_POOL_GRANTS=json.dumps(pool_grants,sort_keys=True,allow_nan=False))
     if google_key:
         if not isinstance(google_key,str) or len(google_key)>1024 or any(not 33<=ord(c)<=126 for c in google_key):
             raise ValueError('Invalid Google search credential')

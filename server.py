@@ -393,6 +393,8 @@ class Handler(BaseHTTPRequestHandler):
             sources = store.add_demo_sources(demo.SOURCES)
             return {"text": demo.TEXT, "sources": sources}
         if method == "POST" and path == "/api/web-check-jobs":
+            if body.get('search_provider') == 'auto' or body.get('provider_consent_version') is not None:
+                raise access.AccessError('Автоматический поиск недоступен в этом режиме сервера.', 'automatic_search_disabled', 400)
             if body.get("internet_consent") is not True:
                 raise access.AccessError("Для поиска в интернете нужно отдельное согласие на отправку поисковых фраз.", "internet_consent_required", 400)
             web_status = web_search.status()

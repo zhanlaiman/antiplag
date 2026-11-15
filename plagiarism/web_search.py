@@ -682,7 +682,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
                            if code == "search_redirect_unresolved" else "Не удалось выполнить один из поисковых запросов."})
             if getattr(error, "code", "") in {"search_rate_limited", "search_budget_exhausted",
                                                 "search_credentials_invalid", "search_already_attempted",
-                                                "search_redirect_unresolved"}:
+                                                "search_redirect_unresolved", "search_pool_stopped"}:
                 stopped_code = error.code
                 break
     queries_unattempted = len(queries) - queries_attempted

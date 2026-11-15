@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _path(provider="tavily"):
-    name = {"tavily":"search-api.json", "serpapi":"serpapi-api.json"}.get(provider)
+    name = {"tavily":"search-api.json", "serpapi":"serpapi-api.json",
+            "serper":"serper-api.json", "exa":"exa-api.json"}.get(provider)
     if name is None:
         return None
     return Path(os.environ.get("ISTOK_RUNTIME_DIR", ROOT / ".runtime")) / name
@@ -36,7 +37,7 @@ def _saved(provider="tavily"):
 def key_for(provider):
     if provider == "serpapi-yandex":
         provider = "serpapi"
-    if provider not in {"tavily", "brave", "serpapi"}:
+    if provider not in {"tavily", "brave", "serpapi", "serper", "exa"}:
         return ""
     environment = os.environ.get("ISTOK_" + provider.upper() + "_API_KEY", "").strip()
     if environment:
