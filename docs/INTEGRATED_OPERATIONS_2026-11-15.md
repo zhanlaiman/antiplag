@@ -1,5 +1,7 @@
 # Эксплуатация интегрированной беты
 
+Текущий квалифицированный UI-релиз — **v41**, runtime source `239103b6da0433c0fc4e2c4826e50d94f792842b`, image `im-5Zd3PeEganvMvraW4dDDPd`. [Итоговый отчёт](BETA_RELEASE_2026-11-15.md). Его103 runtime-файла и живая admin-сессия проверены; базовые9a4 reader/writer ниже остаются совместимыми вариантами для отдельно проверенной republication.
+
 Основной домен — https://istoktext.online. Панель владельца сервиса — `/dashboard`, ключи и квоты — `/dashboard/pool`, обычный аккаунт — `/account`. Admin и обычный вход используют разные учётные данные и сессии. Наличие регистрации не даёт admin/owner прав. Реальные платежи отложены; восстановление пароля по email не реализовано.
 
 Последний релиз определяется приватным `ROOT/.runtime/web-deploy/deployment.json`: проверять полную связку source/tree, image, app/Volume, deployment и HTTP proofs. Последний квалифицированный базовый writer — v40/source9a4, aware-reader — v39/source9a4, один image. Последующая UI-публикация имеет собственный пакет `ROOT/.runtime/integrated-ui-release-20261115`; подготовленный пакет не доказывает публикацию. Пароли, provider keys, снимки Volume и QA credentials не помещать в Git, отчёты для тестировщиков или общие логи.
