@@ -267,6 +267,24 @@ class BetaRuntime:
         self.persist()
         return cookie
 
+    def owner_logout(self,headers):
+        token=self._verified_owner_token(headers)
+        if token is None:return
+        _,expires_at,digest=token
+        try:
+            with closing(sqlite3.connect(self.database.resolve().as_uri()+'?mode=rw',uri=True,timeout=15)) as db,db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('CREATE TABLE IF NOT EXISTS owner_session_revocations(token_sha256 TEXT PRIMARY KEY,expires_at INTEGER NOT NULL)')
+                db.execute('INSERT OR IGNORE INTO owner_session_revocations(token_sha256,expires_at) VALUES (?,?)',(digest,expires_at))
+                if db.execute('SELECT 1 FROM owner_session_revocations WHERE token_sha256=?',(digest,)).fetchone() is None:
+                    raise sqlite3.IntegrityError('Owner revocation was not recorded')
+        except (OSError,sqlite3.Error):
+            raise access.AccessError('Не удалось подтвердить выход. Повторите попытку.','owner_logout_unavailable',503) from None
+        try:self.persist()
+        except Exception:
+            # A failed/unknown Volume commit never compensates a local revocation.
+            raise access.AccessError('Не удалось подтвердить выход. Повторите попытку.','owner_logout_unavailable',503) from None
+
     def trusted(self,headers,method):
         host=headers.get('Host','')
         forwarded=(host in {'127.0.0.1:8000','localhost:8000'} and headers.get('X-Forwarded-Host')==self.host)
@@ -458,6 +476,8 @@ class BetaHandler(server.Handler):
     def _dispatch(self,method,leases):
         path=urlsplit(self.path).path
         self.api_token=None
+        self.logout_persist_handled=False
+        logout=method=='POST' and path=='/api/owner/logout'
         if path.startswith('/api/') or path.startswith('/reports/'):
             try:
                 if path.startswith('/api/v1/'):
@@ -470,17 +490,20 @@ class BetaHandler(server.Handler):
                 else:
                     if not self.trusted_request():
                         self.send_json({'error':'Запрос разрешён только с сайта Истока.'},403);return
-                    self.owner=self.server.beta.owner_identity(self.headers)
-                    self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
+                    if logout:
+                        self.owner=None;self.guest=None;cookie=None
+                    else:
+                        self.owner=self.server.beta.owner_identity(self.headers)
+                        self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
                 if cookie:self.response_headers.append(('Set-Cookie',cookie))
                 self.tenant=None
                 # Authentication needs no new guest tenant. Admit the stable
                 # owner ID only after owner_login validates the credentials.
                 if not ((method=='GET' and path in {'/api/session','/api/status'})
-                        or (method=='POST' and path=='/api/owner/login')):
+                        or (method=='POST' and path in {'/api/owner/login','/api/owner/logout'})):
                     self.server.beta.admit_space(self.guest)
                     self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
-                if method not in {'GET','HEAD'} and not (method=='POST' and path=='/api/owner/login'):
+                if method not in {'GET','HEAD'} and not (method=='POST' and path in {'/api/owner/login','/api/owner/logout'}):
                     self.server.beta.mutation(self.guest)
             except access.AccessError as error:
                 payload={'error':str(error),'code':error.code}
@@ -534,6 +557,9 @@ class BetaHandler(server.Handler):
             cookie=beta.owner_login(body,self.guest);self.response_headers.append(('Set-Cookie',cookie))
             return {'ok':True}
         if method=='POST' and path=='/api/owner/logout':
+            # The base handler has checked Host/Origin and parsed the JSON body.
+            self.logout_persist_handled=True
+            beta.owner_logout(self.headers)
             self.response_headers.append(('Set-Cookie','istok_owner=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'+('; Secure' if beta.secure else '')))
             return {'ok':True}
         if method=='GET' and path=='/api/status' and self.tenant is None:
@@ -642,7 +668,7 @@ class BetaHandler(server.Handler):
         return super().route(method,path,body)
 
     def send_json(self,result,status=200):
-        if self.command not in {'GET','HEAD'}:self.server.beta.persist()
+        if self.command not in {'GET','HEAD'} and not getattr(self,'logout_persist_handled',False):self.server.beta.persist()
         return super().send_json(result,status)
 
 

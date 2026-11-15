@@ -356,6 +356,9 @@ class WebBetaTests(unittest.TestCase):
             guest,identifier=self.guest()
             status,_,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
             self.assertEqual(status,200);owner=cookie.split(';')[0]
+            status,_,second=self.http('/api/owner/login',{'username':'owner','password':'test-password'},owner)
+            self.assertEqual(status,200)
+            other_owner='istok_owner='+second.split('istok_owner=',1)[1].split(';')[0]
             # Preserve the original adoption contract and all already saved rows.
             self.assertEqual(self.http('/api/session',cookie=owner)[1]['beta']['id'],identifier)
             report_id=self.check(owner,'e'*32)
@@ -370,11 +373,13 @@ class WebBetaTests(unittest.TestCase):
             self.assertFalse(session['owner']);self.assertNotEqual(session['id'],identifier)
             self.assertEqual(self.http('/api/report-exports/'+report_id,cookie=guest)[0],404)
             self.assertEqual(self.http('/api/data',cookie=new_guest)[1]['reports'],[])
-            self.assertEqual(self.http('/api/reports/'+report_id,cookie=owner)[1],before)
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=owner)[0],404)
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=other_owner)[1],before)
             self.stop();self.start()
             self.assertEqual(self.http('/api/reports/'+report_id,cookie=guest)[0],404)
-            self.assertEqual(self.http('/api/reports/'+report_id,cookie=owner)[1],before)
-            self.assertEqual(self.http('/api/session',cookie=owner)[1]['beta']['id'],identifier)
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=owner)[0],404)
+            self.assertEqual(self.http('/api/reports/'+report_id,cookie=other_owner)[1],before)
+            self.assertEqual(self.http('/api/session',cookie=other_owner)[1]['beta']['id'],identifier)
             self.assertEqual(self.calls,calls)
 
     def test_owner_relogin_at_capacity_authenticates_without_opening_guest_tenant(self):
@@ -429,8 +434,19 @@ class WebBetaTests(unittest.TestCase):
         with patch.dict(os.environ,{'ISTOK_OWNER_USERNAME':'owner','ISTOK_OWNER_SALT':salt,
                 'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
             guest,identifier=self.guest();report_id=self.check(guest,'c'*32)
+            report=self.http('/api/reports/'+report_id,cookie=guest)[1]['report']
+            match_id=report['matches'][0]['id']
+            for index in range(39):
+                decision=('confirmed','dismissed','pending')[index%3]
+                comment=f'Synthetic mutation {index}'
+                status,payload,_=self.http('/api/report-reviews',{'report_id':report_id,'match_id':match_id,
+                    'decision':decision,'comment':comment},guest)
+                self.assertEqual(status,200)
+                self.assertEqual((payload['review']['decision'],payload['review']['comment']),(decision,comment))
             before=self.http('/api/reports/'+report_id,cookie=guest)[1]
-            for _ in range(39):self.assertEqual(self.http('/api/owner/logout',{},guest)[0],200)
+            self.assertEqual(before['report']['reviews'][match_id]['comment'],'Synthetic mutation 38')
+            with closing(self.service.beta.connect()) as db:
+                self.assertEqual(db.execute('SELECT count FROM rates WHERE guest=?',(identifier,)).fetchone()[0],40)
             status,result,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
             self.assertEqual((status,result['code']),(429,'beta_rate_limit'))
             self.assertNotIn('istok_owner=',cookie or '')
