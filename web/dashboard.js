@@ -31,7 +31,14 @@
     $('errors').textContent = number(available.reduce((n, a) => n + a.metrics.errors_today, 0));
     const unavailable = data.accounts.length - available.length;
     if (unavailable) { $('characters').textContent += ' + нет данных'; $('errors').textContent += ' + нет данных'; }
-    $('sources').textContent = `Оплата не подключена: сведений о покупках нет. Регистрация: ${data.registration.beta_connected ? 'подключена' : 'не подключена к бете'}; существующий реестр OTP: ${data.registration.ledger === 'connected' ? 'подключён' : data.registration.ledger === 'unavailable' ? 'недоступен' : 'не подключён'}.`;
+    const summary = data.summary || {}, summaryNumber = value => Number.isInteger(value) && value >= 0 ? number(value) : 'Нет данных';
+    $('usage-summary').textContent = [
+      `Зарегистрированные: ${summaryNumber(summary.registered_total)}`, `Гостевые ID: ${summaryNumber(summary.guest_total)}`,
+      `Владельцы: ${summaryNumber(summary.owner_total)}`, `Проверки сегодня: ${summaryNumber(summary.checks_today)}`,
+      `Аккаунты с проверками сегодня: ${summaryNumber(summary.checking_accounts_today)}`
+    ].join(' · ');
+    const registration = data.registration.beta_connected || data.registration.ledger === 'connected' ? 'подключён' : 'не подключён';
+    $('sources').textContent = `Учёт зарегистрированных пользователей: ${registration}. Оплата не подключена. Гостевой ID может относиться к браузеру; история включает тестовые ID. Это учёт ID и аккаунтов, а не уникальных людей или посещений.`;
     $('updated').textContent = `Обновлено ${new Date(data.as_of).toLocaleString('ru-RU')} · день UTC ${data.day_utc}`;
     $('accounts').replaceChildren(); $('empty').hidden = data.accounts.length > 0;
     for (const account of data.accounts) {

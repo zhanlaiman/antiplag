@@ -140,8 +140,17 @@ class AccountInventory:
         ids = sorted(identities)
         page = []
         today = datetime.now(timezone.utc).date().isoformat()
+        if registered == "unavailable":
+            raise AccessError("Учёт зарегистрированных аккаунтов временно недоступен.", "dashboard_inventory_unavailable", 503)
+        summary = {kind + "_total": sum(item["kind"] == kind for item in identities.values())
+                   for kind in ("registered", "guest", "owner")}
         try:
             with _read(self.beta.database) as db:
+                admissions = db.execute("SELECT guest,count(*) FROM checks WHERE day=? AND NOT EXISTS("
+                    "SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id) GROUP BY guest",
+                    (today,)).fetchall()
+                summary["checks_today"] = sum(row[1] for row in admissions)
+                summary["checking_accounts_today"] = len({aliases.get(row[0], row[0]) for row in admissions})
                 for identifier in ids[offset:offset + PAGE_SIZE]:
                     item = dict(identities[identifier]); item["metrics"] = self.metadata(identifier)
                     counts = db.execute("SELECT count(*),coalesce(sum(day=?),0),max(day) FROM checks WHERE guest=? AND NOT EXISTS(SELECT 1 FROM unstarted_checks u WHERE u.guest=checks.guest AND u.id=checks.id)", (today, identifier)).fetchone()
@@ -166,7 +175,7 @@ class AccountInventory:
         coordinator = self.beta.tenants.coordinator
         with coordinator.lock:
             queue = {"active": coordinator.active, "capacity": coordinator.max_active, "scope": "shared_library_and_web"}
-        return {"accounts": page, "total": len(ids), "offset": offset, "limit": PAGE_SIZE,
+        return {"accounts": page, "total": len(ids), "summary": summary, "offset": offset, "limit": PAGE_SIZE,
                 "has_more": offset + PAGE_SIZE < len(ids), "queue": queue, "day_utc": today,
                 "registration": {"source": "beta_local_password" if getattr(self.beta, "accounts", None) is not None else "existing_saas_email_otp", "ledger": registered, "beta_connected": getattr(self.beta, "accounts", None) is not None},
                 "payments": {"configured": False, "source": None, "purchases": None},
