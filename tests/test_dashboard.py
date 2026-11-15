@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 import server
-from cloud import dashboard
+from cloud import dashboard, user_auth
 from cloud.web_beta import BetaHandler, create_server
 from plagiarism import access
 from plagiarism.access import AccessLedger
@@ -31,8 +31,11 @@ class IntegratedHandler(BetaHandler):
     def _dispatch(self, method, leases):
         if dashboard.dispatch(self, method):
             return
+        if user_auth.dispatch(self, method):
+            return
         path = urlsplit(self.path).path
         self.api_token = None
+        self.user = None
         self.logout_persist_handled = False
         logout = method == 'POST' and path == '/api/owner/logout'
         login = method == 'POST' and path == '/api/owner/login'
@@ -53,6 +56,9 @@ class IntegratedHandler(BetaHandler):
                     else:
                         self.owner = self.server.beta.owner_identity(self.headers)
                         self.guest, cookie = (self.owner, None) if self.owner else self.server.beta.identity(self.headers)
+                        if not self.owner and not (login or logout) and getattr(self.server.beta, 'accounts', None):
+                            resolved = self.server.beta.accounts.resolve(self.headers, self.guest)
+                            self.guest, self.user = resolved.guest, resolved.user
                 if not (login or logout):
                     dashboard.guard_account(self.server.beta, self.guest)
                 if cookie:

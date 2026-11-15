@@ -48,6 +48,16 @@ class AccountInventory:
     def __init__(self, beta, account_ledger=None):
         self.beta, self.account_ledger = beta, account_ledger
 
+    def local_bindings(self):
+        runtime = getattr(self.beta, "accounts", None)
+        return runtime.public_bindings() if runtime is not None else []
+
+    def canonical_id(self, identifier):
+        for binding in self.local_bindings():
+            if identifier in {binding["guest_id"], binding["account_id"]}:
+                return binding["guest_id"], [binding["guest_id"], binding["account_id"]]
+        return identifier, [identifier]
+
     def identities(self):
         accounts = {}
         try:
@@ -78,6 +88,13 @@ class AccountInventory:
                 registered = "connected"
             except (OSError, sqlite3.Error):
                 registered = "unavailable"
+        for binding in self.local_bindings():
+            identifier, account_id = binding["guest_id"], binding["account_id"]
+            if account_id != identifier:
+                accounts.pop(account_id, None)
+            item = accounts.setdefault(identifier, {"id": identifier, "first_seen_month": None})
+            item.update(kind="registered", source="beta_local_password", registered_account_id=account_id,
+                        registered_at=binding["created_at"])
         return accounts, registered
 
     def metadata(self, account_id):
@@ -114,8 +131,12 @@ class AccountInventory:
 
     def page(self, controls, offset=0):
         identities, registered = self.identities()
-        for identifier in controls:
-            identities.setdefault(identifier, {"id": identifier, "kind": "guest", "source": "admin_control", "first_seen_month": None})
+        aliases = {item["registered_account_id"]: identifier for identifier, item in identities.items() if "registered_account_id" in item}
+        effective = {}
+        for identifier, control in controls.items():
+            target = aliases.get(identifier, identifier)
+            effective.setdefault(target, []).append({"id": identifier, **control})
+            identities.setdefault(target, {"id": target, "kind": "guest", "source": "admin_control", "first_seen_month": None})
         ids = sorted(identities)
         page = []
         today = datetime.now(timezone.utc).date().isoformat()
@@ -132,10 +153,13 @@ class AccountInventory:
                     else:
                         item["last_usage"] = {"at": max(days), "precision": "day"} if days else None
                     item["web_checks_admitted"] = {"total": counts[0], "today": counts[1]}
-                    control = controls.get(identifier)
-                    item["blocked"] = bool(control and control["blocked"])
+                    sources = effective.get(identifier, [])
+                    blocked = [source for source in sources if source["blocked"]]
+                    control = max(blocked or sources, key=lambda source: source["changed_at"], default=None)
+                    item["blocked"] = bool(blocked)
                     item["block_reason"] = control["reason"] if control else None
                     item["control_changed_at"] = control["changed_at"] if control else None
+                    item["block_sources"] = [{"id": source["id"], "blocked": bool(source["blocked"])} for source in sources]
                     page.append(item)
         except (OSError, sqlite3.Error):
             raise AccessError("Статистика временно недоступна.", "dashboard_inventory_unavailable", 503) from None
@@ -144,6 +168,6 @@ class AccountInventory:
             queue = {"active": coordinator.active, "capacity": coordinator.max_active, "scope": "shared_library_and_web"}
         return {"accounts": page, "total": len(ids), "offset": offset, "limit": PAGE_SIZE,
                 "has_more": offset + PAGE_SIZE < len(ids), "queue": queue, "day_utc": today,
-                "registration": {"source": "existing_saas_email_otp", "ledger": registered, "beta_connected": False},
+                "registration": {"source": "beta_local_password" if getattr(self.beta, "accounts", None) is not None else "existing_saas_email_otp", "ledger": registered, "beta_connected": getattr(self.beta, "accounts", None) is not None},
                 "payments": {"configured": False, "source": None, "purchases": None},
                 "as_of": datetime.now(timezone.utc).isoformat()}

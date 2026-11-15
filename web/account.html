@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Мой аккаунт — Исток</title><link rel="stylesheet" href="/account.css"><script src="/account.js" defer></script></head>
+<body>
+  <header><a class="brand" href="/">Исток</a><a href="/">К проверке текста</a></header>
+  <main>
+    <p id="notice" class="notice" role="status" aria-live="polite">Проверяем сессию…</p>
+    <section id="auth-panel" class="panel" hidden aria-labelledby="auth-title">
+      <h1 id="auth-title">Войти в аккаунт</h1>
+      <p id="intro">Вход откроет сохранённые данные вашего аккаунта. Данные текущего гостевого пространства останутся отдельно.</p>
+      <div class="tabs" aria-label="Вход или регистрация"><button id="login-tab" class="selected" type="button" aria-pressed="true">Вход</button><button id="register-tab" type="button" aria-pressed="false">Регистрация</button></div>
+      <p id="availability" class="hint"></p>
+      <form id="auth-form">
+        <label for="username">Логин</label><input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{2,31}" required aria-describedby="login-hint"><small id="login-hint">Латиница, цифры, точка, дефис и подчёркивание. Регистр букв не важен.</small>
+        <label for="password">Пароль</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" required>
+        <div id="confirm-field" hidden><label for="confirm-password">Повторите пароль</label><input id="confirm-password" type="password" autocomplete="new-password" maxlength="256"></div>
+        <button id="submit" class="primary" type="submit">Войти</button>
+      </form>
+      <p id="recovery" class="hint">Почта и восстановление пароля по письму пока не подключены. Сохраните логин и пароль.</p>
+    </section>
+    <section id="profile" class="panel" hidden aria-labelledby="profile-title">
+      <p class="kicker">Мой аккаунт</p><h1 id="profile-title">Вы вошли в аккаунт</h1>
+      <p id="profile-copy">Ваши отчёты и словарь доступны при входе с другого устройства.</p>
+      <p id="account-id" class="identifier"></p><p id="profile-note" class="hint"></p>
+      <div class="actions"><a id="open-app" class="primary button" href="/">Перейти к проверке</a><button id="logout" type="button">Выйти</button><a id="owner-link" href="/owner.html" hidden>Управление входом владельца</a></div>
+    </section>
+    <p class="footer">Гостевой режим доступен без регистрации. <a href="/privacy.html">Как хранятся данные</a></p>
+  </main>
+</body>
+</html>

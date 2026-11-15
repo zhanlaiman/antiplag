@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from hashlib import scrypt, sha256
+from hashlib import sha256
 import hmac
 from http.cookies import CookieError, SimpleCookie
 import json
@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from plagiarism.access import AccessError
 from plagiarism.user_accounts import AccountInventory, valid_account_id
+from plagiarism.password_auth import password_digest, SCRYPT_N, SCRYPT_R, SCRYPT_P
 
 
 COOKIE = "istok_dashboard_admin"
@@ -25,9 +26,6 @@ LOGIN_WINDOW = 900
 LOGIN_IP_LIMIT = 10
 LOGIN_GLOBAL_LIMIT = 40
 MAX_BODY = 8192
-SCRYPT_N = 32768
-SCRYPT_R = 8
-SCRYPT_P = 1
 STATIC = {"/dashboard": "dashboard.html", "/dashboard/": "dashboard.html",
           "/dashboard.html": "dashboard.html", "/dashboard.js": "dashboard.js",
           "/dashboard.css": "dashboard.css"}
@@ -45,11 +43,6 @@ POOL_ERRORS = {
     "pool_not_found": (404, "Маршрут настройки ключа не найден."),
     "pool_unavailable": (503, "Управление поисковыми ключами временно недоступно."),
 }
-
-
-def password_digest(password, salt):
-    return scrypt(password.encode("utf-8"), salt=bytes.fromhex(salt), n=SCRYPT_N,
-                  r=SCRYPT_R, p=SCRYPT_P, dklen=32, maxmem=64 * 1024 * 1024).hex()
 
 
 @dataclass(frozen=True)
@@ -262,9 +255,10 @@ class DashboardRuntime:
 
     def guard_account(self, account_id):
         valid_account_id(account_id)
+        _, aliases = self.inventory.canonical_id(account_id)
         with self.connect(readonly=True) as db:
-            row = db.execute("SELECT blocked FROM account_blocks WHERE account_id=?", (account_id,)).fetchone()
-        if row and row[0]:
+            rows = db.execute("SELECT blocked FROM account_blocks WHERE account_id IN (" + ",".join("?" for _ in aliases) + ")", aliases).fetchall()
+        if any(row[0] for row in rows):
             raise AccessError("Доступ аккаунта приостановлен администратором.", "account_blocked", 403)
 
     def accounts(self, offset=0):
@@ -274,6 +268,7 @@ class DashboardRuntime:
 
     def set_block(self, account_id, blocked, reason):
         valid_account_id(account_id)
+        account_id, aliases = self.inventory.canonical_id(account_id)
         if (not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 240
                 or any(ord(char) < 32 for char in reason)):
             raise AccessError("Укажите причину длиной до 240 символов.", "dashboard_invalid_request", 400)
@@ -285,8 +280,9 @@ class DashboardRuntime:
                 raise KeyError(account_id)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("INSERT INTO account_blocks VALUES (?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET blocked=excluded.blocked,reason=excluded.reason,changed_at=excluded.changed_at",
-                       (account_id, int(blocked), reason.strip(), self.now()))
+            for identifier in aliases:
+                db.execute("INSERT INTO account_blocks VALUES (?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET blocked=excluded.blocked,reason=excluded.reason,changed_at=excluded.changed_at",
+                           (identifier, int(blocked), reason.strip(), self.now()))
             db.execute("INSERT INTO admin_audit(at,action,account_id,reason) VALUES (?,?,?,?)",
                        (self.now(), "block" if blocked else "unblock", account_id, reason.strip()))
         self.persist()
@@ -370,7 +366,7 @@ def route(handler, method, path, body):
     raise KeyError(path)
 
 
-def _headers(handler):
+def add_security_headers(handler):
     handler.response_headers.extend([
         ("Cache-Control", "no-store"), ("X-Robots-Tag", "noindex, nofollow"),
         ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
@@ -387,7 +383,7 @@ def dispatch(handler, method):
     path = urlsplit(handler.path).path
     if not handles(path) and path not in STATIC:
         return False
-    _headers(handler)
+    add_security_headers(handler)
     try:
         runtime = _runtime(handler)
         runtime.trusted(handler.headers, mutating=method not in {"GET", "HEAD"})

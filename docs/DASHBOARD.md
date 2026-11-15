@@ -2,6 +2,8 @@
 
 Этот модуль подготовлен для подключения основным чатом. Сам по себе коммит не публикует `/dashboard` и не меняет production. Обычная регистрация в бете пока не подключена: существующий SaaS email OTP использует `plagiarism/saas.py`, `auth_provider.py` и `AccessLedger`, а beta явно работает с `saas=None`. Покупок и платёжного backend в этом модуле нет.
 
+Следующий локальный срез [USER_ACCOUNTS.md](USER_ACCOUNTS.md) добавляет normal password adapter поверх существующих AccessLedger primitives. После его явного подключения через `beta.accounts` dashboard помечает реальные registered guestspaces, дедуплицирует logical account/guest aliases и объединяет их блокировки. До подключения `registration.beta_connected=false`; само наличие кода не означает публикацию регистрации.
+
 ## Подключение в `cloud/web_beta.py`
 
 Импортировать `from cloud import dashboard`. В `create_server`, после создания beta и HTTP server:
