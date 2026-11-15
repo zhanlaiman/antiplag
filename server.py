@@ -265,10 +265,8 @@ class Handler(BaseHTTPRequestHandler):
         files["/fonts/Inter-LICENSE.txt"] = "fonts/Inter-LICENSE.txt"
         files["/fonts/PTSerif-Regular.ttf"] = "fonts/PTSerif-Regular.ttf"
         files["/fonts/PTSerif-OFL.txt"] = "fonts/PTSerif-OFL.txt"
-        if path == "/favicon.ico":
-            self.send_response(204)
-            self.end_headers()
-            return
+        for name in ("favicon.ico", "favicon.png", "favicon.svg", "apple-touch-icon.png", "safari-pinned-tab.svg"):
+            files["/" + name] = name
         if path not in files:
             raise KeyError(path)
         file = ROOT / "web" / files[path]

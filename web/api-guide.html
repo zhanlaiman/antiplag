@@ -1,5 +1,11 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Исток · API</title><link rel="stylesheet" href="/style.css"></head>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Исток · API</title>
+  <link rel="icon" href="/favicon.ico?v=20261115" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" sizes="48x48" href="/favicon.png">
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#285b43">
+  <link rel="stylesheet" href="/style.css"></head>
 <body><main class="auth-card" style="overflow-wrap:anywhere"><h1>API бесплатной беты</h1>
 <p>Войдите как владелец и откройте «Мои данные → Доступ через API». Создайте ключ с нужными разрешениями. Он показывается один раз, действует до 90 дней и отзывается в этой же панели. До трёх активных ключей. Полный ключ храните в секрете; сервер хранит только его хеш.</p>
 <p>Базовый адрес — текущий адрес сайта. Все запросы требуют заголовок <code>Authorization: Bearer ВАШ_КЛЮЧ</code>. Cookie не нужна. Ключ нельзя передавать в URL или включать в публичный клиентский JavaScript. Запросы из чужого браузерного Origin запрещены; API предназначен для серверных интеграций.</p>
