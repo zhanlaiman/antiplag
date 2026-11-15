@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#173c2e">
+  <title>Пул поиска · Исток</title>
+  <link rel="stylesheet" href="/pool.css">
+  <script src="/pool.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">К содержимому</a>
+  <header class="topbar"><a class="brand" href="/dashboard"><span class="brand-mark" aria-hidden="true">и</span>исток<span aria-hidden="true">.</span></a><nav aria-label="Панель владельца"><a href="/dashboard">Панель владельца</a><span aria-current="page">Пул поиска</span></nav><span class="private-label">Только администратор</span></header>
+  <main id="content" tabindex="-1">
+    <div class="page-heading"><div><p class="eyebrow">Управление поиском</p><h1>Пул поиска</h1><p class="intro">Ключи, подтверждённые остатки и бесплатный бюджет.</p></div><button id="refresh" class="button secondary" type="button" disabled>Обновить данные</button></div>
+    <p id="notice" class="notice" role="status" aria-live="polite">Проверяем доступ к панели…</p>
+    <section id="workspace" hidden>
+      <div class="summary" aria-label="Общий бюджет"><div><span class="metric-label">Денежные расходы</span><strong>0 ₸</strong><small>Платное превышение отключено</small></div><div><span class="metric-label">Лимит сайта в месяц</span><strong id="monthly-limit">180</strong><small>Смена ключа не обновляет лимит</small></div><div><span class="metric-label">Использовано сайтом</span><strong id="monthly-used">—</strong><small id="runtime-note">Ожидаем данные сервера</small></div></div>
+      <section class="section" aria-labelledby="providers-heading"><div class="section-heading"><div><h2 id="providers-heading">Состояние провайдеров</h2><p>Проверка остатков запускается кнопкой у сохранённого ключа.</p></div><span id="revision" class="muted"></span></div>
+        <div class="table-scroll" role="region" aria-label="Остатки поиска" tabindex="0"><table><thead><tr><th scope="col">Провайдер</th><th scope="col">Состояние</th><th scope="col">Остаток провайдера</th><th scope="col">Локальный расход / остаток</th><th scope="col">Проверено</th></tr></thead><tbody id="provider-rows"></tbody></table></div>
+        <p class="caption">Остаток провайдера — последняя проверка его API. Локальный бюджет учитывает только запросы сайта. Эти значения могут различаться. На узком экране таблица прокручивается по горизонтали.</p>
+      </section>
+      <div class="lower-grid">
+        <section class="section add-key" aria-labelledby="add-heading"><h2 id="add-heading">Добавить ключ</h2><p>Ключ сохраняется на сервере. Подключение — отдельный шаг после проверки.</p>
+          <form id="key-form" autocomplete="off"><label for="provider">Провайдер</label><select id="provider" name="provider"><option value="serpapi">SerpApi</option><option value="tavily">Tavily</option><option value="serper">Serper</option><option value="exa">Exa</option></select><label for="api-key">Ключ API</label><input id="api-key" name="api_key" type="password" minlength="16" maxlength="1024" autocomplete="off" autocapitalize="none" spellcheck="false" required aria-describedby="key-help form-error"><p id="key-help" class="caption">Вставьте поисковый ключ из кабинета провайдера.</p><p id="form-error" class="field-error" role="alert" hidden></p><button class="button primary" id="save-key" type="submit">Сохранить ключ</button></form>
+          <p class="policy-note">SerpApi и Tavily подключаются после подтверждения бесплатного тарифа. Для Serper и Exa дополнительно нужен одобренный на сервере ограниченный бесплатный бюджет. Новый аккаунт не даёт разрешения обходить правила тарифа.</p>
+        </section>
+        <section class="section keys" aria-labelledby="keys-heading"><div class="section-heading"><div><h2 id="keys-heading">Сохранённые ключи</h2><p>Показаны только отпечаток и последние четыре символа.</p></div><span id="key-count" class="count">0</span></div><p id="empty-state" class="empty-state">Ключей пока нет. Добавьте первый ключ слева и проверьте его.</p><ul id="credential-rows" class="credential-list"></ul></section>
+      </div>
+      <p class="footer-note">Отключение останавливает использование ключа в новых проверках. История, расход и уже запущенные задания сохраняются.</p>
+    </section>
+    <noscript>Для управления ключами включите JavaScript. Поисковые ключи доступны только после входа администратора.</noscript>
+  </main>
+</body>
+</html>
