@@ -96,12 +96,14 @@ def short_center_queries(text, plan, *, limit=6):
     return planned
 
 
-def short_pure_candidate(text, plan, protected_queries=(), *, limit=6):
+def short_pure_candidate(text, plan, protected_queries=(), *, limit=6, for_empty_suffix=False):
     """Propose one whole short sentence lacking a pure discovery phrase.
 
     This reallocates the final slot; it does not claim that slot was redundant.
     The caller retains valid observed-title priority. Only input words and their
     original positions participate in selection, never a source or its metadata.
+    Empty-suffix mode instead selects nine-word sentences even if another clue
+    already covered them; its caller must first verify five empty replies.
     """
     if limit != 6 or len(plan) != 6:
         return None
@@ -131,17 +133,29 @@ def short_pure_candidate(text, plan, protected_queries=(), *, limit=6):
                 and item['start'] == span_words[0].start and item['end'] == span_words[-1].end
                 and [t.value for t in query_words] == [t.value for t in span_words]):
             pure_spans.append((item['start'], item['end']))
+    if for_empty_suffix:
+        # Earlier clues have empty replies; the final slot is still unattempted.
+        # Preserve a pure clue already waiting in that slot.
+        pure_spans = [span for span in pure_spans if span == (final['start'], final['end'])]
     candidates = []
     existing = {item['query'] for item in plan}
     for words in segments:
         if not MIN_WORDS <= len(words) <= 9 or any(len(w.value) > 40 for w in words):
             continue
+        if for_empty_suffix and len(words) != 9:
+            continue
         a, b = words[0].start, words[-1].end
         if any(a <= left and right <= b for left, right in pure_spans):
             continue
         phrase = '"' + ' '.join(w.value for w in words) + '"'
-        if phrase in existing or len(phrase) > 390:
+        if len(phrase) > 390 or (not for_empty_suffix and phrase in existing):
             continue
+        # A prior full/prefix clue with an empty reply is not discovery evidence.
+        # Suffix mode may shorten it, but must never repeat an existing query.
+        if for_empty_suffix:
+            suffix = '"' + ' '.join(w.value for w in words[-MIN_WORDS:]) + '"'
+            if suffix in existing:
+                continue
         covered = sum(any(q['start'] <= w.start and w.end <= q['end'] for q in plan[:5])
                       for w in words)
         candidates.append((Fraction(covered, len(words)), a, {
@@ -156,7 +170,7 @@ def short_suffix_candidate(text, plan, protected_queries=(), *, limit=6):
     The caller must establish five successful empty primary replies. This
     formats a discovery clue only; fetched evidence must still ground matches.
     """
-    whole = short_pure_candidate(text, plan, protected_queries, limit=limit)
+    whole = short_pure_candidate(text, plan, protected_queries, limit=limit, for_empty_suffix=True)
     if whole is None or whole['sentence_words'] != 9:
         return None
     words = _tokens(text[whole['start']:whole['end']])[-MIN_WORDS:]
