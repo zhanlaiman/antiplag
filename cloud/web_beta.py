@@ -6,6 +6,7 @@ import hmac
 from http.cookies import SimpleCookie,CookieError
 from http.server import ThreadingHTTPServer
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -49,6 +50,7 @@ class DurableTenants(TenantRegistry):
         super().__init__(root,max_contexts=20,max_active=3)
         self.persist=persist
         self.auxiliary_jobs=[]
+        self.report_reuse=None
 
     def close(self):
         for jobs in self.auxiliary_jobs:jobs.close(wait=False)
@@ -60,7 +62,17 @@ class DurableTenants(TenantRegistry):
         context=super()._create(identifier)
         save=context.store.save
         def durable_save(*args,**kwargs):
-            value=save(*args,**kwargs);self.persist();return value
+            value=save(*args,**kwargs)
+            reuse=self.report_reuse
+            capture=None
+            if reuse:
+                try:capture=reuse.capture(identifier,args[0] if args else kwargs.get('kind'),value)
+                except Exception:logging.warning('Historical receipt capture unavailable')
+            self.persist()
+            if capture is not None:
+                try:reuse.after_ack(capture,context.jobs,save)
+                except Exception:logging.warning('Historical receipt observation unavailable')
+            return value
         context.store.save=durable_save
         return context
 
@@ -535,6 +547,9 @@ class BetaHandler(server.Handler):
 
     def _dispatch(self,method,leases):
         path=urlsplit(self.path).path
+        self._reuse_readonly_response=path=='/api/reports/reuse'
+        if self._reuse_readonly_response and method!='POST':
+            self.send_json({'error':'Метод недоступен.','code':'method_not_allowed'},405);return
         if getattr(self.server,'dashboard',None):
             from cloud import dashboard,user_auth
             if path in {'/dashboard/pool','/dashboard/pool/','/pool.html','/pool.js','/pool.css'}:
@@ -557,6 +572,9 @@ class BetaHandler(server.Handler):
                 else:
                     if not self.trusted_request():
                         self.send_json({'error':'Запрос разрешён только с сайта Истока.'},403);return
+                    if self._reuse_readonly_response and (self.server.beta.database.is_symlink() or not self.server.beta.database.is_file()):
+                        from plagiarism.report_reuse import unavailable
+                        raise unavailable()
                     if logout:
                         self.owner=None;self.guest=None;cookie=None
                     else:
@@ -570,19 +588,31 @@ class BetaHandler(server.Handler):
                     from cloud.dashboard import guard_account
                     guard_account(self.server.beta,self.guest)
                 self.tenant=None
+                if self._reuse_readonly_response:
+                    reuse=self.server.beta.tenants.report_reuse
+                    if reuse is None:
+                        from plagiarism.report_reuse import unavailable
+                        raise unavailable()
+                    leases.enter_context(reuse.admission(self.guest))
                 # Authentication needs no new guest tenant. Admit the stable
                 # owner ID only after owner_login validates the credentials.
                 if not ((method=='GET' and path in {'/api/session','/api/status'})
-                        or (method=='POST' and path in {'/api/owner/login','/api/owner/logout'})):
+                        or (method=='POST' and path in {'/api/owner/login','/api/owner/logout'}) or self._reuse_readonly_response):
                     self.server.beta.admit_space(self.guest)
                     self.tenant=leases.enter_context(self.server.beta.tenants.context(self.guest))
-                if method not in {'GET','HEAD'} and not (method=='POST' and path in {'/api/owner/login','/api/owner/logout'}):
+                if method not in {'GET','HEAD'} and not (method=='POST' and path in {'/api/owner/login','/api/owner/logout'}) and not self._reuse_readonly_response:
                     self.server.beta.mutation(self.guest)
             except access.AccessError as error:
                 payload={'error':str(error),'code':error.code}
                 if getattr(error,'retry_after',None) is not None:
                     payload['retry_after']=error.retry_after;self.response_headers.append(('Retry-After',str(error.retry_after)))
                 self.send_json(payload,error.status);return
+            except (OSError,sqlite3.Error):
+                if not self._reuse_readonly_response:raise
+                from plagiarism.report_reuse import unavailable
+                error=unavailable()
+                self.response_headers.append(('Retry-After',str(error.retry_after)))
+                self.send_json({'error':str(error),'code':error.code,'retry_after':error.retry_after},error.status);return
         return super()._dispatch(method,leases)
 
     def pool_static(self,path,method):
@@ -611,6 +641,14 @@ class BetaHandler(server.Handler):
 
     def route(self,method,path,body):
         beta=self.server.beta
+        if method=='POST' and path=='/api/reports/reuse':
+            if not isinstance(body,dict) or set(body)!={'text'} or urlsplit(self.path).query:
+                raise access.AccessError('Некорректный запрос.','invalid_request',400)
+            text=self.check_text(body)
+            try:text.encode('utf-8')
+            except UnicodeError:raise access.AccessError('Некорректный текст.','invalid_request',400) from None
+            from plagiarism.report_reuse import lookup
+            return {'match':lookup(beta.root,beta.key,self.guest,text)}
         if path.startswith('/api/v1/'):
             if not self.api_token:raise access.AccessError('Нужен ключ API.','api_auth_required',401)
             routes={('GET','/api/v1/reports'):('reports:read','/api/reports'),
@@ -663,6 +701,7 @@ class BetaHandler(server.Handler):
             return {'mode':'local','web':web_search.status(),**({'user':self.user} if self.user else {}),'beta':{'id':self.guest,
                 'max_characters':None if self.owner else MAX_CHARACTERS,'max_request_bytes':server.MAX_BODY,
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES,
+                **({'report_reuse':{'enabled':True,'version':1}} if beta.tenants.report_reuse else {}),
                 'ai_correction':{'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}}}
         if method=='GET' and path=='/api/correction-quota':
             return {'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}
@@ -754,11 +793,13 @@ class BetaHandler(server.Handler):
             operation_body={'request_id':identifier,'text':text,'internet_consent':True,
                             **({'source_url':source_url} if source_url else {}),**provider_fields}
             owner=bool(self.owner)
+            job_guest=self.guest
+            operation_fingerprint=saas.fingerprint({'path':'/api/web-check','body':operation_body})
             pin=None
             def operation(progress):
                 if getattr(beta,'dashboard',None):
                     from cloud.dashboard import guard_account
-                    guard_account(beta,self.guest)
+                    guard_account(beta,job_guest)
                 try:
                     with owner_target_text(owner):
                         payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}),
@@ -767,7 +808,12 @@ class BetaHandler(server.Handler):
                 except SearchNotStarted:
                     beta.release_unstarted_check(self.guest,identifier)
                     raise
-                report=store.save('report',{**payload,'id':saas.report_identifier(identifier)})
+                stored_payload={**payload}
+                stored_payload.pop('_report_reuse',None)
+                if beta.tenants.report_reuse and payload.get('scope')=='web_search' and payload.get('text')==text:
+                    from plagiarism.report_reuse import manifest
+                    stored_payload['_report_reuse']=manifest(beta.key,job_guest,text,identifier,operation_fingerprint)
+                report=store.save('report',{**stored_payload,'id':saas.report_identifier(identifier)})
                 return {'report':server.public_report(report,store.match_reviews(report['id']))}
             # Serialize admission with scheduling for this tenant: a rejected queue
             # cannot race a duplicate that starts work while its slot is refunded.
@@ -794,7 +840,8 @@ class BetaHandler(server.Handler):
         return super().route(method,path,body)
 
     def send_json(self,result,status=200):
-        if self.command not in {'GET','HEAD'} and not getattr(self,'logout_persist_handled',False):self.server.beta.persist()
+        readonly=getattr(self,'_reuse_readonly_response',False) and urlsplit(self.path).path=='/api/reports/reuse'
+        if self.command not in {'GET','HEAD'} and not getattr(self,'logout_persist_handled',False) and not readonly:self.server.beta.persist()
         return super().send_json(result,status)
 
 
@@ -823,6 +870,9 @@ def create_server(root,origin,*,host='0.0.0.0',port=8000,persist=lambda:None,all
             user_auth.UserAuthRuntime(beta,registration_enabled=registration_enabled)
             PoolRuntime(beta,monthly_limit=automatic_monthly_limit,
                 grants=pool_grants,bootstrap=pool_bootstrap,keys=pool_keys)
+            from cloud.report_reuse_runtime import ReportReuseRuntime
+            beta.tenants.report_reuse=ReportReuseRuntime(beta.root,beta.key,beta.persist)
+            beta.tenants.auxiliary_jobs.append(beta.tenants.report_reuse)
         service=ThreadingHTTPServer((host,port),BetaHandler);service.daemon_threads=True
     except Exception:
         beta.tenants.close()

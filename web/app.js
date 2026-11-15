@@ -25,6 +25,9 @@ const candidateJobPolls = new Set();
 const fileReadTokens = new WeakMap();
 const modelJobObservers = new Map();
 const modelRequestGenerations = new Map();
+let reportReuseEpoch = 0;
+const reportReuseViews = { home: { revision: 0, request: 0 }, check: { revision: 0, request: 0 } };
+const savedReportOpens = new Set();
 
 function storageKey(key) {
   if (storageScope === null) return null;
@@ -103,6 +106,142 @@ function pendingWebRequest(text) {
   return Object.values(state.modelJobs).find(entry => entry.path === '/api/web-check'
     && modelJobActive(entry) && entry.body?.text === text);
 }
+function reportReuseEnabled() {
+  const capability = state.session?.beta?.report_reuse;
+  return capability?.enabled === true && capability.version === 1;
+}
+function reportReuseHTML(surface) {
+  if (!reportReuseEnabled()) return '';
+  return `<div class="report-reuse" id="${surface}-report-reuse">
+    <button class="text-button" id="${surface}-reuse-find" type="button">Найти готовый отчёт</button>
+    <p class="field-help">Для точно такого же текста в вашем пространстве. Текст отправляется только на сервер Истока; новый поиск и расход квоты не запускаются.</p>
+    <p class="field-help">Поиск работает для проверок после этого обновления. Прежние отчёты доступны в <a href="#history">«Истории»</a>.</p>
+    <div id="${surface}-reuse-result" role="status" aria-live="polite"></div>
+  </div>`;
+}
+function invalidateReportReuse(surface) {
+  const view = reportReuseViews[surface];
+  view.revision += 1;
+  view.request += 1;
+  view.busy = false;
+  document.getElementById(`${surface}-reuse-result`)?.replaceChildren();
+  updateReportReuseControl(surface);
+}
+function resetReportReuse() {
+  reportReuseEpoch += 1;
+  for (const surface of ['home', 'check']) invalidateReportReuse(surface);
+}
+function updateReportReuseControl(surface) {
+  const button = document.getElementById(`${surface}-reuse-find`);
+  const field = reportReuseViews[surface].field;
+  if (button) button.disabled = !reportReuseEnabled() || !privateAccess()
+    || reportReuseViews[surface].busy || !field?.value.trim() || documentReading(field.id);
+}
+function reportReuseRequest(surface) {
+  const view = reportReuseViews[surface];
+  return { surface, field: view.field, text: view.field.value, epoch: reportReuseEpoch,
+    scope: storageScope, tenant: state.session?.beta?.id, route: state.viewRevision,
+    revision: view.revision, request: ++view.request };
+}
+function reportReuseCurrent(request) {
+  const view = reportReuseViews[request.surface];
+  return reportReuseEnabled() && privateAccess() && state.view === request.surface
+    && request.field === view.field && request.field.isConnected && request.field.value === request.text
+    && (request.surface === 'home' ? state.homeText : state.text) === request.text
+    && request.epoch === reportReuseEpoch && request.route === state.viewRevision
+    && request.scope === storageScope && request.tenant === state.session?.beta?.id
+    && request.revision === view.revision && request.request === view.request;
+}
+function savedReportDescription(report) {
+  const provider = { 'serpapi-yandex': 'Яндекс через SerpApi', serpapi: 'Google через SerpApi',
+    serper: 'Google через Serper', tavily: 'Tavily', exa: 'Exa' }[report.provider] || 'сервис не указан';
+  const coverage = report.coverage_status === 'complete' ? 'поиск завершён'
+    : report.coverage_status === 'partial' ? 'неполная проверка' : 'охват не указан';
+  const when = new Date(report.created_at);
+  const saved = Number.isNaN(when.getTime()) ? 'дата не указана'
+    : new Intl.DateTimeFormat('ru-RU', { dateStyle: 'long', timeStyle: 'short' }).format(when);
+  return `${saved} · ${provider} · ${coverage}`;
+}
+function savedReportConditions(report) {
+  const strategy = { 'hybrid-citation-v11-short-pure': 'Короткие поисковые фразы из текста и поиск по указанным источникам.',
+    'hybrid-citation-v7-clause-boundaries': 'Поисковые фразы по границам предложений и указанные источники.' }[report.query_strategy]
+    || 'Способ выбора поисковых фраз не указан.';
+  const queries = Number.isSafeInteger(report.queries_completed) && Number.isSafeInteger(report.queries_planned)
+    ? `Поисковых запросов выполнено ${number(report.queries_completed)} из ${number(report.queries_planned)}.`
+    : 'Число поисковых запросов не указано.';
+  const consent = report.consent_version === SEARCH_POOL_CONSENT_VERSION
+    ? 'Было дано согласие на автоматический выбор SerpApi (Яндекс), Serper (Google), Tavily, Exa и поиск в Википедии.'
+    : 'Сведения об условиях согласия в этой версии отчёта не указаны.';
+  return `<details class="field-help"><summary>Как выполнялась эта проверка</summary>
+    <p>${escapeHTML(queries)} ${escapeHTML(strategy)}</p><p>${escapeHTML(consent)}</p>
+    ${report.excluded_source_host ? `<p>Исключённый источник: ${escapeHTML(report.excluded_source_host)}.</p>` : ''}</details>`;
+}
+function savedReportBanner(report) {
+  if (!savedReportOpens.has(report.id)) return '';
+  return `<p class="warning">Открыт сохранённый отчёт: ${escapeHTML(savedReportDescription({
+    created_at: report.created_at, provider: report.web?.provider, coverage_status: report.web?.status }))}.
+    Новая интернет-проверка не выполнялась; доступность и охват источников относятся к дате отчёта.</p>
+    ${savedReportConditions({ ...report.web, consent_version: report.web?.automatic_search?.consent_version })}`;
+}
+function bindReportReuse(surface, field) {
+  const view = reportReuseViews[surface];
+  view.field = field;
+  invalidateReportReuse(surface);
+  const button = document.getElementById(`${surface}-reuse-find`);
+  if (!button) return;
+  button.addEventListener('click', async () => {
+    const request = reportReuseRequest(surface);
+    const result = document.getElementById(`${surface}-reuse-result`);
+    view.busy = true;
+    updateReportReuseControl(surface);
+    result.textContent = 'Ищем сохранённый отчёт…';
+    try {
+      const { match } = await api('/api/reports/reuse', { text: request.text });
+      if (!reportReuseCurrent(request)) return;
+      if (!match) {
+        result.innerHTML = '<p>Готовый отчёт для точно такого же текста не найден. Поиск работает для проверок после этого обновления; прежние отчёты доступны в <a href="#history">«Истории»</a>. Можно запустить новую проверку.</p>';
+        return;
+      }
+      result.innerHTML = `<p>${escapeHTML(savedReportDescription(match))}</p>
+        ${savedReportConditions(match)}
+        <div class="action-row"><button class="button secondary small" id="${surface}-reuse-open" type="button">Открыть</button>
+        <button class="text-button" id="${surface}-reuse-new" type="button">Проверить заново</button></div>
+        <p class="field-help">Открытие сохранит ваш черновик. Новая проверка потребует текущего согласия и доступной квоты.</p>`;
+      document.getElementById(`${surface}-reuse-open`).addEventListener('click', async () => {
+        if (!reportReuseCurrent(request)) return;
+        const opening = reportReuseRequest(surface);
+        view.busy = true;
+        result.querySelectorAll('button').forEach(control => { control.disabled = true; });
+        updateReportReuseControl(surface);
+        try {
+          const { report } = await api(`/api/reports/${encodeURIComponent(match.report_id)}`);
+          if (!reportReuseCurrent(opening)) return;
+          if (report.id !== match.report_id || report.text !== opening.text || report.scope !== 'web_search') throw new Error('Сохранённый отчёт недоступен. Повторите поиск.');
+          savedReportOpens.add(report.id);
+          if (surface === 'home') {
+            state.homeReport = report;
+            state.homeMatch = report.matches[0]?.id || null;
+            renderHomeResult();
+          } else acceptCheckReport(report, opening.text);
+          invalidateReportReuse(surface);
+          const area = document.getElementById(surface === 'home' ? 'home-report-result' : 'report-area');
+          const header = surface === 'home' ? document.querySelector('.home-nav')?.getBoundingClientRect().height || 0 : 0;
+          window.scrollTo({ top: window.scrollY + area.getBoundingClientRect().top - header - 16,
+            behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        } catch (error) { if (reportReuseCurrent(opening)) result.textContent = error.message; }
+        finally { if (reportReuseCurrent(opening)) { view.busy = false; updateReportReuseControl(surface); } }
+      });
+      document.getElementById(`${surface}-reuse-new`).addEventListener('click', () => {
+        if (!reportReuseCurrent(request)) return;
+        const text = request.text;
+        const consent = surface === 'home' ? state.homeConsent : state.internetConsent;
+        invalidateReportReuse(surface);
+        busy(button, 'Проверяем', () => startWebCheck({ text, consent, surface }));
+      });
+    } catch (error) { if (reportReuseCurrent(request)) result.textContent = error.message; }
+    finally { if (reportReuseCurrent(request)) { view.busy = false; updateReportReuseControl(surface); } }
+  });
+}
 function refreshSearchConsent(provider, pool) {
   const previous = webStatus().provider;
   const nextPool = arguments.length > 1 ? pool ?? null : automaticSearchStatus();
@@ -131,6 +270,8 @@ function authError(error) {
 }
 
 function hydrateSessionStorage() {
+  resetReportReuse();
+  savedReportOpens.clear();
   storageScope = isBeta() ? `beta.${state.session.beta.id}` : isSaas() ? state.session.user ? `user.${encodeURIComponent(state.session.user.id)}` : 'guest' : 'local';
   state.text = restoreDraft();
   try { state.homeText = storageGet(HOME_DRAFT_KEY) || ''; } catch { state.homeText = ''; }
@@ -543,6 +684,7 @@ function renderAuthScreen() {
 }
 
 async function refreshSession() {
+  resetReportReuse();
   const previous = state.session;
   const session = await api('/api/session');
   if (!['local', 'saas'].includes(session.mode)) throw new Error('Сервер вернул неизвестный режим рабочего пространства.');
@@ -1137,6 +1279,7 @@ function renderHomeResult() {
   area.innerHTML = `<section class="home-result-card">
     <div class="home-result-heading"><div><p class="home-section-label">Ваш результат</p><h2>${webResultTitle(report) === 'Совпадений не найдено' ? 'Совпадений не найдено' : 'Результат проверки уникальности'}</h2><p>${webResultDescription(report)}</p></div><a href="#check/${escapeHTML(report.id)}" id="home-open-full-report">Открыть полный отчёт ↗</a></div>
     <p id="home-report-stale" class="warning" hidden>Это отчёт для предыдущего текста. Новая правка в поле сохранена отдельно.</p>
+    ${savedReportBanner(report)}
     ${webScoreHTML(report)}
     ${webStatsHTML(report)}
     ${selected ? `<div class="card"><h3>Совпадения в вашем тексте</h3>${matchLegendHTML()}<div class="annotated-text">${annotatedText(report, selected.id)}</div>
@@ -1153,7 +1296,7 @@ function renderHomeResult() {
     showComparison('#home-fragments');
   });
   document.querySelector('#home-open-full-report').addEventListener('click', () => {
-    if (!state.text) saveDraft(report.text);
+    if (!state.text && !savedReportOpens.has(report.id)) saveDraft(report.text);
     state.report = report;
     state.selectedMatch = selected?.id || null;
     state.rewrite = null;
@@ -1487,6 +1630,8 @@ async function readTextFile(input, target) {
     throw new Error('Файл слишком большой. Используйте текст до 200 000 знаков.');
   }
   token.active=true;
+  const reuseSurface = target.id === 'home-text' ? 'home' : target.id === 'check-text' ? 'check' : null;
+  if (reuseSurface) invalidateReportReuse(reuseSurface);
   const hint=document.getElementById(`${target.id}-import-hint`);
   if (documentFile && hint) { hint.hidden=false; hint.textContent='Извлекаем текст документа на сервере Истока… Поиск не запускается.'; }
   updateQuotaUI(); updateHomeControls();
@@ -1514,6 +1659,7 @@ async function readTextFile(input, target) {
     target.removeEventListener('input', onInput);
     if (hint && editedWhileReading && fileReadTokens.get(target) === token) hint.hidden=true;
     updateQuotaUI(); updateHomeControls();
+    if (reuseSurface) updateReportReuseControl(reuseSurface);
   }
   target.value = decoded.text;
   showImportHint(target, decoded);
@@ -1582,6 +1728,7 @@ function renderHome() {
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; остальные документы до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текст для интернет-проверки"></label>
             <label class="home-consent"><input id="home-consent" type="checkbox"><span id="home-consent-label">${escapeHTML(searchConsentLabel('home'))}</span></label>
             <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
+            ${reportReuseHTML('home')}
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
             <p class="home-quota" id="home-quota" hidden></p>
             <p class="home-connect-note" id="home-search-unavailable" ${webConfigured() ? 'hidden' : ''}>Интернет-поиск пока не подключён к этому экземпляру. Кнопка станет доступна после подключения сервиса.</p>
@@ -1619,11 +1766,13 @@ function renderHome() {
   const field = document.querySelector('#home-text');
   field.value = state.homeText;
   bindProofreader('home', field);
+  bindReportReuse('home', field);
   document.querySelector('#home-consent').checked = searchConsentGranted(state.homeConsent, 'home');
   document.querySelector('#home-consent').disabled = Boolean(automaticSearchIssue());
   document.querySelector('#home-consent').dataset.searchConsentScope = searchConsentScope();
   field.addEventListener('input', () => {
     state.homeText = field.value;
+    invalidateReportReuse('home');
     try { storageSet(HOME_DRAFT_KEY, field.value); } catch { /* The current field remains available. */ }
     document.querySelector('#home-check-error').textContent = '';
     updateHomeControls();
@@ -1955,6 +2104,7 @@ function renderCheck() {
           <details class="card text-statistics"><summary>SEO-анализ: статистика и повторы</summary><div id="text-statistics-content"></div></details>
           ${proofreaderHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
+            ${reportReuseHTML('check')}
             <label><input id="internet-consent" type="checkbox"> <span id="internet-consent-label">${escapeHTML(searchConsentLabel('check'))}</span></label>
           </div>
           <div class="editor-footer">
@@ -1986,8 +2136,10 @@ function renderCheck() {
   const textarea = document.querySelector('#check-text');
   textarea.value = state.text;
   bindProofreader('check', textarea);
+  bindReportReuse('check', textarea);
   textarea.addEventListener('input', () => {
     saveDraft(textarea.value);
+    invalidateReportReuse('check');
     updateCharacterCount();
     validateTextLength(textarea);
     updateModelActionControls();
@@ -2278,6 +2430,7 @@ function renderReport() {
         <button class="text-button" id="download-report" type="button">↓ Данные JSON</button>
       </div>
     </div>
+    ${savedReportBanner(report)}
     ${webReport ? `${webScoreHTML(report)}<p class="web-score-label">${webResultTitle(report) === 'Совпадений не найдено' ? 'Совпадений не найдено · ' : ''}${webResultDescription(report)}</p>${webStatsHTML(report)}` : `
     <div class="stats-row">
       <div class="stat-card"><strong>${Number(stats.similarity_percent || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%</strong><span>текста с лексическими совпадениями</span></div>
@@ -3705,7 +3858,7 @@ async function restoreLinkedReport(surface, id, revision) {
     } else if (surface === 'check') {
       state.report = report;
       state.selectedMatch = report.matches[0]?.id || null;
-      if (!state.text) {
+      if (!state.text && !savedReportOpens.has(report.id)) {
         saveDraft(report.text);
         const field = document.querySelector('#check-text');
         if (field) {
