@@ -1,15 +1,19 @@
 :root {
-  color-scheme:light;
-  --ink:#20312a;
-  --muted:#66736b;
-  --line:#dce3dc;
-  --green:#173c2e;
-  --pale:#eef4ee;
-  --paper:#fff;
-  --canvas:#f6f7f3;
-  --warning:#805314;
-  --danger:#9a3128;
-  --focus:#23654d;
+  color-scheme:dark;
+  --raised:#1e2938;
+  --control-line:#667993;
+  --action-ink:#101c31;
+  --success:#9bd2b5;
+  --ink:#e8edf5;
+  --muted:#a6b3c6;
+  --line:#334155;
+  --green:#b2c9f5;
+  --pale:#1c3029;
+  --paper:#171f2d;
+  --canvas:#0d1422;
+  --warning:#f1cc8f;
+  --danger:#ffb4ab;
+  --focus:#b2c9f5;
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   font-size:15px;
   line-height:1.5;
@@ -36,8 +40,11 @@ button {
   cursor:pointer
 }
 button:disabled {
-  cursor:wait;
-  opacity:.58
+  cursor:not-allowed;
+  opacity:1;
+  color:var(--muted);
+  background:var(--canvas);
+  border-color:var(--line)
 }
 [hidden] {
   display:none!important
@@ -83,7 +90,7 @@ button:disabled {
   height:34px;
   border-radius:7px;
   background:var(--green);
-  color:white;
+  color:var(--action-ink);
   font-size:22px;
   letter-spacing:0
 }
@@ -164,14 +171,16 @@ p {
 .primary {
   background:var(--green);
   border-color:var(--green);
-  color:white
+  color:var(--action-ink)
 }
 .secondary {
   background:var(--paper);
   color:var(--green)
 }
 .button:hover:not(:disabled) {
-  filter:brightness(.96)
+  background:var(--raised);
+  border-color:#8499b7;
+  color:var(--ink)
 }
 .notice {
   padding:13px 16px;
@@ -183,13 +192,13 @@ p {
 }
 .notice.error {
   color:var(--danger);
-  border-color:#e3c8c3;
-  background:#fff6f3
+  border-color:#ad7674;
+  background:#392329
 }
 .notice.warning {
   color:var(--warning);
-  border-color:#e6d6b9;
-  background:#fffbf1
+  border-color:#9a8158;
+  background:#332c21
 }
 .notice.success {
   color:var(--green);
@@ -294,7 +303,7 @@ td small {
   font-weight:600
 }
 .badge.warning {
-  background:#fff1d4;
+  background:#332c21;
   color:var(--warning)
 }
 .badge.neutral {
@@ -302,7 +311,7 @@ td small {
   background:var(--canvas)
 }
 .badge.danger {
-  background:#fcece8;
+  background:#392329;
   color:var(--danger)
 }
 .caption {
@@ -332,7 +341,7 @@ td small {
 .add-key input,.add-key select {
   width:100%;
   height:44px;
-  border:1px solid #7a8e80;
+  border:1px solid var(--control-line);
   border-radius:5px;
   background:var(--paper);
   padding:9px 11px;
@@ -526,3 +535,37 @@ td small {
     font-size:23px
   }
 }
+
+::selection{background:var(--green);color:var(--action-ink)}
+body{min-height:100dvh}
+h1,h2{text-wrap:balance}
+a:hover{color:#c9daff}
+.topbar{background:var(--canvas)}
+.brand{color:var(--ink)}
+.topbar nav a:hover{color:var(--ink);text-decoration:underline}
+.topbar nav [aria-current="page"]{color:var(--ink)}
+.button{border-color:var(--control-line)}
+.primary{border-color:var(--green)}
+.primary:hover:not(:disabled){background:#c9daff;border-color:#c9daff;color:var(--action-ink)}
+.button:active:not(:disabled){background:#2c3d53}
+.primary:active:not(:disabled){background:#9db8ea;border-color:#9db8ea}
+.button:disabled{border-color:var(--line);color:var(--muted);background:var(--canvas)}
+.notice.success{color:var(--success)}
+.summary{border:1px solid var(--line);border-radius:8px}
+.summary strong,td{font-variant-numeric:tabular-nums}
+.table-scroll{scrollbar-color:var(--control-line) var(--paper);scrollbar-width:thin}
+th{background:var(--raised);font-size:12px}
+tbody tr:nth-child(even){background:#192331}
+tbody tr:hover{background:var(--raised)}
+.badge{color:var(--success)}
+.badge.neutral{background:var(--raised)}
+.add-key input,.add-key select{caret-color:var(--green)}
+.add-key input:hover:not(:disabled),.add-key select:hover:not(:disabled){border-color:#8499b7}
+.add-key input::placeholder{color:var(--muted);opacity:1}
+.add-key input:user-invalid,.add-key input[aria-invalid="true"]{border-color:var(--danger)}
+.add-key input:-webkit-autofill{-webkit-text-fill-color:var(--ink);box-shadow:0 0 0 1000px var(--paper) inset;caret-color:var(--ink)}
+.add-key input:disabled,.add-key select:disabled{color:var(--muted);background:var(--canvas);border-color:var(--line)}
+.field-error{line-height:1.6}
+.count{background:var(--raised)}
+.empty-state{border-color:var(--control-line)}
+@media(max-width:640px){.add-key input,.add-key select{font-size:16px}}
