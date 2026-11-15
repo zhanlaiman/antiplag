@@ -28,6 +28,8 @@ tbody tr:nth-child(even){background:#192331}
 tbody tr:hover{background:var(--raised)}
 caption{line-height:1.6}
 .account-id{line-height:1.55}
+.account-id-label{display:block;margin-top:8px;font-size:12px;color:var(--muted)}
+td .account-id{max-width:220px;margin-top:3px}
 .reason{line-height:1.55}
 details summary{cursor:pointer;min-height:28px;padding-block:3px}
 #empty{padding:24px;border:1px dashed var(--control-line);color:var(--muted)}

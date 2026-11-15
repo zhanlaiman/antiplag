@@ -24,6 +24,14 @@
   function element(tag, text, className) {
     const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node;
   }
+  function appendAccountIDs(parent, account) {
+    for (const [label, value, className] of [
+      ['ID аккаунта', account.registered_account_id, 'registered-account-id'],
+      ['ID пространства', account.id, 'canonical-guest-id']
+    ]) {
+      if (value) parent.append(element('span', label, 'account-id-label'), element('p', value, `account-id ${className}`));
+    }
+  }
   function renderAccounts(data) {
     $('total').textContent = number(data.total); $('queue').textContent = `${data.queue.active} / ${data.queue.capacity}`;
     const available = data.accounts.filter(a => a.metrics.available);
@@ -43,7 +51,8 @@
     $('accounts').replaceChildren(); $('empty').hidden = data.accounts.length > 0;
     for (const account of data.accounts) {
       const row = document.createElement('tr'), identity = document.createElement('td');
-      identity.append(element('strong', kinds[account.kind] || 'Аккаунт'), element('p', account.id, 'account-id'));
+      identity.append(element('strong', kinds[account.kind] || 'Аккаунт'));
+      appendAccountIDs(identity, account);
       if (account.first_seen_month) identity.append(element('span', `Первое действие: ${account.first_seen_month} (месяц)`, 'small'));
       const state = document.createElement('td'); state.append(element('span', account.blocked ? 'Заблокирован' : 'Доступен', `status${account.blocked ? ' blocked' : ''}`));
       if (account.block_reason) state.append(element('p', account.block_reason, 'reason'));
@@ -59,7 +68,8 @@
       button.disabled = !businessWrites;
       button.type = 'button'; button.addEventListener('click', () => {
         selected = account; $('block-title').textContent = account.blocked ? 'Разблокировать аккаунт' : 'Блокировать аккаунт';
-        $('block-target').textContent = account.id; $('reason').value = ''; $('block-error').textContent = ''; $('confirm-block').textContent = account.blocked ? 'Разблокировать' : 'Блокировать';
+        $('block-target').replaceChildren(); appendAccountIDs($('block-target'), account);
+        $('reason').value = ''; $('block-error').textContent = ''; $('confirm-block').textContent = account.blocked ? 'Разблокировать' : 'Блокировать';
         $('block-dialog').showModal(); $('reason').focus();
       }); action.append(button); row.append(identity, state, checks, reports, characters, usage, action); $('accounts').append(row);
     }
