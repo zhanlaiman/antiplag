@@ -127,6 +127,42 @@ class CoveredEmptyNineTests(unittest.TestCase):
         plan[1], plan[-1] = plan[-1], plan[1]
         self.assertIsNone(short_suffix_candidate(TEXT, plan))
 
+    def test_mixed_lengths_preserve_ordinary_six_to_eight_word_candidate(self):
+        # The seven-word arm is the independent SI1 native130-token repro.
+        # All first five replies are empty; only the ordinary whole clue returns
+        # a page. A nine-word sentence coexists and must not displace that clue.
+        for length, short in (
+            (6, 'После этого мы снова смотрели вокруг'),
+            (7, 'После этого мы снова тихо смотрели вокруг'),
+            (8, 'После этого мы снова очень тихо смотрели вокруг'),
+        ):
+            with self.subTest(length=length):
+                text = short + '. ' + NINE + '. ' + ' '.join(CONTEXT)
+                phrase = '"' + short.lower() + '"'
+                body = short + '. Гравитационная калибровка выполнена сертифицированными наблюдателями спектральной лаборатории.'
+
+                class WholeSearch(Search):
+                    def search(self, query, request_id):
+                        self.calls.append(query)
+                        return [{'url': URL}] if query == phrase else []
+
+                old, new = WholeSearch(), WholeSearch()
+                before = execute(SHORT_PURE_STRATEGY, old, text=text, body=body)
+                after = execute(SHORT_SUFFIX_STRATEGY, new, text=text, body=body)
+                self.assertEqual(len(_tokens(text)), 123 + length)
+                self.assertEqual(before['stats']['matched_words'], length)
+                self.assertEqual(after['stats']['matched_words'], length)
+                self.assertNotIn(phrase, old.calls[:5])
+                self.assertEqual(old.calls, new.calls)
+                self.assertEqual(len(new.calls), 6)
+                self.assertEqual(new.calls[-1], phrase)
+                self.assertEqual(after['web']['input_query_replacements'][-1]['reason'],
+                                 'short_sentence_without_pure_query')
+                self.assertTrue(after['matches'])
+                for match in after['matches']:
+                    self.assertEqual(match['excerpt'], short)
+                    self.assertEqual(match['source_excerpt'], short)
+
 
 if __name__ == '__main__':
     unittest.main()

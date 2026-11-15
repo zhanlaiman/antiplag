@@ -624,6 +624,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
             candidate = short_pure_candidate(text, queries, input_protected)
             suffix_used = False
             if (query_strategy == SHORT_SUFFIX_STRATEGY and index == 5
+                    and (candidate is None or candidate['sentence_words'] == 9)
                     and queries_attempted == queries_completed == 5 and not errors and not seen):
                 suffix = short_suffix_candidate(text, queries, input_protected)
                 if suffix:
