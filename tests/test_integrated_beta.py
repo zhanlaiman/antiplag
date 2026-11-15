@@ -5,6 +5,7 @@ in a fixture. The ordinary create_server integration is the system under test.
 """
 
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from hashlib import pbkdf2_hmac
 from http.client import HTTPConnection
 from http.cookies import SimpleCookie
@@ -265,6 +266,91 @@ class IntegratedBetaTests(unittest.TestCase):
         self.assertEqual(browser.request("/api/session")[0], 200)
         self.block(admin, identifier)
         self.assertEqual(browser.request("/api/session")[0], 403)
+
+    def test_monthly_space_capacity_allows_200th_and_preserves_rows(self):
+        browser = self.browser()
+        guest = self.guest(browser)
+        today = datetime.now(timezone.utc)
+        month = today.strftime('%Y-%m')
+        previous = (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
+        current = [(format(i + 1000, '064x'), month) for i in range(199)]
+        with closing(self.service.beta.connect()) as db, db:
+            db.executemany('INSERT INTO active_guests VALUES (?,?)', current + [(guest, previous)])
+            db.executemany('INSERT INTO guests VALUES (?,?)', current + [(guest, previous), ('e' * 64, month)])
+
+        def rows():
+            with closing(self.service.beta.connect()) as db:
+                return {table: set(db.execute('SELECT * FROM ' + table))
+                        for table in ('active_guests', 'guests', 'checks', 'rates')}
+
+        before = rows()
+        self.assertEqual(browser.request('/api/session')[0], 200)
+        self.assertEqual(browser.request('/api/status')[0], 200)
+        self.assertEqual(rows(), before)
+        self.assertEqual(browser.request('/api/sources')[0], 200, 'The 200th current-month space must be admitted')
+        expected = {**before, 'active_guests': before['active_guests'] | {(guest, month)}}
+        self.assertEqual(rows(), expected)
+        self.assertEqual(sum(row[1] == month for row in expected['active_guests']), 200)
+        tenants = set((self.root / 'tenants').glob('*/istok.sqlite3'))
+        self.assertEqual(browser.request('/api/sources')[0], 200)
+        newcomer = self.browser()
+        status, payload, _ = newcomer.request('/api/sources')
+        self.assertEqual((status, payload['code']), (429, 'beta_capacity'))
+        self.assertEqual(rows(), expected)
+        self.assertEqual(set((self.root / 'tenants').glob('*/istok.sqlite3')), tenants)
+        self.stop(); self.start()
+        self.assertEqual(rows(), expected)
+        self.assertEqual(browser.request('/api/sources')[0], 200)
+        self.assertEqual(newcomer.request('/api/sources')[0], 429)
+        self.assertEqual(rows(), expected)
+        self.assertEqual(self.calls, [])
+
+    def test_registered_login_at_capacity_reuses_canonical_space(self):
+        registered = self.browser()
+        user = self.register(registered)
+        self.assertEqual(registered.request('/api/sources')[0], 200)
+        prior = self.browser()
+        prior_user = self.register(prior, 'prior_month_user')
+        today = datetime.now(timezone.utc)
+        month = today.strftime('%Y-%m')
+        previous = (today.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
+        remaining = [(format(i + 10000, '064x'), month) for i in range(199)]
+        with closing(self.service.beta.connect()) as db, db:
+            db.executemany('INSERT INTO active_guests VALUES (?,?)', remaining + [(prior_user['guest_id'], previous)])
+            db.executemany('INSERT INTO guests VALUES (?,?)', remaining + [(prior_user['guest_id'], previous)])
+            self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?', (month,)).fetchone()[0], 200)
+
+        def rows():
+            with closing(self.service.beta.connect()) as db:
+                return {table: set(db.execute('SELECT * FROM ' + table))
+                        for table in ('active_guests', 'guests', 'checks', 'rates')}
+
+        before = rows()
+        tenants = set((self.root / 'tenants').glob('*/istok.sqlite3'))
+        second = self.browser()
+        fresh_guest = self.guest(second)
+        status, payload, _ = second.request('/api/account/login', {'username': 'INTEGRATED_USER', 'password': self.password})
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload['user']['guest_id'], user['guest_id'])
+        self.assertEqual(self.guest(second), user['guest_id'])
+        self.assertEqual(second.request('/api/sources')[0], 200)
+        prior_login = self.browser()
+        status, payload, _ = prior_login.request('/api/account/login', {'username': 'prior_month_user', 'password': self.password})
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(prior_login.request('/api/session')[0], 200)
+        self.assertEqual(prior_login.request('/api/status')[0], 200)
+        status, payload, _ = prior_login.request('/api/sources')
+        self.assertEqual((status, payload['code']), (429, 'beta_capacity'))
+        self.assertEqual(rows(), before)
+        self.assertNotIn((user['id'], month), before['active_guests'])
+        self.assertNotIn((fresh_guest, month), before['active_guests'])
+        self.assertNotIn((prior_user['guest_id'], month), before['active_guests'])
+        self.assertEqual(set((self.root / 'tenants').glob('*/istok.sqlite3')), tenants)
+        self.stop(); self.start()
+        self.assertEqual(second.request('/api/sources')[0], 200)
+        self.assertEqual(prior_login.request('/api/sources')[0], 429)
+        self.assertEqual(rows(), before)
+        self.assertEqual(self.calls, [])
 
     def test_registration_keeps_existing_tenant_reports_and_never_grants_owner_or_admin(self):
         browser = self.browser()

@@ -24,7 +24,7 @@ Namecheap nameservers: `garret.ns.cloudflare.com`, `rosalyn.ns.cloudflare.com`. 
 
 У Worker fetch используется `cache:'no-store'`. Не возвращайте `cf.cacheTtl:0`: это не отключает кэш, а может убрать Set-Cookie. Cloudflare RUM отключён через zone→Speed→Real user monitoring; публичные HTML после отключения совпали с исходниками и больше не содержат beacon. [Что делает RUM](https://developers.cloudflare.com/speed/observatory/rum-beacon/).
 
-Сессии подписываются постоянным `runtime/guest-signing.key`. GET `/api/session` и `/api/status` без cookie не выделяют базу и не занимают место. Таблица `active_guests(id,month)` ограничивает 100 открываемых пространств в месяц; прежние пустые строки `guests` — исторические записи, а не сброшенная поисковая квота. Проверены 110+110 таких GET локально и 20 в production без роста баз/мест.
+Сессии подписываются постоянным `runtime/guest-signing.key`. GET `/api/session` и `/api/status` без cookie не выделяют базу и не занимают место. Таблица `active_guests(id,month)` ограничивает 200 активных пространств за UTC-месяц, а не число уникальных людей; прежние пустые строки `guests` — исторические записи, а не сброшенная поисковая квота. Проверены 110+110 таких GET локально и 20 в production без роста баз/мест.
 
 ## Приватные копии и проверка восстановления
 

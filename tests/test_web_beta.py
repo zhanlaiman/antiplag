@@ -220,15 +220,15 @@ class WebBetaTests(unittest.TestCase):
         def reserve(index):
             try:self.service.beta.admit_space(f'{index+100:064x}');return True
             except AccessError:return False
-        with ThreadPoolExecutor(max_workers=8) as pool:accepted=list(pool.map(reserve,range(110)))
-        self.assertEqual(sum(accepted),100)
-        self.assertEqual(self.service.beta.owner_statistics()['counts']['guests_this_month'],100)
+        with ThreadPoolExecutor(max_workers=8) as pool:accepted=list(pool.map(reserve,range(210)))
+        self.assertEqual(sum(accepted),200)
+        self.assertEqual(self.service.beta.owner_statistics()['counts']['guests_this_month'],200)
         self.assertEqual(self.http('/api/session')[0],200)
         self.assertEqual(self.http('/api/status')[0],200)
         cookie,_=self.guest();self.assertEqual(self.http('/api/sources',cookie=cookie)[0],429)
         with self.service.beta.connect() as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],100)
-            self.assertEqual(db.execute('SELECT count(*) FROM guests').fetchone()[0],200)
+            self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],200)
+            self.assertEqual(db.execute('SELECT count(*) FROM guests').fetchone()[0],300)
         self.assertEqual(self.calls,[])
 
     def test_site_preview_requires_consent_and_durable_limits_without_search(self):
@@ -395,8 +395,8 @@ class WebBetaTests(unittest.TestCase):
             before=self.http('/api/reports/'+report_id,cookie=owner)[1]
             month=datetime.now(timezone.utc).strftime('%Y-%m')
             with self.service.beta.connect() as db:
-                db.executemany('INSERT OR IGNORE INTO active_guests VALUES (?,?)',[(format(i,'064x'),month)for i in range(99)])
-                self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0],100)
+                db.executemany('INSERT OR IGNORE INTO active_guests VALUES (?,?)',[(format(i,'064x'),month)for i in range(199)])
+                self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0],200)
             expired_value=identifier+'.1.synthetic'
             expired='istok_owner='+expired_value+'.'+hmac.new(self.service.beta.key,('owner.'+expired_value).encode(),sha256).hexdigest()
             stale=guest+'; '+expired
@@ -410,7 +410,7 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(self.http('/api/reports/'+report_id,cookie=restored)[1],before)
             self.assertEqual(self.http('/api/session',cookie=restored)[1]['beta']['id'],identifier)
             with self.service.beta.connect() as db:
-                self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0],100)
+                self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0],200)
                 db.executemany('INSERT INTO owner_attempts VALUES (?)',[(time.time(),)]*19)
             self.assertEqual(self.http('/api/owner/login',wrong,stale)[0],401)
             status,result,_=self.http('/api/owner/login',login,stale)
@@ -421,7 +421,7 @@ class WebBetaTests(unittest.TestCase):
             self.assertEqual(self.http('/api/reports/'+report_id,cookie=restored)[1],before)
             self.assertEqual(self.http('/api/reports/'+report_id,cookie=guest)[0],429)
             with self.service.beta.connect() as db:
-                self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0],100)
+                self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0],200)
                 db.execute('DELETE FROM owner_attempts')
                 db.execute('UPDATE rates SET count=40 WHERE guest=?',(identifier,))
             status,result,_=self.http('/api/owner/login',login,stale)
@@ -507,14 +507,14 @@ class WebBetaTests(unittest.TestCase):
                 'ISTOK_OWNER_DIGEST':pbkdf2_hmac('sha256',b'test-password',bytes.fromhex(salt),600000).hex()}):
             guest,identifier=self.guest();month=datetime.now(timezone.utc).strftime('%Y-%m')
             with closing(runtime.connect()) as db,db:
-                db.executemany('INSERT INTO active_guests VALUES (?,?)',[(format(i,'064x'),month)for i in range(100)])
+                db.executemany('INSERT INTO active_guests VALUES (?,?)',[(format(i,'064x'),month)for i in range(200)])
             status,result,cookie=self.http('/api/owner/login',{'username':'owner','password':'test-password'},guest)
             self.assertEqual((status,result['code']),(429,'beta_capacity'))
             self.assertNotIn('istok_owner=',cookie or '')
             with closing(runtime.connect()) as db:
                 self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_account'").fetchone())
                 self.assertEqual(db.execute('SELECT count(*) FROM rates').fetchone()[0],0)
-                self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],100)
+                self.assertEqual(db.execute('SELECT count(*) FROM active_guests').fetchone()[0],200)
             self.assertFalse(list((self.root/'tenants').glob('*/istok.sqlite3')))
 
     def test_owner_password_stable_workspace_and_no_guest_daily_limit(self):

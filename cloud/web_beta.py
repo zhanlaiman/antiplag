@@ -37,6 +37,7 @@ COOKIE='istok_beta'
 MAX_CHARACTERS=10000
 MONTHLY_SEARCHES=180
 DAILY_CHECKS=6
+MONTHLY_ACTIVE_SPACE_LIMIT=200
 
 
 class SearchNotStarted(web_search.WebSearchError):
@@ -193,7 +194,7 @@ class BetaRuntime:
 
     def _admit_space(self,db,guest,month):
         if db.execute('SELECT 1 FROM active_guests WHERE id=? AND month=?',(guest,month)).fetchone():return
-        if db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0]>=100:
+        if db.execute('SELECT count(*) FROM active_guests WHERE month=?',(month,)).fetchone()[0]>=MONTHLY_ACTIVE_SPACE_LIMIT:
             raise access.AccessError('На этот месяц места в бесплатной бете закончились.','beta_capacity',429)
         db.execute('INSERT INTO active_guests VALUES (?,?)',(guest,month))
         db.execute('INSERT OR IGNORE INTO guests VALUES (?,?)',(guest,month))

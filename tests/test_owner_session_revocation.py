@@ -256,8 +256,8 @@ class OwnerSessionWriterTests(OwnerSessionFixture):
         month = datetime.now(timezone.utc).strftime('%Y-%m')
         with closing(self.runtime.connect()) as db, db:
             db.execute('UPDATE rates SET count=40 WHERE guest=?', (self.owner_id,))
-            db.executemany('INSERT OR IGNORE INTO active_guests VALUES (?,?)', [(format(i, '064x'), month) for i in range(99)])
-            self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?', (month,)).fetchone()[0], 100)
+            db.executemany('INSERT OR IGNORE INTO active_guests VALUES (?,?)', [(format(i, '064x'), month) for i in range(199)])
+            self.assertEqual(db.execute('SELECT count(*) FROM active_guests WHERE month=?', (month,)).fetchone()[0], 200)
         before = self.logical_state()
         tenants = set((self.root / 'tenants').glob('*/istok.sqlite3'))
         with patch.object(self.runtime, 'admit_space', side_effect=AssertionError('Logout must not admit')) as admission, \
