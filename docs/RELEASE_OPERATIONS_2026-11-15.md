@@ -21,10 +21,20 @@
 После такой проверки закрепление выполняют в том же checkout:
 
 ```sh
-git -C "$ISTOK_SOURCE" switch --detach f60282b400dcf319ea851c7d191b0ac6e363cafc
+ISTOK_ROOT='/Users/air/Documents/ChatGPT/спиздеть с запада'
+ISTOK_SOURCE="$ISTOK_ROOT/.runtime/worktrees/night-search-20261115"
+ISTOK_OPS="$ISTOK_ROOT/.runtime/day-release-20261115"
+ISTOK_PY="$ISTOK_ROOT/.runtime/modal-venv/bin/python"
+export MODAL_CONFIG_PATH="$ISTOK_ROOT/.runtime/modal-config.toml"
+export ISTOK_RUNTIME_DIR="$ISTOK_ROOT/.runtime"
+
+test -f "$ISTOK_OPS/final-r2/config.json" &&
+  test "$(git -C "$ISTOK_SOURCE" rev-parse --show-toplevel)" = "$ISTOK_SOURCE" &&
+  test -z "$(git -C "$ISTOK_SOURCE" status --porcelain)" &&
+  git -C "$ISTOK_SOURCE" switch --detach f60282b400dcf319ea851c7d191b0ac6e363cafc
 ```
 
-Где `ISTOK_SOURCE` — указанный SAMEBOUND checkout, `ISTOK_OPS` — **day-release-20261115**, `ISTOK_PY` — существующий `.runtime/modal-venv/bin/python`, а `MODAL_CONFIG_PATH` и `ISTOK_RUNTIME_DIR` указывают на основной ROOT/.runtime. Новые worktree, paid hosting, другой Volume или generic `modal_web.py --deploy` здесь не используются.
+Продолжать к rollback только после успешного exit0 этого блока; ошибка проверки не разрешает следующую операцию. `ISTOK_SOURCE` — указанный SAMEBOUND checkout, `ISTOK_OPS` — **day-release-20261115**, `ISTOK_PY` — существующий `.runtime/modal-venv/bin/python`, а `MODAL_CONFIG_PATH` и `ISTOK_RUNTIME_DIR` указывают на основной ROOT/.runtime. Новые worktree, paid hosting, другой Volume или generic `modal_web.py --deploy` здесь не используются.
 
 Только при инциденте текущего writer и отсутствии прежнего неизвестного rollback-intent:
 
