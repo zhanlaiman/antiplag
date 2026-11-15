@@ -199,6 +199,14 @@ class DashboardTests(unittest.TestCase):
             db.executemany('INSERT INTO admin_login_attempts VALUES (?,?)', [(str(i), self.clock) for i in range(40)])
         self.assertEqual(self.http('/api/dashboard/login', {'username': self.login_name, 'password': self.login_password})[0], 429)
 
+    def test_config_rotation_then_rollback_never_resurrects_prior_cookie(self):
+        cookie, _ = self.login()
+        changed = dashboard.DashboardConfig('rotated_admin_fixture', self.config.salt, self.config.digest)
+        self.stop(); self.start(config=changed)
+        self.assertEqual(self.http('/api/dashboard/accounts', cookie=cookie)[0], 401)
+        self.stop(); self.start(config=self.config)
+        self.assertEqual(self.http('/api/dashboard/accounts', cookie=cookie)[0], 401)
+
     def test_origin_fetch_metadata_host_and_body_validation(self):
         body = {'username': self.login_name, 'password': self.login_password}
         for origin in (None, 'https://other.example', 'null'):

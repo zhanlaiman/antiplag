@@ -118,6 +118,11 @@ class DashboardRuntime:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, action TEXT NOT NULL,
                     account_id TEXT, reason TEXT NOT NULL);
             """)
+            if config is None:
+                db.execute("DELETE FROM admin_sessions")
+            else:
+                # A config rollback must not resurrect cookies revoked by rotation.
+                db.execute("DELETE FROM admin_sessions WHERE config_hash!=? OR expires_at<=?", (config.fingerprint, now()))
         try:
             with os.fdopen(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w") as stream:
                 stream.write("dashboard-v1\n"); stream.flush(); os.fsync(stream.fileno())
