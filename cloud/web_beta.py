@@ -203,16 +203,32 @@ class BetaRuntime:
             reports="SELECT count(*) FROM records WHERE kind='report'"+(" AND NOT EXISTS (SELECT 1 FROM trash WHERE kind='report' AND trash.id=records.id)" if has_trash else '')
             return {'sources':db.execute(sources).fetchone()[0],'reports':db.execute(reports).fetchone()[0]}
 
-    def owner_identity(self,headers):
+    def _verified_owner_token(self,headers):
         try:
             cookie=SimpleCookie();cookie.load(headers.get('Cookie',''))
             value=cookie['istok_owner'].value;guest,expiry,nonce,signature=value.split('.')
+            expires_at=int(expiry)
             message='owner.'+'.'.join((guest,expiry,nonce))
             expected=hmac.new(self.key,message.encode(),sha256).hexdigest()
-            if (re.fullmatch(r'[a-f0-9]{64}',guest) and int(expiry)>time.time()
-                    and hmac.compare_digest(expected,signature)):return guest
+            if (re.fullmatch(r'[a-f0-9]{64}',guest) and expires_at>time.time()
+                    and re.fullmatch(r'[a-f0-9]{64}',signature) and hmac.compare_digest(expected,signature)):
+                return guest,expires_at,sha256(value.encode()).hexdigest()
         except (KeyError,ValueError,CookieError):pass
         return None
+
+    def owner_identity(self,headers):
+        token=self._verified_owner_token(headers)
+        if token is None:return None
+        guest,_,digest=token
+        try:
+            with closing(sqlite3.connect(self.database.resolve().as_uri()+'?mode=ro',uri=True,timeout=15)) as db:
+                table=db.execute("SELECT type FROM sqlite_master WHERE name='owner_session_revocations' COLLATE NOCASE").fetchone()
+                if table is None:return guest
+                if table[0]!='table':raise sqlite3.DatabaseError('Invalid owner revocation schema')
+                revoked=db.execute('SELECT expires_at FROM owner_session_revocations WHERE token_sha256=?',(digest,)).fetchone()
+        except (OSError,sqlite3.Error):
+            raise access.AccessError('Проверка сессии временно недоступна. Повторите позже.','owner_session_unavailable',503) from None
+        return None if revoked is not None else guest
 
     def owner_login(self,body,guest):
         username=os.environ.get('ISTOK_OWNER_USERNAME','');salt=os.environ.get('ISTOK_OWNER_SALT','')
