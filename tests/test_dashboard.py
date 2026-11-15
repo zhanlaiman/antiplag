@@ -428,6 +428,26 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(job['status'], 'failed'); self.assertEqual(job['code'], 'account_blocked')
         work.assert_not_called()
 
+    def test_reader_block_mutation_denied_but_admin_session_logout_and_existing_guard_work(self):
+        guest_cookie, identifier = self.guest(); self.admin.set_block(identifier, True, 'fixture existing block')
+        self.admin.business_writes_enabled = False
+        cookie, csrf = self.login()
+        self.assertFalse(self.http('/api/dashboard/session', cookie=cookie)[1]['business_writes_enabled'])
+        status, payload, _ = self.http(f'/api/dashboard/accounts/{identifier}/unblock', {'reason': 'fixture'}, cookie, csrf=csrf)
+        self.assertEqual(status, 503); self.assertEqual(payload['code'], 'dashboard_readonly')
+        self.assertEqual(self.http('/api/session', cookie=guest_cookie)[0], 403)
+        self.assertEqual(self.http('/api/dashboard/accounts', cookie=cookie)[0], 200)
+        self.assertEqual(self.http('/api/dashboard/logout', {}, cookie, csrf=csrf)[0], 200)
+
+    def test_reader_pool_mutation_never_calls_hook_and_denies_before_reading_body(self):
+        self.admin.business_writes_enabled = False; cookie, csrf = self.login()
+        hook = Mock(return_value={'safe': True}); self.admin.pool_route = hook
+        self.assertEqual(self.http('/api/dashboard/pool', cookie=cookie)[0], 200); hook.reset_mock()
+        status, payload, _ = self.http('/api/dashboard/pool/stage', cookie=cookie, csrf=csrf, raw=b'{')
+        self.assertEqual(status, 503); self.assertEqual(payload['code'], 'dashboard_readonly'); hook.assert_not_called()
+        self.assertEqual(self.http('/api/dashboard/pool/stage', {}, csrf=csrf)[0], 401)
+        hook.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -9,7 +9,8 @@
 ```python
 from cloud import dashboard, user_auth
 
-service.dashboard = dashboard.DashboardRuntime(beta, dashboard.DashboardConfig.from_env(), pool_route=pool_route)
+service.dashboard = dashboard.DashboardRuntime(beta, dashboard.DashboardConfig.from_env(), pool_route=pool_route,
+                                               business_writes_enabled=False)  # True только в writer
 service.accounts = user_auth.UserAuthRuntime(
     beta,
     registration_enabled=False,  # aware-reader; True только в writer
@@ -74,6 +75,8 @@ POST `/api/account/register` и `/login` принимают **только** `{u
 До constructor DDL существующая DB проверяется на обязательные таблицы/колонки, PK, unique login/guest, FK и целостные account–credential–binding triples. Live session/claim/resolver/public-bindings тоже проверяют triples. Ongoing connections используют mode=rw, поэтому потерянная DB не создаётся чтением. Missing/corrupt DB/key/schema, orphan triples и повреждённые идентификаторы закрывают доступ с безопасным 503, не anonymous fallback.
 
 Marker содержит `user-access-v1:N`, монотонный минимум числа созданных аккаунтов. После атомарного commit новой регистрации, пока ещё удерживается beta claim lock, он заменяется через fsync/atomic replace до успешного ответа. Live/restart проверка отвергает DB с количеством ниже marker. Поэтому удаление всех связанных строк или восстановление более старой user DB отдельно от marker не открывает прежний guest-cookie. Удаление аккаунтов в этом релизе не реализовано: нужны отдельная политика и миграция защитных anchors. При backup/restore все три файла и соответствующие tenant данные должны принадлежать одному согласованному snapshot; marker/DB не удаляются ради обхода 503.
+
+Runtime требует точного совпадения account count и marker. Если marker update не удался после commit, последующие login/session тоже закрыты с 503, без выдачи cookie. Constructor также берёт beta claim lock для всего bootstrap/preflight/marker update (`claim(None)`): конкурентный reader initializer не может понизить marker writer. Проверенная целостная DB с более высоким count после такой неуспешной регистрации может быть безопасно доведена вперёд при restart под этим lock; потеря строк ниже уже сохранённого marker не восстанавливается автоматически. FK сессий/операций и полные, не partial, уникальные индексы credentials/binding обязательны. Неожиданный тип объекта `owner_account` закрывает claim, а не означает отсутствие владельца.
 
 Dashboard использует только valid triples: одна строка по canonical guest ID с `registered_account_id` и source `beta_local_password`; метрики берутся из прежнего tenant. Raw login, email, salt/digest и password в inventory не извлекаются. Блокировки guest/account aliases объединяются через OR; `block_sources` объясняет источник. Block/unblock через любой alias меняет оба в одной admin transaction с одной canonical audit записью. API bearer и старый guest тоже видят block через canonical alias lookup.
 

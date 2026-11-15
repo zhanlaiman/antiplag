@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id);
   const number = value => Number(value).toLocaleString('ru-RU');
   const date = value => new Date(value * 1000).toLocaleString('ru-RU');
-  let csrf = '', offset = 0, selected = null;
+  let csrf = '', offset = 0, selected = null, businessWrites = true;
   const kinds = {guest: 'Гость', owner: 'Владелец', registered: 'Зарегистрирован'};
   function notice(message = '', error = false) { $('notice').textContent = message; $('notice').classList.toggle('error', error); }
   function loginView() {
@@ -49,6 +49,7 @@
       const last = account.last_usage;
       const usage = element('td', !last ? 'Нет данных' : last.precision === 'day' ? `${last.at} (день UTC)` : new Date(last.at).toLocaleString('ru-RU'));
       const action = document.createElement('td'), button = element('button', account.blocked ? 'Разблокировать' : 'Блокировать');
+      button.disabled = !businessWrites;
       button.type = 'button'; button.addEventListener('click', () => {
         selected = account; $('block-title').textContent = account.blocked ? 'Разблокировать аккаунт' : 'Блокировать аккаунт';
         $('block-target').textContent = account.id; $('reason').value = ''; $('block-error').textContent = ''; $('confirm-block').textContent = account.blocked ? 'Разблокировать' : 'Блокировать';
@@ -66,11 +67,12 @@
   }
   async function refresh() {
     $('refresh').disabled = true; notice('Загружаем данные…');
-    try { const [accounts, audit] = await Promise.all([api(`/api/dashboard/accounts?offset=${offset}`), api('/api/dashboard/audit')]); renderAccounts(accounts); renderAudit(audit); notice(); }
+    try { const [accounts, audit] = await Promise.all([api(`/api/dashboard/accounts?offset=${offset}`), api('/api/dashboard/audit')]); renderAccounts(accounts); renderAudit(audit); notice(businessWrites ? '' : 'Панель доступна только для просмотра. Изменения временно отключены.'); }
     catch (error) { notice(error.message, true); }
     finally { $('refresh').disabled = false; }
   }
   async function authenticated(session) {
+    businessWrites = session.business_writes_enabled !== false;
     csrf = session.csrf_token; $('password').value = ''; $('login-panel').hidden = true; $('dashboard-panel').hidden = false; $('logout').hidden = false;
     if (new URLSearchParams(location.search).get('next') === 'pool') { location.assign('/dashboard/pool'); return; }
     await refresh();

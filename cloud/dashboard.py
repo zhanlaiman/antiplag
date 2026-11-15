@@ -100,7 +100,10 @@ def _token(headers):
 
 
 class DashboardRuntime:
-    def __init__(self, beta, config=None, *, account_ledger=None, pool_route=None, now=time.time):
+    def __init__(self, beta, config=None, *, account_ledger=None, pool_route=None, business_writes_enabled=True, now=time.time):
+        if type(business_writes_enabled) is not bool:
+            raise ValueError("Dashboard write mode must be an explicit boolean")
+        self.business_writes_enabled = business_writes_enabled
         self.beta, self.config, self.pool_route, self.now = beta, config, pool_route, now
         private = beta.root / "private"
         if private.is_symlink():
@@ -204,7 +207,7 @@ class DashboardRuntime:
                     value = headers.get("X-CSRF-Token", "")
                     if not re.fullmatch(r"[a-f0-9]{64}", value) or not hmac.compare_digest(self.csrf(token), value):
                         raise AccessError("Обновите панель и повторите действие.", "dashboard_csrf_failed", 403)
-                return {"authenticated": True, "csrf_token": self.csrf(token), "expires_at": row[0]}
+                return {"authenticated": True, "csrf_token": self.csrf(token), "expires_at": row[0], "business_writes_enabled": self.business_writes_enabled}
         raise AccessError("Войдите в панель администратора.", "dashboard_auth_required", 401)
 
     def login(self, headers, body, client_ip):
@@ -243,7 +246,13 @@ class DashboardRuntime:
             db.execute("INSERT INTO admin_sessions VALUES (?,?,?)", (sha256(token.encode()).hexdigest(), self.config.fingerprint, now + SESSION_SECONDS))
             db.execute("INSERT INTO admin_audit(at,action,reason) VALUES (?,'login','')", (now,))
         self.persist()
-        return {"authenticated": True, "csrf_token": self.csrf(token), "expires_at": now + SESSION_SECONDS}, self.cookie(token)
+        return {"authenticated": True, "csrf_token": self.csrf(token), "expires_at": now + SESSION_SECONDS, "business_writes_enabled": self.business_writes_enabled}, self.cookie(token)
+
+    def guard_business(self, method, path):
+        mutation = (re.fullmatch(r"/api/dashboard/accounts/[a-f0-9]{64}/(?:block|unblock)", path)
+                    or path == "/api/dashboard/pool" or path.startswith("/api/dashboard/pool/"))
+        if method == "POST" and mutation and not self.business_writes_enabled:
+            raise AccessError("Панель доступна только для просмотра. Изменения временно отключены.", "dashboard_readonly", 503)
 
     def logout(self, headers):
         self.authorize(headers, mutating=True)
@@ -267,6 +276,8 @@ class DashboardRuntime:
         return self.inventory.page(controls, offset=offset)
 
     def set_block(self, account_id, blocked, reason):
+        if not self.business_writes_enabled:
+            raise AccessError("Панель доступна только для просмотра. Изменения временно отключены.", "dashboard_readonly", 503)
         valid_account_id(account_id)
         account_id, aliases = self.inventory.canonical_id(account_id)
         if (not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 240
@@ -340,6 +351,7 @@ def route(handler, method, path, body):
                 return {"authenticated": False, "configured": False}
             raise
     require_admin(handler, method)
+    runtime.guard_business(method, path)
     if method == "POST" and path == "/api/dashboard/logout":
         _fields(body, ())
         payload, cookie = runtime.logout(handler.headers)
@@ -408,6 +420,7 @@ def dispatch(handler, method):
             # Authenticate protected mutations before reading their body or touching pool.
             if not (method == "POST" and path == "/api/dashboard/login"):
                 require_admin(handler, method)
+                runtime.guard_business(method, path)
             length = handler.headers.get("Content-Length", "")
             if (not re.fullmatch(r"[0-9]{1,5}", length) or not 1 <= int(length) <= MAX_BODY
                     or handler.headers.get_content_type() != "application/json"

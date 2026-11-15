@@ -330,11 +330,17 @@ class UserAuthTests(unittest.TestCase):
             except Exception as error: outcomes.append(type(error).__name__)
         with patch.object(user_access.os, 'replace', side_effect=replace), patch.object(user_access, 'password_digest', side_effect=hashing):
             initializer = Thread(target=initialize, name='qa-initializer'); initializer.start(); self.assertTrue(paused.wait(5))
-            registration = Thread(target=signup, name='qa-signup'); registration.start(); self.assertTrue(hashed.wait(5))
+            registration = Thread(target=signup, name='qa-signup')
             try:
+                with closing(sqlite3.connect(self.service.beta.database, timeout=0)) as probe:
+                    with self.assertRaises(sqlite3.OperationalError) as blocked:
+                        probe.execute('BEGIN IMMEDIATE')
+                    self.assertIn('locked', str(blocked.exception).lower())
+                registration.start(); self.assertTrue(hashed.wait(5))
                 self.assertEqual(self.auth.access.marker.read_text(), 'user-access-v1:1\n')
-            finally: release.set()
-            initializer.join(10); registration.join(10)
+            finally:
+                release.set(); initializer.join(10)
+                if registration.ident is not None: registration.join(10)
         self.assertFalse(initializer.is_alive()); self.assertFalse(registration.is_alive())
         self.assertEqual(set(outcomes), {'initialized', 'registered'})
         self.assertEqual(self.auth.access.marker.read_text(), 'user-access-v1:2\n')

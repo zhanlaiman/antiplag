@@ -11,6 +11,7 @@
 ```python
 service.dashboard = dashboard.DashboardRuntime(
     beta, dashboard.DashboardConfig.from_env(),
+    business_writes_enabled=False,  # aware-reader; True только для writer
     # Необязательно: существующий AccessLedger для просмотра его metadata.
     # Это не включает SaaSRuntime и не меняет guest tenant IDs.
     account_ledger=None,
@@ -25,6 +26,8 @@ service.dashboard = dashboard.DashboardRuntime(
 if dashboard.dispatch(self, method):
     return
 ```
+
+`business_writes_enabled` — строго bool, по умолчанию True для прежних callers. В aware-reader передать False: login/logout/session и чтение списка/блокировок продолжают работать; POST block/unblock и любые POST `/api/dashboard/pool`/потомки получают `503 dashboard_readonly`. Gate идёт после admin auth, до body/action/callback, поэтому vault не трогается. Authenticated session возвращает фактический flag; UI отключает изменения и при refresh. Это запрет business mutations, не обещание физической read-only БД: сессии и их audit всё ещё persist-ятся.
 
 `dispatch` обслуживает `/dashboard`, `/dashboard/`, `/dashboard.html`, `/dashboard.js`, `/dashboard.css` и всё пространство `/api/dashboard`/`/api/dashboard/*`. Административный запрос не создаёт guestspace, не вызывает beta admission/mutation и не расходует его квоту. Неизвестный административный маршрут сначала требует admin auth, затем возвращает 404. Сессия и login — явные исключения: anonymous session возвращает `authenticated:false`; login проверяет пароль после origin/rate checks. Все ответы имеют no-store/noindex и защитные заголовки; JSON body ограничен 8192 байтами.
 
