@@ -160,7 +160,11 @@ def _parse_usage(provider, value, checked_at, state):
 
 class PoolAdmin:
     def __init__(self, root, persist=lambda: None, *, usage_probe=None,
-                 runtime_status=None, activation_policy=None, clock=time.time):
+                 runtime_status=None, activation_policy=None, clock=time.time,
+                 monthly_limit=MONTHLY_LIMIT):
+        if type(monthly_limit) is not int or not 1 <= monthly_limit <= 1000:
+            raise ValueError("Monthly limit must be an integer between 1 and 1000")
+        self.monthly_limit = monthly_limit
         self.vault = KeyVault(root, persist)
         self.usage_probe = usage_probe or probe_usage
         self.runtime_status = runtime_status
@@ -369,6 +373,9 @@ class PoolAdmin:
         state, pending = self.vault.read()
         now = self.clock()
         metrics, connected = self._metrics()
+        monthly_used = metrics.get("monthly_used") if _integer(metrics.get("monthly_used")) else None
+        monthly_remaining = (max(0, self.monthly_limit - monthly_used)
+                             if monthly_used is not None else self.monthly_limit)
         rows = [self._public_row(state, self._record(state, identifier), now) for identifier in state["records"]]
         providers = []
         raw_providers = metrics.get("providers", {})
@@ -378,6 +385,8 @@ class PoolAdmin:
             local = raw_providers.get(provider, {})
             if not isinstance(local, dict):
                 local = {}
+            local_remaining = (min(local["local_remaining"], monthly_remaining)
+                               if _integer(local.get("local_remaining")) else None)
             provider_rows = [row for row in rows if row["provider"] == provider]
             active = next((row for row in provider_rows if row["active"]), None)
             observed = active or max(provider_rows, key=lambda row: row["checked_at"] or 0, default=None)
@@ -402,16 +411,16 @@ class PoolAdmin:
                     health = "healthy"
                 else:
                     health = "unknown"
-            if active and not pending and (local.get("local_remaining") == 0
-                    or _integer(metrics.get("monthly_used")) and metrics["monthly_used"] >= MONTHLY_LIMIT):
+            if active and not pending and (local_remaining == 0
+                    or monthly_used is not None and monthly_used >= self.monthly_limit):
                 health = "exhausted"
             item = {"provider": provider, "active_credential_id": active["credential_id"] if active else None,
                     "health": health, "checked_at": observed["checked_at"] if observed else None,
                     "provider_remaining": observed["provider_remaining"] if observed else None,
                     "balance_source": observed["balance_source"] if observed else "unconfirmed",
-                    "local_used": None, "local_remaining": None, "grant_remaining": None,
+                    "local_used": None, "local_remaining": local_remaining, "grant_remaining": None,
                     "grant_expires_at": None, "grant_approved": local.get("grant_approved") is True}
-            for name in ("local_used", "local_remaining", "grant_remaining"):
+            for name in ("local_used", "grant_remaining"):
                 if _integer(local.get(name)):
                     item[name] = local[name]
             if _number(local.get("grant_expires_at")):
@@ -422,8 +431,8 @@ class PoolAdmin:
                                  or item["grant_remaining"] is not None and item["grant_remaining"] <= 10)
             providers.append(item)
         return {"version": 1, "revision": state["revision"], "recovery_required": pending,
-                "runtime_connected": connected, "monthly_limit": MONTHLY_LIMIT,
-                "monthly_used": metrics.get("monthly_used") if _integer(metrics.get("monthly_used")) else None,
+                "runtime_connected": connected, "monthly_limit": self.monthly_limit,
+                "monthly_used": monthly_used,
                 "providers": providers, "credentials": rows,
                 "audit_count": len(state["audit"])}
 

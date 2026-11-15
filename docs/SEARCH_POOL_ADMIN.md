@@ -2,7 +2,8 @@
 
 `plagiarism.search_pool_admin.PoolAdmin` stores immutable search credentials and
 serves safe metadata to the separate administrator dashboard. It does not choose
-the visitor's provider, run searches, create grants or change the site's180 limit.
+the visitor's provider, run searches, create grants or change the runtime's spending
+policy. Its trusted constructor cap defaults to180.
 
 ## Integration
 
@@ -16,6 +17,7 @@ beta.pool_admin = PoolAdmin(
     beta.root, beta.persist,
     runtime_status=pool_metrics,
     activation_policy=existing_grant_admission,
+    monthly_limit=180,  # Trusted server config only; a reviewed release may set900.
 )
 # cloud.dashboard owns require_admin and invokes the hook after authenticating.
 dashboard_runtime.pool_route = pool_route
@@ -82,7 +84,7 @@ ASCII/no whitespace, Tavily `tvly-` prefix, IDs32lowerhex. Extra fields rejected
 All writes require JSON and POST. Errors use existing `{error,code}` envelope and
 fixed Russian messages. No raw provider errors or responses leave the service.
 
-Status has `revision,recovery_required,runtime_connected,monthly_limit:180,
+Status has `revision,recovery_required,runtime_connected,monthly_limit,
 monthly_used,providers[],credentials[],audit_count`. Unknown values are `null`.
 Credentials show only ID, HMAC display fingerprint, last4, activation state,
 bounded numeric quota fields, last check/freshness and safe policy code. Provider
@@ -138,8 +140,23 @@ search-time ledger is authoritative after activation and across restarts.
              "grant_approved": False}}}
 ```
 
-The service fixes monthly limit180 regardless of callback value. Missing counters
-stay unknown; neither staging nor rotation changes them. Do not return raw errors,
+`PoolAdmin(..., monthly_limit=180)` accepts only an exact Python integer1..1000.
+Booleans, floats/NaN, strings, missing-value substitutions and out-of-range values
+raise `ValueError` before vault I/O. The cap is trusted constructor configuration,
+not an HTTP field or value supplied by `runtime_status()`. Callback `monthly_limit`
+is ignored. A separately reviewed main runtime release can construct the service
+with900; with historical `monthly_used:177`, displayed local remaining is at most723.
+Default180 with the same history shows at most3. Tighter callback `local_remaining`
+is retained; known remaining never exceeds the constructor cap minus known usage,
+or the cap when total usage is unknown. Missing/invalid counters stay `null`, never
+invented zero. Health uses the same effective local remaining and configured cap.
+Provider-live and grant balances are separate and are not clamped or rewritten.
+
+The cap is not stored in the vault: main must supply its reviewed server config
+again on restart and enforce actual spending in its own runtime ledger. This
+constructor/status seam creates no grant or free-policy exception and never resets
+usage, credentials, revisions or audit. Browser cap fields/config routes are denied.
+Neither staging nor rotation changes counters. Do not return raw errors,
 keys or arbitrary strings from callbacks. Only numeric/bool fields are serialized.
 
 ## Durability and recovery

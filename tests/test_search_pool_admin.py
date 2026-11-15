@@ -246,6 +246,63 @@ class PoolServiceTests(unittest.TestCase):
         self.assertEqual(status["providers"][3]["grant_remaining"],0)
         self.assertTrue(status["providers"][3]["low_quota"])
 
+    def test_monthly_limit_default_and_trusted_configuration_preserve_spend(self):
+        identifier=self.stage();self.service.validate(identifier);self.service.activate(identifier)
+        metrics=runtime_metrics();metrics["monthly_used"]=177
+        metrics["providers"]["serpapi"].update(local_used=177,local_remaining=999999)
+        before=self.service.vault.read()[0]
+        for configured,expected_remaining in ((180,3),(900,723)):
+            with self.subTest(configured=configured):
+                service=self.create() if configured==180 else self.create(monthly_limit=configured)
+                service.runtime_status=lambda:metrics
+                status=service.status();provider=status["providers"][0]
+                self.assertEqual((status["monthly_limit"],status["monthly_used"]),(configured,177))
+                self.assertEqual((provider["local_used"],provider["local_remaining"]),(177,expected_remaining))
+                self.assertEqual(provider["provider_remaining"],230)
+                self.assertEqual(provider["grant_remaining"],42)
+                self.assertEqual(provider["health"],"healthy")
+                self.assertEqual(service.resolve_credential(identifier),SERP_KEY)
+                self.assertEqual(service.vault.read()[0],before)
+        self.assertEqual(self.create().status()["monthly_limit"],180)
+
+    def test_monthly_limit_health_threshold_and_tighter_remaining(self):
+        identifier=self.stage();self.service.validate(identifier);self.service.activate(identifier)
+        metrics=runtime_metrics()
+        service=self.create(monthly_limit=900);service.runtime_status=lambda:metrics
+        for used,remaining,health in ((180,720,"healthy"),(899,1,"healthy"),(900,0,"exhausted"),(901,0,"exhausted")):
+            with self.subTest(used=used):
+                metrics["monthly_used"]=used;metrics["providers"]["serpapi"]["local_remaining"]=999999
+                status=service.status();row=status["providers"][0]
+                self.assertEqual((status["monthly_used"],row["local_remaining"],row["health"]),(used,remaining,health))
+        metrics["monthly_used"]=177;metrics["providers"]["serpapi"]["local_remaining"]=2
+        row=service.status()["providers"][0]
+        self.assertEqual(row["local_remaining"],2)
+        self.assertTrue(row["low_quota"])
+
+    def test_monthly_limit_unknown_metrics_stay_unknown(self):
+        service=self.create(monthly_limit=900)
+        metrics={"monthly_limit":999999,"providers":{"serpapi":{"local_remaining":999999}}}
+        service.runtime_status=lambda:metrics
+        status=service.status()
+        self.assertIsNone(status["monthly_used"])
+        self.assertEqual(status["providers"][0]["local_remaining"],900)
+        for invalid in (None,False,True,-1,"723",float("nan")):
+            with self.subTest(invalid_type=type(invalid).__name__):
+                metrics["monthly_used"]=invalid;metrics["providers"]["serpapi"]["local_remaining"]=invalid
+                status=service.status()
+                self.assertIsNone(status["monthly_used"])
+                self.assertIsNone(status["providers"][0]["local_remaining"])
+
+    def test_monthly_limit_strict_validation_precedes_vault_io(self):
+        invalid=(True,False,0,-1,1001,180.0,900.0,float("nan"),float("inf"),"900",None,[],{})
+        with patch("plagiarism.search_pool_admin.KeyVault") as vault:
+            for value in invalid:
+                with self.subTest(value_type=type(value).__name__):
+                    with self.assertRaises(ValueError):self.create(monthly_limit=value)
+            vault.assert_not_called()
+        for value in (1,1000):
+            self.assertEqual(self.create(monthly_limit=value).status()["monthly_limit"],value)
+
     def test_expired_future_checks_block_activation_but_config_remains_for_runtime_preflight(self):
         identifier=self.stage();self.service.validate(identifier);self.service.activate(identifier)
         self.clock.return_value+=301
@@ -386,6 +443,20 @@ class PoolHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST","/api/dashboard/pool/stage",{**payload,"approved":True})[0],400)
         self.assertEqual(self.request("POST","/api/dashboard/pool/stage",payload,**{"Content-Type":"text/plain"})[0],415)
         self.assertEqual(self.request("POST","/api/dashboard/pool/stage",{"provider":"serpapi","api_key":"x"*5000})[0],413)
+
+    def test_browser_monthly_limit_fields_cannot_reconfigure_or_mutate_pool(self):
+        before=self.pool.status()
+        for action,body in (("stage",{"provider":"serpapi","api_key":SERP_KEY}),
+                            ("validate",{"credential_id":"c"*32}),
+                            ("activate",{"credential_id":"c"*32}),
+                            ("disable",{"provider":"serpapi"})):
+            with self.subTest(action=action):
+                status,_,value=self.request("POST","/api/dashboard/pool/"+action,{**body,"monthly_limit":900})
+                self.assertEqual((status,value["code"]),(400,"pool_invalid_input"))
+        self.assertEqual(self.request("POST","/api/dashboard/pool/config",{"monthly_limit":900})[0],404)
+        status,_,after=self.request("GET","/api/dashboard/pool")
+        self.assertEqual((status,after["monthly_limit"]),(200,180))
+        self.assertEqual((after["revision"],after["audit_count"]),(before["revision"],before["audit_count"]))
 
     def test_real_http_stage_validate_activate_disable_and_safe_status(self):
         status,_,result=self.request("POST","/api/dashboard/pool/stage",{"provider":"serpapi","api_key":SERP_KEY})
