@@ -60,6 +60,11 @@ class FixtureElement {
   }
 
   get innerHTML() { return this.html || ''; }
+  before(element) {
+    element.owner = this.owner;
+    this.owner?.ownedIDs.add(element.id);
+    this.document.elements.set(element.id, element);
+  }
   querySelector(selector) { return this.children.get(selector) || this.document.querySelector(selector); }
   querySelectorAll() { return []; }
   closest() { return this.parent || null; }
@@ -1517,6 +1522,43 @@ test('beta owner logout uses beta endpoint and keeps the current draft', async (
   assert.equal(logout,1);assert.equal(app.reloads.length,1);
 });
 
+test('beta normal account entry preserves guest, password user and owner roles', async () => {
+  for (const role of ['guest', 'account', 'owner']) {
+    const user = role === 'guest' ? null : {id:'local-user',guest_id:'stable-guest',plan:'free',email_verified:false,auth_method:'password'};
+    const app = fixture({view:'home',fetch:async url => url === '/api/session'
+      ? json({mode:'local',user,beta:{id:'stable-guest',owner:role === 'owner',max_characters:10000}}) : undefined});
+    await settle();
+    const accountLink = app.element('account-link');
+    assert.equal(accountLink.href, '/account', role);
+    assert.equal(accountLink.hidden, role === 'owner', role);
+    assert.equal(app.element('owner-link').hidden, role === 'owner', role);
+    assert.equal(app.element('logout-button').hidden, role !== 'owner', role);
+    assert.equal(app.evaluate('state.session.beta.owner'), role === 'owner', role);
+    assert.equal(app.evaluate('isSaas()'), false, role);
+    assert.match(app.element('main-content').innerHTML, /href="\/owner\.html"/, role);
+    if (role === 'owner') {
+      assert.match(app.element('account-name').textContent, /Владелец/);
+      assert.doesNotMatch(app.element('main-content').innerHTML, /href="\/account"/);
+    } else {
+      const label = role === 'account' ? 'Управление аккаунтом' : 'Войти / зарегистрироваться';
+      assert.equal(accountLink.textContent, label);
+      assert.ok(app.element('main-content').innerHTML.includes(`href="/account">${label}</a>`));
+      if (role === 'account') {
+        assert.equal(app.element('account-name').textContent, 'Аккаунт');
+        assert.match(app.element('account-description').textContent, /логину и паролю.*без подтверждения почты/);
+        assert.equal(app.evaluate('state.session.user.email_verified'), false);
+        assert.equal(app.evaluate('privateAccess()'), true);
+      } else {
+        assert.equal(app.element('account-name').textContent, 'Гостевое пространство');
+      }
+    }
+    await app.navigate('check');
+    if (role === 'account') assert.match(app.element('workspace-storage-note').textContent, /в вашем аккаунте.*другого устройства/);
+    app.evaluate('updateAccountUI(); updateAccountUI()');
+    assert.equal(app.element('account-link'), accountLink, 'Repeated updates reuse one navigation link');
+  }
+});
+
 test('DOCX import sends only to the application and leaves search consent unset', async () => {
   const imports=[];const searches=[];
   const app=fixture({view:'home',fetch:async(url,body)=>{
@@ -2097,4 +2139,18 @@ test('automatic capability in session alone cannot authorize the pool',async()=>
   assert.equal(app.evaluate('automaticSearchEnabled()'),false);
   await assert.rejects(app.evaluate("startWebCheck({text:'Статус сервера ещё прежний.',consent:true,surface:'home'})"));
   assert.deepEqual(requests.map(({request_id,...body})=>body),[{text:'Статус сервера ещё прежний.',internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'}]);
+});
+
+
+test('automatic quota uses trusted capability and separate cap while legacy remains unchanged', async () => {
+  const {app} = automaticFixture(); await settle();
+  app.evaluate('Object.assign(state.session.beta,{monthly_remaining:3,automatic_monthly_limit:900,automatic_monthly_remaining:723})');
+  assert.equal(app.evaluate('betaSearchRemaining()'),723);
+  assert.match(app.evaluate('betaQuotaText()'),/723/);
+  app.evaluate('state.status.web.automatic_search.enabled=false');
+  assert.equal(app.evaluate('betaSearchRemaining()'),3);
+  app.evaluate('state.status.web.automatic_search.enabled=true;state.status.web.automatic_search.consent_version="unknown"');
+  assert.equal(app.evaluate('betaSearchRemaining()'),3);
+  app.evaluate('state.status.web.automatic_search.consent_version="search-pool-v1";state.session.beta.automatic_monthly_remaining=901');
+  assert.equal(app.evaluate('betaSearchRemaining()'),3);
 });

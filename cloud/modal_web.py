@@ -10,12 +10,13 @@ APP_NAME='istok-web-beta'
 VOLUME_NAME='istok-web-beta-data'
 ORIGIN='https://zhanlaiman--istok-beta.us-east.modal.run'
 WEB_FILES=('robots.txt','sitemap.xml','privacy.html','api-guide.html','dictionary-license.txt','rtf-license.txt','owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
-           'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt')
+           'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt',
+           'dashboard.html','dashboard.js','dashboard.css','pool.html','pool.js','pool.css','account.html','account.js','account.css')
 
 
 def source_manifest(root=ROOT):
     root=Path(root).resolve()
-    files=['server.py','cloud/web_beta.py','cloud/modal_web.py',
+    files=['server.py','cloud/web_beta.py','cloud/modal_web.py','cloud/dashboard.py','cloud/user_auth.py','cloud/pool_runtime.py',
         *('web/'+name for name in WEB_FILES),
         'data/source-packs/biology-ru-v1.json','data/source-packs/economics-ru-v1.json',
         *('data/dictionaries/ru_RU/'+name for name in ('ru_RU.aff','ru_RU.dic','README_ru_RU.txt','manifest.json')),
@@ -48,13 +49,47 @@ def serve_beta():
     import modal
     from cloud.web_beta import create_server
     os.environ.update(ISTOK_PDF_ALTERNATIVE_ENGINE='pdfium',ISTOK_PDFIUM_PYTHON=sys.executable)
+    integrated_value=os.environ.get('ISTOK_INTEGRATED_RELEASE','0')
+    if integrated_value not in ('0','1'):raise ValueError('Invalid integrated role flag')
+    integrated=integrated_value=='1'
+    options={}
+    if integrated:
+        for name in ('ISTOK_REGISTRATION_ENABLED','ISTOK_DASHBOARD_WRITES_ENABLED'):
+            if os.environ.get(name) not in ('0','1'):raise ValueError('Invalid integrated role flag')
+        if os.environ.get('ISTOK_AUTOMATIC_MONTHLY_LIMIT') not in ('180','900'):
+            raise ValueError('Invalid automatic monthly cap')
+        from plagiarism.search_credentials import key_for
+        options=dict(integrated=True,
+            registration_enabled=os.environ.get('ISTOK_REGISTRATION_ENABLED')=='1',
+            business_writes_enabled=os.environ.get('ISTOK_DASHBOARD_WRITES_ENABLED')=='1',
+            automatic_monthly_limit=int(os.environ.get('ISTOK_AUTOMATIC_MONTHLY_LIMIT','180')),
+            pool_bootstrap=json.loads(os.environ['ISTOK_POOL_BOOTSTRAP']),
+            pool_grants=json.loads(os.environ['ISTOK_SEARCH_POOL_GRANTS']),
+            pool_keys={p:key_for(p) for p in ('serpapi','tavily','serper','exa')})
     volume=modal.Volume.from_name(VOLUME_NAME)
-    service=create_server(Path('/state'),ORIGIN,persist=volume.commit)
+    service=create_server(Path('/state'),ORIGIN,persist=volume.commit,**options)
     Thread(target=service.serve_forever,name='istok-http',daemon=True).start()
 
 
 def build_app(directory,key,*,google_key=None,default_search_provider='tavily',
-              automatic_search=False,serper_key=None,exa_key=None,pool_grants=None):
+              automatic_search=False,serper_key=None,exa_key=None,pool_grants=None,
+              integrated=False,registration_enabled=False,business_writes_enabled=False,
+              automatic_monthly_limit=180,dashboard_config=None,pool_bootstrap=None):
+    if any(type(flag) is not bool for flag in (integrated,registration_enabled,business_writes_enabled,automatic_search)):
+        raise ValueError('Reviewed role flags must be booleans')
+    if type(automatic_monthly_limit) is not int or automatic_monthly_limit not in (180,900):
+        raise ValueError('Reviewed automatic cap required')
+    if not integrated and (registration_enabled or business_writes_enabled or automatic_monthly_limit!=180 or dashboard_config is not None or pool_bootstrap is not None):
+        raise ValueError('Integrated settings require integrated mode')
+    if integrated:
+        from cloud.dashboard import DashboardConfig
+        if not automatic_search or not isinstance(dashboard_config,dict) or set(dashboard_config)!={'username','salt','digest'}:
+            raise ValueError('Integrated release requires reviewed admin and pool configuration')
+        DashboardConfig(**dashboard_config)
+        if not isinstance(pool_bootstrap,dict) or len(json.dumps(pool_bootstrap,allow_nan=False))>65536:
+            raise ValueError('Bounded bootstrap packet required')
+        from cloud.pool_runtime import validate_bootstrap
+        validate_bootstrap(pool_bootstrap,{'serpapi':google_key,'tavily':key,'serper':serper_key,'exa':exa_key})
     import modal
     if default_search_provider not in ('tavily','serpapi','serpapi-yandex') or default_search_provider in ('serpapi','serpapi-yandex') and not google_key:
         raise ValueError('A reviewed search provider and its credential are required')
@@ -80,6 +115,13 @@ def build_app(directory,key,*,google_key=None,default_search_provider='tavily',
         secret_values.update(ISTOK_AUTOMATIC_SEARCH='1',ISTOK_SERPER_API_KEY=serper_key,
                              ISTOK_EXA_API_KEY=exa_key,
                              ISTOK_SEARCH_POOL_GRANTS=json.dumps(pool_grants,sort_keys=True,allow_nan=False))
+    if integrated:
+        secret_values.update(ISTOK_INTEGRATED_RELEASE='1',
+            ISTOK_REGISTRATION_ENABLED='1' if registration_enabled else '0',
+            ISTOK_DASHBOARD_WRITES_ENABLED='1' if business_writes_enabled else '0',
+            ISTOK_AUTOMATIC_MONTHLY_LIMIT=str(automatic_monthly_limit),
+            ISTOK_POOL_BOOTSTRAP=json.dumps(pool_bootstrap,sort_keys=True,allow_nan=False),
+            **{'ISTOK_DASHBOARD_'+name.upper():value for name,value in dashboard_config.items()})
     if google_key:
         if not isinstance(google_key,str) or len(google_key)>1024 or any(not 33<=ord(c)<=126 for c in google_key):
             raise ValueError('Invalid Google search credential')

@@ -119,7 +119,7 @@ class PoolTests(unittest.TestCase):
     def test_tavily_confirmed_guard_exhaustion_differs_from_unknown_paid_or_429(self):
         opener=Mock()
         opener.open.return_value=io.BytesIO(json.dumps({'account':{'current_plan':'Researcher','plan_limit':1000,
-                                    'plan_usage':899,'paygo_usage':0}}).encode())
+                                    'plan_usage':899,'paygo_usage':0,'paygo_limit':None},'key':{'usage':899,'limit':None}}).encode())
         with self.assertRaises(FreeQuotaExhausted):confirm_tavily(KEY,6,opener)
         for value in ({'current_plan':'Paid','plan_limit':1000,'plan_usage':899,'paygo_usage':0},
                       {'current_plan':'Researcher','plan_limit':1000,'plan_usage':1,'paygo_usage':1}):
@@ -128,8 +128,8 @@ class PoolTests(unittest.TestCase):
             self.assertNotIsInstance(error.exception,FreeQuotaExhausted)
 
     def test_tavily_native_usage_envelope_accepts_free_headroom_only(self):
-        opener=Mock();value={'current_plan':'Researcher','plan_limit':1000,'plan_usage':615,'paygo_usage':0}
-        opener.open.return_value=io.BytesIO(json.dumps({'account':value,'key':{'usage':615}}).encode())
+        opener=Mock();value={'current_plan':'Researcher','plan_limit':1000,'plan_usage':615,'paygo_usage':0,'paygo_limit':None}
+        opener.open.return_value=io.BytesIO(json.dumps({'account':value,'key':{'usage':615,'limit':None}}).encode())
         self.assertEqual(confirm_tavily(KEY,6,opener),{'remaining':285,'guard':900})
         opener.open.return_value=io.BytesIO(json.dumps(value).encode())
         with self.assertRaises(WebSearchError):confirm_tavily(KEY,6,opener)
@@ -152,7 +152,7 @@ class PoolTests(unittest.TestCase):
         serp=Mock();serp.open.return_value=io.BytesIO(json.dumps(account(plan_searches_left=2,
                                 total_searches_left=2,this_month_usage=248)).encode())
         usage=Mock();usage.open.return_value=io.BytesIO(json.dumps({'account':{'current_plan':'Researcher',
-                                'plan_limit':1000,'plan_usage':899,'paygo_usage':0}}).encode())
+                                'plan_limit':1000,'plan_usage':899,'paygo_usage':0,'paygo_limit':None},'key':{'usage':899,'limit':None}}).encode())
         exa=Mock();exa.open.return_value=io.BytesIO(json.dumps({'results':[{'url':'https://example.org/paper'}],
                                                               'costDollars':{'total':0.004}}).encode())
         def probe(key, needed):return confirm_tavily(key,needed,usage)
@@ -167,6 +167,35 @@ class PoolTests(unittest.TestCase):
         with self.budget().connect() as db:
             self.assertEqual(db.execute('SELECT state FROM calls').fetchall(),[('complete',)])
             self.assertEqual(db.execute('SELECT provider FROM pool_calls').fetchall(),[('exa',)])
+
+    def test_disabled_is_explicit_and_pinned_key_ignores_environment(self):
+        search=Mock(key=KEY,provider='serper')
+        first=Mock();second=Mock(return_value=search)
+        selected=select_search(self.path,1,disabled={'serpapi-yandex'},
+            keys={'serper':KEY},factories={'serpapi-yandex':first,'serper':second},
+            grants={'serper':grant()})
+        first.assert_not_called()
+        self.assertEqual(second.call_args.kwargs,{'key':KEY})
+        self.assertEqual(selected.skipped,[{'provider':'serpapi-yandex','reason':'operator_disabled'}])
+        with patch.dict(os.environ,{'ISTOK_SERPAPI_API_KEY':'a-different-environment-key'}):
+            from plagiarism.search_serpapi import SerpAPISearch
+            self.assertEqual(SerpAPISearch(self.budget(),key=KEY).key,KEY)
+
+    def test_tavily_nullable_guard_rejects_missing_or_paid_limits(self):
+        opener=Mock()
+        base={'account':{'current_plan':'Researcher','plan_limit':1000,'plan_usage':809,
+                         'paygo_usage':0,'paygo_limit':None},'key':{'usage':809,'limit':None}}
+        opener.open.return_value=io.BytesIO(json.dumps(base).encode())
+        self.assertEqual(confirm_tavily(KEY,6,opener),{'remaining':91,'guard':900})
+        for kind in ('missing_paid','positive_paid','missing_key','bool_key'):
+            value=json.loads(json.dumps(base))
+            if kind=='missing_paid':del value['account']['paygo_limit']
+            if kind=='positive_paid':value['account']['paygo_limit']=1
+            if kind=='missing_key':del value['key']['limit']
+            if kind=='bool_key':value['key']['limit']=True
+            opener.open.return_value=io.BytesIO(json.dumps(value).encode())
+            with self.assertRaises(WebSearchError) as error:confirm_tavily(KEY,6,opener)
+            self.assertNotIsInstance(error.exception,FreeQuotaExhausted)
 
     def test_unknown_search_outcome_stops_native_pipeline_without_replay(self):
         search=Mock(provider='serper');search.search.side_effect=WebSearchError('synthetic','search_provider_error')

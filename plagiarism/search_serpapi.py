@@ -41,8 +41,8 @@ class SerpAPISearch:
     provider = 'serpapi'
     label = 'Google'
 
-    def __init__(self,budget):
-        self.key = key_for('serpapi')
+    def __init__(self,budget,*,key=None):
+        self.key = key_for('serpapi') if key is None else key
         if not self.key or len(self.key)>1024 or any(not 33<=ord(c)<=126 for c in self.key):
             raise WebSearchError(self.label+'-поиск ещё не подключён.', 'web_not_configured')
         self.budget=budget;self.opener=build_opener(NoRedirect());self.last_usage=None

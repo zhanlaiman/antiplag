@@ -32,8 +32,8 @@ def _url(value):
 class TavilySearch:
     provider = "tavily"
 
-    def __init__(self, budget):
-        self.key = key_for("tavily")
+    def __init__(self, budget, *, key=None):
+        self.key = key_for("tavily") if key is None else key
         if not self.key or len(self.key) > 1024 or any(not 33 <= ord(char) <= 126 for char in self.key):
             raise WebSearchError("Поиск Tavily ещё не подключён. Нужен серверный ключ API.", "web_not_configured")
         self.budget = budget

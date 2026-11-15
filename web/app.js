@@ -565,14 +565,25 @@ async function refreshSession() {
 
 function updateAccountUI() {
   const user = state.session?.user;
+  const betaAccount = isBeta() && !state.session.beta.owner && Boolean(user);
   const name = document.querySelector('#account-name');
   const description = document.querySelector('#account-description');
   const logout = document.querySelector('#logout-button');
-  if (name) name.textContent = isBeta() ? state.session.beta.owner ? 'Владелец · Администратор' : 'Гостевое пространство' : isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
-  if (description) description.textContent = isBeta() ? state.session.beta.owner ? 'Вход владельца активен' : 'Онлайн-бета · без регистрации' : isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
+  if (name) name.textContent = isBeta() ? state.session.beta.owner ? 'Владелец · Администратор' : betaAccount ? 'Аккаунт' : 'Гостевое пространство' : isSaas() ? user ? user.email || 'Аккаунт подтверждён' : 'Вход по почте' : 'Личное пространство';
+  if (description) description.textContent = isBeta() ? state.session.beta.owner ? 'Вход владельца активен' : betaAccount ? 'Вход по логину и паролю · без подтверждения почты' : 'Онлайн-бета · без регистрации' : isSaas() ? '6 000 знаков в сутки' : 'Локальный прототип';
   if (logout) logout.hidden = isBeta() ? !state.session.beta.owner : !isSaas() || !user;
   const ownerLink = document.querySelector('#owner-link');
   if (ownerLink) { ownerLink.hidden = !isBeta() || Boolean(state.session.beta.owner); }
+  let accountLink = document.querySelector('#account-link');
+  if (!accountLink && ownerLink) {
+    accountLink = document.createElement('a');
+    accountLink.id = 'account-link'; accountLink.href = '/account'; accountLink.className = 'text-button';
+    ownerLink.before(accountLink);
+  }
+  if (accountLink) {
+    accountLink.hidden = !isBeta() || Boolean(state.session.beta.owner);
+    accountLink.textContent = betaAccount ? 'Управление аккаунтом' : 'Войти / зарегистрироваться';
+  }
   const batchNav = document.querySelector('#batch-nav');
   if (batchNav) batchNav.hidden = !isBeta();
   const evaluation = document.querySelector('#evaluation-nav');
@@ -580,8 +591,19 @@ function updateAccountUI() {
   const settings = document.querySelector('#model-settings');
   if (settings) settings.hidden = isBeta();
   const storageNote = document.querySelector('#workspace-storage-note');
-  if (storageNote) storageNote.textContent = isBeta() ? state.session.beta.owner ? 'Отчёты сохраняются в аккаунте владельца.' : 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
+  if (storageNote) storageNote.textContent = isBeta() ? state.session.beta.owner ? 'Отчёты сохраняются в аккаунте владельца.' : betaAccount ? 'Отчёты и словарь сохраняются в вашем аккаунте и доступны после входа с другого устройства.' : 'Отчёты сохраняются для этого браузера. Очистка cookies создаст новое пространство.' : isSaas() ? 'Источники и отчёты доступны в вашем аккаунте.' : 'Тексты и отчёты сохраняются в локальной библиотеке.';
   updateQuotaUI();
+}
+
+function betaSearchRemaining() {
+  const beta = state.session?.beta;
+  if (automaticSearchSupported() && Number.isSafeInteger(beta?.automatic_monthly_limit)
+      && beta.automatic_monthly_limit > 0 && beta.automatic_monthly_limit <= 1000
+      && Number.isSafeInteger(beta.automatic_monthly_remaining)
+      && beta.automatic_monthly_remaining >= 0 && beta.automatic_monthly_remaining <= beta.automatic_monthly_limit) {
+    return beta.automatic_monthly_remaining;
+  }
+  return beta?.monthly_remaining;
 }
 
 function betaQuotaText() {
@@ -590,8 +612,9 @@ function betaQuotaText() {
   const personal = beta.owner ? 'Владелец: общая бесплатная квота.'
     : Number.isFinite(beta.daily_remaining) ? `Сегодня осталось ${number(beta.daily_remaining)} из ${number(beta.daily_checks)} проверок. Обновление в 05:00 Алматы.`
     : 'Дневной остаток пока не получен.';
-  const shared = Number.isFinite(beta.monthly_remaining)
-    ? ` Общий остаток сайта: ${number(beta.monthly_remaining)} поисковых запросов; до 6 на текст. Квота провайдера проверяется перед запуском.` : '';
+  const remaining = betaSearchRemaining();
+  const shared = Number.isFinite(remaining)
+    ? ` Общий остаток сайта: ${number(remaining)} поисковых запросов; до 6 на текст. Квота провайдера проверяется перед запуском.` : '';
   const cooldown = beta.search_retry_after_seconds > 0 ? ` Сервис квоты просит подождать около ${number(Math.ceil(beta.search_retry_after_seconds / 60))} мин. Автоматического запуска не будет.` : '';
   return personal + shared + cooldown;
 }
@@ -1510,7 +1533,7 @@ function renderHome() {
       <header class="home-nav">
         <a class="home-brand" href="#home" data-home-scroll="home-top" aria-label="Исток, главная"><span class="home-logo" aria-hidden="true">и</span>исток<span class="home-brand-dot">.</span></a>
         <nav aria-label="Главная навигация"><a href="#home" data-home-scroll="home-how">Как это работает</a><a href="#home" data-home-scroll="home-features">Возможности</a><a href="#home" data-home-scroll="home-faq">Вопросы</a></nav>
-        ${isBeta() ? '<a class="home-owner-link" href="/owner.html">' + (state.session.beta.owner ? 'Аккаунт владельца' : 'Вход владельца') + '</a>' : ''}<a class="home-nav-cta" href="#check">Рабочее пространство <span aria-hidden="true">↗</span></a>
+        ${isBeta() && !state.session.beta.owner ? '<a class="home-owner-link" href="/account">' + (state.session.user ? 'Управление аккаунтом' : 'Войти / зарегистрироваться') + '</a>' : ''}${isBeta() ? '<a class="home-owner-link" href="/owner.html">' + (state.session.beta.owner ? 'Аккаунт владельца' : 'Вход владельца') + '</a>' : ''}<a class="home-nav-cta" href="#check">Рабочее пространство <span aria-hidden="true">↗</span></a>
       </header>
 
       <section class="landing-hero">
@@ -1820,7 +1843,7 @@ async function startBatchChecks(mode, consent) {
     if (pending.some(doc => pendingWebRequest(doc.text))) throw new Error('Для текста из пакета уже есть задание. Его состояние и повторная отправка доступны в уведомлении.');
     const beta = state.session.beta;
     if (!beta.owner && pending.length > beta.daily_remaining) throw new Error('В пакете больше документов, чем осталось дневных проверок.');
-    if (pending.length*6 > beta.monthly_remaining) throw new Error('Для всего пакета недостаточно общего поискового остатка. Уменьшите пакет.');
+    if (pending.length*6 > betaSearchRemaining()) throw new Error('Для всего пакета недостаточно общего поискового остатка. Уменьшите пакет.');
   } else if (mode !== 'library') throw new Error('Выберите область проверки.');
   if (!saveBatch()) throw new Error('Не удалось сохранить пакет. Запросы не отправлены.');
   state.batchBusy = true;

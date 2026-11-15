@@ -24,18 +24,14 @@ def confirm_tavily(key, needed, opener=None):
         if len(raw) > MAX_QUOTA_BYTES:
             raise ValueError('Quota response cap')
         envelope = json.loads(raw)
-        if not isinstance(envelope, dict) or not isinstance(envelope.get('account'), dict):
-            raise ValueError('Invalid quota envelope')
-        account = envelope['account']
-        used, paid = account.get('plan_usage'), account.get('paygo_usage')
-        if (account.get('current_plan') != 'Researcher' or type(account.get('plan_limit')) is not int
-                or account['plan_limit'] != 1000 or type(used) not in (int, float)
-                or not math.isfinite(used) or not 0 <= used <= 1000
-                or type(paid) not in (int, float) or paid != 0):
+        from plagiarism.search_pool_admin import _parse_usage
+        observation,_ = _parse_usage('tavily',envelope,__import__('time').time(),{'salt':'0'*64})
+        if observation.get('free_verified') is not True:
             raise ValueError('Unverified free plan')
-        if used + needed > 900:
+        remaining=observation['guard_remaining']
+        if remaining < needed:
             raise FreeQuotaExhausted()
-        return {'remaining': int(900 - used), 'guard': 900}
+        return {'remaining':remaining,'guard':900}
     except FreeQuotaExhausted:
         raise
     except HTTPError as error:
@@ -76,7 +72,7 @@ class SelectedSearch:
 
 
 def select_search(path, needed, *, limit=180, persist=lambda: None, grants=None,
-                  factories=None, keys=None, tavily_probe=confirm_tavily):
+                  factories=None, keys=None, tavily_probe=confirm_tavily, disabled=()):
     # The site ceiling is checked before ANY provider HTTP, and again atomically
     # with every attempt. Changing a provider/key never bypasses the shared calls.
     shared = PoolBudget(path, provider='selection', resource='selection', credential_fingerprint='',
@@ -90,8 +86,13 @@ def select_search(path, needed, *, limit=180, persist=lambda: None, grants=None,
         factories = {'serpapi-yandex': YandexSerpAPISearch, 'serper': SerperSearch,
                      'tavily': TavilySearch, 'exa': ExaSearch}
     grants = configured_grants() if grants is None else grants
+    if not isinstance(disabled, (tuple, list, set, frozenset)) or any(p not in PROVIDERS for p in disabled):
+        raise WebSearchError('Конфигурация поиска недоступна.', 'free_quota_unconfirmed')
     skipped = []
     for provider in PROVIDERS:
+        if provider in disabled:
+            skipped.append({'provider': provider, 'reason': 'operator_disabled'})
+            continue
         key = key_for(provider) if keys is None else keys.get(provider, '')
         if not isinstance(key, str) or not key or len(key) > 1024 or any(not 33 <= ord(c) <= 126 for c in key):
             raise WebSearchError('Поисковый сервис не подключён.', 'web_not_configured')
@@ -102,7 +103,7 @@ def select_search(path, needed, *, limit=180, persist=lambda: None, grants=None,
                             grant=grant, limit=limit, persist=persist)
         try:
             budget.preflight(needed)
-            search = factories[provider](budget)
+            search = factories[provider](budget, key=key)
             # Existing adapters pin their key on construction. Do not silently
             # combine a grant with a concurrently changed credential.
             if search.key != key:

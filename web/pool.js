@@ -19,7 +19,7 @@
     dashboard_csrf_invalid: "Обновите страницу и повторите действие."
   };
   const $ = id => document.getElementById(id);
-  let csrf = "", busy = false;
+  let csrf = "", busy = false, writable = true;
   const number = value => Number.isInteger(value) && value >= 0 ? value.toLocaleString("ru-RU") : "—";
   const date = value => typeof value === "number" && Number.isFinite(value)
     ? new Intl.DateTimeFormat("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}).format(new Date(value * 1000)) : "Не проверялось";
@@ -65,6 +65,7 @@
   }
   function setBusy(value) {
     busy = value;
+    $("api-key").disabled=value||!writable;$("provider").disabled=value||!writable;
     $("workspace").setAttribute("aria-busy", String(value));
     for (const button of document.querySelectorAll("button")) button.disabled = value || button.dataset.blocked === "true";
   }
@@ -73,6 +74,7 @@
     $("monthly-limit").textContent = number(pool.monthly_limit);
     $("monthly-used").textContent = number(pool.monthly_used);
     $("runtime-note").textContent = pool.runtime_connected ? "По данным серверного учёта" : "Серверный учёт пока не подключён";
+    if(!writable)$("runtime-note").textContent+=" · Только просмотр";
     $("revision").textContent = "Версия " + number(pool.revision);
     const health = {disabled:["Отключён","neutral"],unknown:["Не подтверждён","warning"],healthy:["Подключён",""],stale:["Проверка устарела","warning"],blocked:["Заблокирован","danger"],exhausted:["Квота исчерпана","warning"],recovery_required:["Восстановление","danger"]};
     const providerRows = [];
@@ -103,7 +105,7 @@
       if (credential.provider === "exa") item.append(el("p","Exa: до $0.004 из подтверждённого бесплатного гранта за запрос; денежные расходы $0.","credential-details"));
       const actions = el("div",undefined,"credential-actions");
       const addAction = (title, action, payload, blocked=false) => {
-        const button = el("button",title,"button secondary"); button.type="button";button.disabled=blocked||busy;button.dataset.blocked=String(blocked);
+        const button = el("button",title,"button secondary"); button.type="button";button.disabled=blocked||busy||!writable;button.dataset.blocked=String(blocked||!writable);
         button.addEventListener("click",()=>mutate(action,payload));actions.append(button);
       };
       addAction("Проверить квоту","validate",{credential_id:credential.credential_id},pool.recovery_required);
@@ -116,12 +118,13 @@
       item.append(actions);credentials.push(item);
     }
     $("credential-rows").replaceChildren(...credentials);
-    $("save-key").dataset.blocked=String(pool.recovery_required);
+    $("save-key").dataset.blocked=String(pool.recovery_required||!writable);
     if (pool.recovery_required) notice("Сохранение пула не завершено. Новые подключения заблокированы до восстановления владельцем сервера.","error");
     else if (!pool.runtime_connected) notice("Ключи сохранены в хранилище. Серверный учёт расходов пока не подключён.","warning");
   }
   async function mutate(action, payload) {
     if (busy) return;
+    if (!writable) {notice("Панель временно доступна только для просмотра.","warning");return;}
     setBusy(true);$("form-error").hidden=true;
     notice(action==="validate"?"Проверяем бесплатную квоту…":"Сохраняем изменение…");
     try {
@@ -148,7 +151,7 @@
     try{
       const session=await api("/api/dashboard/session");
       if(session.authenticated!==true||typeof session.csrf_token!=="string"){sessionExpired();return;}
-      csrf=session.csrf_token;
+      csrf=session.csrf_token;writable=session.business_writes_enabled!==false;
       const pool=await api("/api/dashboard/pool");render(pool);
       if(pool.runtime_connected&&!pool.recovery_required)notice("Данные загружены. Выберите сохранённый ключ для проверки квоты.");
       setBusy(false);

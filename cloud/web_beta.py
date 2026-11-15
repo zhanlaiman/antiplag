@@ -139,6 +139,9 @@ class BetaRuntime:
         saas.ensure_job_identifier(store,remote_id)
         jobs=self.correction_jobs
         def operation(progress):
+            if getattr(self,'dashboard',None):
+                from cloud.dashboard import guard_account
+                guard_account(self,guest)
             result=self.corrector(text,store,remote_id,progress)
             record=store.save('correction',{'id':correction_id(remote_id),'request_id':identifier,'text':text,'result':result})
             return {'correction':record}
@@ -253,6 +256,10 @@ class BetaRuntime:
             db.execute('CREATE TABLE IF NOT EXISTS owner_account(id INTEGER PRIMARY KEY CHECK(id=1),guest TEXT NOT NULL)')
             existing=db.execute('SELECT guest FROM owner_account WHERE id=1').fetchone()
             guest=existing[0] if existing else guest
+            if getattr(self,'accounts',None):self.accounts.guard_owner_adoption(guest)
+            if getattr(self,'dashboard',None):
+                from cloud.dashboard import guard_account
+                guard_account(self,guest)
             day=datetime.now(timezone.utc).strftime('%Y-%m-%d')
             self._admit_space(db,guest,day[:7])
             self._reserve_mutation(db,guest,day)
@@ -367,7 +374,10 @@ class BetaRuntime:
                 monthly=db.execute('SELECT count(*) FROM calls WHERE month=?',(day[:7],)).fetchone()[0]
         return {'search_retry_after_seconds':self.quota_cooldown(),'daily_used':used,'daily_remaining':None if owner else max(0,DAILY_CHECKS-used),
                 'daily_reset':'00:00 UTC (05:00 Алматы)','monthly_used':monthly,
-                'monthly_remaining':max(0,MONTHLY_SEARCHES-monthly)}
+                'monthly_remaining':max(0,MONTHLY_SEARCHES-monthly),
+                **({'automatic_monthly_limit':self.pool_runtime.monthly_limit,
+                    'automatic_monthly_remaining':max(0,self.pool_runtime.monthly_limit-monthly)}
+                   if getattr(self,'pool_runtime',None) else {})}
 
     def owner_statistics(self):
         """Aggregate SQL counts only; never load another tenant's text or IDs."""
@@ -441,7 +451,32 @@ class BetaRuntime:
             result['web']['limitations'].append('Собственный сайт исключён из сравнения. Недоступные и исключённые страницы не подтверждают уникальность.')
         return result
 
-    def run_web(self,text,request_id,progress=None,source_url=None,provider='tavily'):
+    def run_pinned(self,text,request_id,progress=None,source_url=None,provider='tavily',pool_pin=None):
+        strategy=SHORT_PURE_STRATEGY if provider in ('auto','serpapi-yandex') else web_search.DEFAULT_QUERY_STRATEGY
+        if provider=='tavily':
+            strategy=os.environ.get('ISTOK_WEB_QUERY_STRATEGY',
+                SHORT_PURE_STRATEGY if selected_provider()=='serpapi-yandex' else web_search.DEFAULT_QUERY_STRATEGY)
+        queries=web_search.plan_queries(text,strategy=strategy)
+        try:
+            if self.quota_cooldown():raise web_search.WebSearchError('Поиск временно ограничен.','free_quota_rate_limited')
+            search=self.pool_runtime.searcher(pool_pin,provider,len(queries))
+        except (web_search.WebSearchError,access.AccessError,ValueError,OSError) as error:
+            raise SearchNotStarted('Бесплатный поиск не начат. Дневная попытка сохранена.',
+                                   getattr(error,'code','free_quota_unconfirmed')) from None
+        wiki=MediaWikiSearch(path=self.root/'private/mediawiki.sqlite3')
+        result=web_search.run(text,request_id,progress=progress,searcher=search,wiki_searcher=wiki,
+            query_strategy=strategy,**({'fetcher':ExcludingFetcher(source_url)} if source_url else {}))
+        if provider=='auto':
+            result['web']['automatic_search']={'consent_version':CONSENT_VERSION,
+                'selected_provider':search.provider,'skipped':search.skipped}
+        if source_url:
+            result['web']['excluded_source_host']=public_page_url(source_url)['host']
+            result['web']['limitations'].append('Собственный сайт исключён из сравнения. Недоступные и исключённые страницы не подтверждают уникальность.')
+        return result
+
+    def run_web(self,text,request_id,progress=None,source_url=None,provider='tavily',pool_pin=None):
+        if getattr(self,'pool_runtime',None):
+            return self.run_pinned(text,request_id,progress,source_url,provider,pool_pin)
         if provider=='auto':return self.run_automatic(text,request_id,progress,source_url)
         if provider=='serpapi':return self.run_google(text,request_id,progress,source_url)
         if provider=='serpapi-yandex':return self.run_google(text,request_id,progress,source_url,engine='yandex')
@@ -499,6 +534,13 @@ class BetaHandler(server.Handler):
 
     def _dispatch(self,method,leases):
         path=urlsplit(self.path).path
+        if getattr(self.server,'dashboard',None):
+            from cloud import dashboard,user_auth
+            if path in {'/dashboard/pool','/dashboard/pool/','/pool.html','/pool.js','/pool.css'}:
+                return self.pool_static(path,method)
+            if dashboard.dispatch(self,method):return
+            if user_auth.dispatch(self,method):return
+        self.user=None
         self.api_token=None
         self.logout_persist_handled=False
         logout=method=='POST' and path=='/api/owner/logout'
@@ -520,6 +562,12 @@ class BetaHandler(server.Handler):
                         self.owner=self.server.beta.owner_identity(self.headers)
                         self.guest,cookie=(self.owner,None) if self.owner else self.server.beta.identity(self.headers)
                 if cookie:self.response_headers.append(('Set-Cookie',cookie))
+                if getattr(self.server,'accounts',None) and not self.owner and not (method=='POST' and path in {'/api/owner/login','/api/owner/logout'}):
+                    resolved=self.server.accounts.resolve(self.headers,self.guest)
+                    self.guest=resolved.guest;self.user=resolved.user
+                if getattr(self.server,'dashboard',None) and not (method=='POST' and path in {'/api/owner/login','/api/owner/logout'}):
+                    from cloud.dashboard import guard_account
+                    guard_account(self.server.beta,self.guest)
                 self.tenant=None
                 # Authentication needs no new guest tenant. Admit the stable
                 # owner ID only after owner_login validates the credentials.
@@ -535,6 +583,26 @@ class BetaHandler(server.Handler):
                     payload['retry_after']=error.retry_after;self.response_headers.append(('Retry-After',str(error.retry_after)))
                 self.send_json(payload,error.status);return
         return super()._dispatch(method,leases)
+
+    def pool_static(self,path,method):
+        from cloud import dashboard
+        dashboard.add_security_headers(self)
+        try:
+            dashboard.require_admin(self,method)
+        except access.AccessError as error:
+            if method=='GET' and path in {'/dashboard/pool','/dashboard/pool/','/pool.html'} and error.code=='dashboard_auth_required':
+                self.send_response(303);self.send_header('Location','/dashboard?next=pool')
+                for name,value in self.response_headers:self.send_header(name,value)
+                self.send_header('Content-Length','0');self.end_headers();return
+            self.send_json({'error':str(error),'code':error.code},error.status);return
+        if method!='GET':
+            self.send_json({'error':'Метод недоступен.','code':'dashboard_method_not_allowed'},405);return
+        name='pool.js' if path=='/pool.js' else 'pool.css' if path=='/pool.css' else 'pool.html'
+        content=(Path(__file__).resolve().parents[1]/'web'/name).read_bytes()
+        self.send_response(200);self.send_header('Content-Type',{'pool.js':'application/javascript','pool.css':'text/css','pool.html':'text/html'}[name]+'; charset=utf-8')
+        self.send_header('Content-Length',str(len(content)))
+        for header,value in self.response_headers:self.send_header(header,value)
+        self.end_headers();self.wfile.write(content)
 
     def static(self,path):
         if path.startswith('/setup-search'):raise access.AccessError('Настройка поиска недоступна посетителям.','operation_forbidden',403)
@@ -591,7 +659,7 @@ class BetaHandler(server.Handler):
             payload['web']['automatic_search']=automatic_contract()
             return payload
         if method=='GET' and path=='/api/session':
-            return {'mode':'local','web':web_search.status(),'beta':{'id':self.guest,
+            return {'mode':'local','web':web_search.status(),**({'user':self.user} if self.user else {}),'beta':{'id':self.guest,
                 'max_characters':None if self.owner else MAX_CHARACTERS,'max_request_bytes':server.MAX_BODY,
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES,
                 'ai_correction':{'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}}}
@@ -607,6 +675,9 @@ class BetaHandler(server.Handler):
             saas.ensure_job_identifier(store,identifier)
             owner=bool(self.owner)
             def operation(progress):
+                if getattr(beta,'dashboard',None):
+                    from cloud.dashboard import guard_account
+                    guard_account(beta,self.guest)
                 progress('Сверяем с вашей библиотекой',0,1)
                 sources=store.sources()
                 with owner_target_text(owner):
@@ -682,11 +753,16 @@ class BetaHandler(server.Handler):
             operation_body={'request_id':identifier,'text':text,'internet_consent':True,
                             **({'source_url':source_url} if source_url else {}),**provider_fields}
             owner=bool(self.owner)
+            pin=None
             def operation(progress):
+                if getattr(beta,'dashboard',None):
+                    from cloud.dashboard import guard_account
+                    guard_account(beta,self.guest)
                 try:
                     with owner_target_text(owner):
                         payload=beta.runner(text,remote_id,progress,**({'source_url':source_url} if source_url else {}),
-                                            **({'provider':provider} if provider is not None else {}))
+                                            **({'provider':provider} if provider is not None else {}),
+                                            **({'pool_pin':pin} if pin is not None and beta.runner==beta.run_web else {}))
                 except SearchNotStarted:
                     beta.release_unstarted_check(self.guest,identifier)
                     raise
@@ -699,6 +775,11 @@ class BetaHandler(server.Handler):
                           or store.get('model-job',identifier) or jobs.items.get(identifier))
                 if existing and existing.get('request_fingerprint')!=saas.fingerprint({'path':'/api/web-check','body':operation_body}):
                     raise access.AccessError('Идентификатор уже использован для другого запроса.','request_conflict',409)
+                if getattr(beta,'pool_runtime',None):
+                    body_hash=saas.fingerprint({'path':'/api/web-check','body':operation_body})
+                    if existing:
+                        return {'job':jobs.get(identifier,store)}
+                    pin=beta.pool_runtime.pin(self.guest,identifier,body_hash)
                 beta.admit_check(self.guest,identifier,text,owner=bool(self.owner),rearm=not existing)
                 try:
                     return {'job':jobs.submit_model(identifier,'/api/web-check',operation_body,operation,store)}
@@ -716,9 +797,37 @@ class BetaHandler(server.Handler):
         return super().send_json(result,status)
 
 
-def create_server(root,origin,*,host='0.0.0.0',port=8000,persist=lambda:None,allow_http=False,runner=None,corrector=None):
+def create_server(root,origin,*,host='0.0.0.0',port=8000,persist=lambda:None,allow_http=False,runner=None,corrector=None,
+                  integrated=False,registration_enabled=False,business_writes_enabled=False,
+                  automatic_monthly_limit=180,pool_bootstrap=None,pool_keys=None,pool_grants=None,dashboard_config=None):
+    if any(type(flag) is not bool for flag in (integrated,registration_enabled,business_writes_enabled)):
+        raise ValueError('Integrated role flags must be explicit booleans')
+    if type(automatic_monthly_limit) is not int or not 1<=automatic_monthly_limit<=1000:
+        raise ValueError('A trusted automatic monthly cap is required')
+    if not integrated and (registration_enabled or business_writes_enabled or automatic_monthly_limit!=180
+                           or pool_bootstrap is not None or pool_keys is not None or pool_grants is not None or dashboard_config is not None):
+        raise ValueError('Integrated settings require integrated mode')
     beta=BetaRuntime(root,origin,persist,allow_http=allow_http,runner=runner,corrector=corrector)
     os.environ.update(ISTOK_MODEL_PROVIDER='local',ISTOK_RUNTIME_DIR=str(beta.runtime),ISTOK_APP_MODE='local')
-    service=ThreadingHTTPServer((host,port),BetaHandler);service.daemon_threads=True
+    try:
+        if integrated:
+            from cloud import dashboard,user_auth
+            from cloud.pool_runtime import PoolRuntime
+            from plagiarism.search_pool_admin import route as pool_route
+            if isinstance(dashboard_config,dict):
+                if set(dashboard_config)!={'username','salt','digest'}:raise ValueError('Hash configuration only')
+                dashboard_config=dashboard.DashboardConfig(**dashboard_config)
+            dashboard.DashboardRuntime(beta,dashboard_config if dashboard_config is not None else dashboard.DashboardConfig.from_env(),
+                pool_route=pool_route,business_writes_enabled=business_writes_enabled)
+            user_auth.UserAuthRuntime(beta,registration_enabled=registration_enabled)
+            PoolRuntime(beta,monthly_limit=automatic_monthly_limit,
+                grants=pool_grants,bootstrap=pool_bootstrap,keys=pool_keys)
+        service=ThreadingHTTPServer((host,port),BetaHandler);service.daemon_threads=True
+    except Exception:
+        beta.tenants.close()
+        raise
     service.beta=beta;service.saas=None;service.store=None
+    if integrated:
+        service.dashboard=beta.dashboard;service.accounts=beta.accounts
+        service.pool_runtime=beta.pool_runtime;service.pool_admin=beta.pool_admin
     return service
