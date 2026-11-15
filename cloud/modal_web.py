@@ -67,7 +67,9 @@ def serve_beta():
             pool_grants=json.loads(os.environ['ISTOK_SEARCH_POOL_GRANTS']),
             pool_keys={p:key_for(p) for p in ('serpapi','tavily','serper','exa')})
     volume=modal.Volume.from_name(VOLUME_NAME)
-    service=create_server(Path('/state'),ORIGIN,persist=volume.commit,**options)
+    # Volume v2 exposes this trusted deployment mount through a symlink.
+    state_root=Path('/state').resolve(strict=True)
+    service=create_server(state_root,ORIGIN,persist=volume.commit,**options)
     Thread(target=service.serve_forever,name='istok-http',daemon=True).start()
 
 
