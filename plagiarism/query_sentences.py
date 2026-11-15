@@ -8,7 +8,9 @@ from plagiarism.matching import MIN_WORDS, _tokens
 SHORT_SENTENCE_STRATEGY = "hybrid-citation-v9-short-sentences"
 SHORT_CENTER_STRATEGY = "hybrid-citation-v10-short-center"
 SHORT_PURE_STRATEGY = "hybrid-citation-v11-short-pure"
+SHORT_SUFFIX_STRATEGY = "hybrid-citation-v13-empty-nine-suffix-six"
 INPUT_QUERY_POLICY = "least-covered-pure-short-sentence-v1"
+SUFFIX_QUERY_POLICY = "empty-nine-suffix-six-v1"
 TITLE_QUERY_POLICY = "single-document-observed-title-v1"
 
 
@@ -146,6 +148,26 @@ def short_pure_candidate(text, plan, protected_queries=(), *, limit=6):
             'query': phrase, 'start': a, 'end': b,
             'covered_words': covered, 'sentence_words': len(words)}))
     return min(candidates, key=lambda item: item[:2])[2] if candidates else None
+
+
+def short_suffix_candidate(text, plan, protected_queries=(), *, limit=6):
+    """Use the last six original words of a whole nine-word input sentence.
+
+    The caller must establish five successful empty primary replies. This
+    formats a discovery clue only; fetched evidence must still ground matches.
+    """
+    whole = short_pure_candidate(text, plan, protected_queries, limit=limit)
+    if whole is None or whole['sentence_words'] != 9:
+        return None
+    words = _tokens(text[whole['start']:whole['end']])[-MIN_WORDS:]
+    query = '"' + ' '.join(word.value for word in words) + '"'
+    if len(query) > 390 or query in {item['query'] for item in plan}:
+        return None
+    return {**whole, 'query': query,
+            'start': whole['start'] + words[0].start,
+            'end': whole['start'] + words[-1].end,
+            'whole_sentence_span': {'start': whole['start'], 'end': whole['end']},
+            'query_words': MIN_WORDS}
 
 
 def observed_title_query(url, title):
