@@ -31,6 +31,20 @@ SCRYPT_P = 1
 STATIC = {"/dashboard": "dashboard.html", "/dashboard/": "dashboard.html",
           "/dashboard.html": "dashboard.html", "/dashboard.js": "dashboard.js",
           "/dashboard.css": "dashboard.css"}
+POOL_ERRORS = {
+    "pool_invalid_input": (400, "Проверьте поля настройки поискового ключа."),
+    "pool_body_too_large": (413, "Запрос настройки ключа слишком большой."),
+    "pool_credential_missing": (404, "Сохранённый ключ не найден. Обновите панель."),
+    "pool_check_required": (409, "Сначала проверьте сохранённый ключ."),
+    "pool_check_rate_limited": (429, "Проверка ключей временно ограничена. Повторите позже."),
+    "pool_grant_required": (409, "Для активации требуется подтверждение доступа."),
+    "pool_recovery_required": (503, "Хранилище ключей требует восстановления."),
+    "pool_storage_unavailable": (503, "Хранилище поисковых ключей временно недоступно."),
+    "pool_storage_capacity": (503, "В хранилище поисковых ключей нет места."),
+    "pool_method_not_allowed": (405, "Метод настройки ключа недоступен."),
+    "pool_not_found": (404, "Маршрут настройки ключа не найден."),
+    "pool_unavailable": (503, "Управление поисковыми ключами временно недоступно."),
+}
 
 
 def password_digest(password, salt):
@@ -103,10 +117,24 @@ class DashboardRuntime:
         marker = beta.runtime / "dashboard-initialized"
         if marker.is_symlink() or (marker.exists() and not self.database.exists()):
             raise AccessError("База доступа отсутствует. Восстановите её из резервной копии.", "account_control_unavailable", 503)
-        descriptor = os.open(self.database, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        existed = self.database.exists()
+        descriptor = os.open(self.database, os.O_RDWR | os.O_NOFOLLOW | (0 if existed else os.O_CREAT | os.O_EXCL), 0o600)
         os.fchmod(descriptor, 0o600); os.close(descriptor)
         with self.connect() as db:
-            db.executescript("""
+            if existed:
+                required = {
+                    "admin_sessions": {"token_hash", "config_hash", "expires_at"},
+                    "admin_login_attempts": {"ip_hash", "at"},
+                    "account_blocks": {"account_id", "blocked", "reason", "changed_at"},
+                    "admin_audit": {"id", "at", "action", "account_id", "reason"},
+                }
+                for table, columns in required.items():
+                    kind = db.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchone()
+                    actual = {row["name"] for row in db.execute("PRAGMA table_info(" + table + ")")}
+                    if not kind or kind[0] != "table" or actual != columns:
+                        raise AccessError("Схема базы доступа повреждена. Восстановите резервную копию.", "account_control_unavailable", 503)
+            else:
+                db.executescript("""
                 CREATE TABLE IF NOT EXISTS admin_sessions(
                     token_hash TEXT PRIMARY KEY, config_hash TEXT NOT NULL, expires_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS admin_login_attempts(ip_hash TEXT NOT NULL, at REAL NOT NULL);
@@ -334,6 +362,9 @@ def route(handler, method, path, body):
             return runtime.pool_route(handler, method, path, body, authorize=require_admin)
         except AccessError as error:
             # Provider implementations must not choose public messages containing keys.
+            if isinstance(error.code, str) and error.code in POOL_ERRORS:
+                status, message = POOL_ERRORS[error.code]
+                raise AccessError(message, error.code, status) from None
             status = error.status if error.status in {400, 401, 403, 404, 409, 429, 503} else 503
             raise AccessError("Операция с поисковыми ключами не выполнена. Обновите панель.", "dashboard_pool_request_failed", status) from None
     raise KeyError(path)

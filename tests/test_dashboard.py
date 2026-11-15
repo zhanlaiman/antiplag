@@ -298,6 +298,10 @@ class DashboardTests(unittest.TestCase):
         status, result, _ = self.http('/api/dashboard/pool/stage', {}, cookie, csrf=csrf)
         self.assertEqual(status, 400); self.assertEqual(result['code'], 'dashboard_pool_request_failed')
         self.assertNotIn('PRIVATE_POOL', json.dumps(result))
+        self.admin.pool_route = Mock(side_effect=access.AccessError('PRIVATE_POOL_KEY', 'pool_check_required', 500))
+        status, result, _ = self.http('/api/dashboard/pool/stage', {}, cookie, csrf=csrf)
+        self.assertEqual(status, 409); self.assertEqual(result['code'], 'pool_check_required')
+        self.assertNotIn('PRIVATE_POOL', json.dumps(result))
 
     def test_missing_corrupt_control_database_fails_closed_without_recreation(self):
         cookie, identifier = self.guest(); admin_cookie, _ = self.login()
@@ -311,6 +315,12 @@ class DashboardTests(unittest.TestCase):
             db.execute('ALTER TABLE account_blocks RENAME TO invalid_controls')
         self.assertEqual(self.http('/api/session', cookie=cookie)[0], 503)
         self.assertEqual(self.calls, [])
+        # Restart must validate existing schema, never reconstruct an empty controls table.
+        with self.assertRaises(access.AccessError) as caught:
+            dashboard.DashboardRuntime(self.service.beta, self.config)
+        self.assertEqual(caught.exception.code, 'account_control_unavailable')
+        with closing(sqlite3.connect(database)) as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='account_blocks'").fetchone())
 
     def test_restart_after_control_database_loss_refuses_silent_bootstrap(self):
         _, identifier = self.guest(); self.block(identifier)
