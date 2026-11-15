@@ -1919,3 +1919,182 @@ test('HTTP errors retain their status with HTML as well as JSON bodies', async (
     }
   }
 });
+
+const AUTOMATIC_POOL = {enabled:true,consent_version:'search-pool-v1',providers:['serpapi-yandex','serper','tavily','exa']};
+function automaticFixture({view='home',getPool=()=>AUTOMATIC_POOL,fetch:customFetch,stored={}}={}) {
+  const requests=[];
+  const app=fixture({view,stored,async fetch(url,body,options){
+    if(customFetch){const reply=await customFetch(url,body,options);if(reply!==undefined)return reply;}
+    if(url==='/api/session')return json({mode:'local',beta:{id:'automatic-guest',max_characters:10000,daily_remaining:6,monthly_remaining:144},web:{configured:true,provider:'serpapi-yandex'}});
+    if(url==='/api/status'){
+      const pool=getPool();const web={configured:true,provider:'serpapi-yandex'};
+      if(pool!==undefined)web.automatic_search=JSON.parse(JSON.stringify(pool));
+      return json({model:{models:[]},web});
+    }
+    if(url==='/api/web-check-jobs'){
+      requests.push(body);return json({job:{id:body.request_id,status:'failed',error:'Synthetic terminal result'}});
+    }
+    if(url.startsWith('/api/jobs/'))return json({job:{id:url.split('/').pop(),status:'failed',error:'Synthetic terminal result'}});
+  }});
+  return {app,requests};
+}
+async function checkSearchConsent(app,id){app.element(id).checked=true;await app.element(id).emit('change');}
+const automaticBody=text=>({text,internet_consent:true,search_provider:'auto',provider_consent_version:'search-pool-v1'});
+
+test('automatic pool single requests require new rendered consent on home and check',async()=>{
+  for(const surface of ['home','check']){
+    const {app,requests}=automaticFixture({view:surface});await settle();
+    const html=app.element(surface==='home'?'home-consent-label':'internet-consent-label').textContent || app.element('main-content').innerHTML;
+    for(const name of ['SerpApi (Яндекс)','Serper (Google)','Tavily','Exa','Википедии'])assert.ok(html.includes(name),name);
+    assert.equal(app.reloads.length,0,'First status must not produce an initial reload loop');
+    app.evaluate('state.homeConsent=true;state.internetConsent=true');
+    await assert.rejects(app.evaluate(`startWebCheck({text:'Новый авторский текст.',consent:true,surface:'${surface}'})`));
+    assert.equal(requests.length,0,'Legacy booleans are not an automatic-pool grant');
+    await checkSearchConsent(app,surface==='home'?'home-consent':'internet-consent');
+    await assert.rejects(app.evaluate(`startWebCheck({text:'Новый авторский текст.',consent:true,surface:'${surface}'})`));
+    assert.equal(requests.length,1);
+    const {request_id,...body}=requests[0];assert.match(request_id,/^[a-f0-9]{32}$/);
+    assert.deepEqual(body,automaticBody('Новый авторский текст.'));
+    assert.equal(Object.hasOwn(body,'provider_consent'),false);
+    await app.evaluate('refreshSession()');
+    assert.equal(app.reloads.length,0,'Session omits automatic_search and must not erase status authority');
+    assert.equal(app.evaluate('webCheckBody("Ещё текст.").search_provider'),'auto');
+  }
+});
+
+test('automatic first status clears consent checked against the earlier legacy label',async()=>{
+  const delayed=deferred();const {app,requests}=automaticFixture({fetch(url){if(url==='/api/status')return delayed.promise;}});
+  await settle();await checkSearchConsent(app,'home-consent');
+  const editor=app.element('home-text');editor.value='Черновик во время загрузки условий.';await editor.emit('input');editor.focus();
+  assert.equal(app.evaluate('state.homeConsent'),true);
+  delayed.resolve(json({model:{models:[]},web:{configured:true,provider:'serpapi-yandex',automatic_search:AUTOMATIC_POOL}}));await settle();
+  assert.equal(app.evaluate('state.homeConsent'),false);assert.equal(app.element('home-consent').checked,false);
+  assert.equal(app.reloads.length,0);assert.equal(requests.length,0);
+  assert.ok(app.element('home-consent-label').textContent.includes('Serper (Google)'));
+  assert.equal(app.element('home-text'),editor);assert.equal(editor.value,'Черновик во время загрузки условий.');
+  assert.equal(app.document.activeElement,editor);
+});
+
+test('automatic first status leaves an unrelated source editor and its draft in place',async()=>{
+  const delayed=deferred();const {app}=automaticFixture({view:'sources',fetch(url){if(url==='/api/status')return delayed.promise;}});
+  await settle();const field=app.element('source-text');field.value='Несохранённый учебный источник.';await field.emit('input');
+  delayed.resolve(json({model:{models:[]},web:{configured:true,provider:'serpapi-yandex',automatic_search:AUTOMATIC_POOL}}));await settle();
+  assert.equal(app.element('source-text'),field);assert.equal(field.value,'Несохранённый учебный источник.');
+});
+
+for(const [name,pool] of [
+  ['unknown version',{...AUTOMATIC_POOL,consent_version:'search-pool-v2'}],
+  ['different order',{...AUTOMATIC_POOL,providers:['serper','serpapi-yandex','tavily','exa']}],
+  ['extra provider',{...AUTOMATIC_POOL,providers:[...AUTOMATIC_POOL.providers,'unapproved']}],
+  ['missing manifest',{enabled:true,consent_version:'search-pool-v1'}],
+])test(`automatic ${name} blocks only new submissions without falling back to legacy permission`,async()=>{
+  const {app,requests}=automaticFixture({getPool:()=>pool});await settle();
+  await checkSearchConsent(app,'home-consent');
+  await assert.rejects(app.evaluate("startWebCheck({text:'Авторский текст.',consent:true,surface:'home'})"));
+  assert.equal(requests.length,0);
+  assert.equal(app.element('home-check-button').disabled,true);
+  assert.match(app.element('home-search-unavailable').textContent,/услов|обнов/i);
+});
+
+test('automatic consent is bound to the label that was actually rendered',async()=>{
+  const {app,requests}=automaticFixture({getPool:()=>undefined});await settle();
+  app.expose('poolForStaleLabel',AUTOMATIC_POOL);
+  app.evaluate('state.status.web.automatic_search=poolForStaleLabel');
+  await checkSearchConsent(app,'home-consent');
+  await assert.rejects(app.evaluate("startWebCheck({text:'Текст под старой подписью.',consent:true,surface:'home'})"));
+  assert.equal(requests.length,0);
+});
+
+test('automatic configuration changes clear grants while keeping drafts and exact saved bodies',async()=>{
+  let pool=AUTOMATIC_POOL;
+  const {app,requests}=automaticFixture({getPool:()=>pool});await settle();
+  await checkSearchConsent(app,'home-consent');
+  app.expose('retainedPoolJob',{request_id:'d'.repeat(32),path:'/api/web-check',body:automaticBody('Уже отправленный текст.'),status:'rejected'});
+  app.evaluate("saveDraft('Сохраняемый черновик.');state.modelJobs[retainedPoolJob.request_id]=retainedPoolJob;saveModelJobs()");
+  const before=app.evaluate('JSON.stringify(state.modelJobs[retainedPoolJob.request_id].body)');
+  pool={...AUTOMATIC_POOL,consent_version:'search-pool-v2'};await app.evaluate('refreshStatus()');
+  assert.equal(app.reloads.length,1);assert.equal(app.evaluate('state.homeConsent'),false);
+  assert.equal(app.evaluate('state.internetConsent'),false);assert.equal(requests.length,0);
+  assert.equal(app.evaluate('restoreDraft()'),'Сохраняемый черновик.');
+  assert.equal(app.evaluate('JSON.stringify(state.modelJobs[retainedPoolJob.request_id].body)'),before);
+});
+
+test('automatic capability removal also clears its prior consent before legacy mode resumes',async()=>{
+  let pool=AUTOMATIC_POOL;
+  const {app,requests}=automaticFixture({getPool:()=>pool});await settle();
+  await checkSearchConsent(app,'home-consent');
+  pool=undefined;await app.evaluate('refreshStatus()');
+  assert.equal(app.evaluate('state.homeConsent'),false);
+  assert.equal(app.reloads.length,1);assert.equal(requests.length,0);
+});
+
+test('automatic batch uses one explicit pool consent and preserves source URL and persisted IDs',async()=>{
+  let app;const requests=[];
+  const setup=automaticFixture({view:'batch',fetch(url,body){
+    if(url==='/api/web-check-jobs'){
+      requests.push(body);
+      assert.ok(app.evaluate('Object.values(state.modelJobs).some(entry=>entry.request_id==='+JSON.stringify(body.request_id)+')'));
+      return json({job:{id:body.request_id,status:'complete',result:{report:{id:body.request_id,text:body.text,scope:'web_search',matches:[],sources:[],stats:{},web:{status:'partial',sources_checked:0}}}}});
+    }
+    if(url.startsWith('/api/jobs/')){
+      const request=requests.find(item=>item.request_id===url.split('/').pop());
+      return json({job:{id:request.request_id,status:'complete',result:{report:{id:request.request_id,text:request.text,scope:'web_search',matches:[],sources:[],stats:{},web:{status:'partial',sources_checked:0}}}}});
+    }
+  }});app=setup.app;await settle();
+  app.expose('poolBatch',[{id:'a'.repeat(32),name:'One',text:'Первый текст.',source_url:'https://example.test/page'},{id:'b'.repeat(32),name:'Two',text:'Второй текст.'}]);
+  app.evaluate('state.batch=poolBatch;renderBatch()');app.element('batch-mode').value='internet';
+  await assert.rejects(app.evaluate("startBatchChecks('internet',true)"));assert.equal(requests.length,0);
+  await checkSearchConsent(app,'batch-consent');await app.evaluate("startBatchChecks('internet',true)");
+  assert.equal(requests.length,2);assert.equal(new Set(requests.map(row=>row.request_id)).size,2);
+  assert.deepEqual(requests.map(({request_id,...body})=>body),[{...automaticBody('Первый текст.'),source_url:'https://example.test/page'},automaticBody('Второй текст.')]);
+});
+
+test('automatic batch stops before another unsent document after consent version changes',async()=>{
+  let app,pool=AUTOMATIC_POOL;const requests=[];
+  const setup=automaticFixture({view:'batch',getPool:()=>pool,fetch:async(url,body)=>{
+    if(url==='/api/web-check-jobs'){requests.push(body);return json({job:{id:body.request_id,status:'queued'}});}
+    if(url.startsWith('/api/jobs/')){
+      pool={...AUTOMATIC_POOL,consent_version:'search-pool-v2'};await app.evaluate('refreshStatus()');
+      const first=requests[0];return json({job:{id:first.request_id,status:'complete',result:{report:{id:first.request_id,text:first.text,scope:'web_search',matches:[],sources:[],stats:{},web:{status:'partial',sources_checked:0}}}}});
+    }
+  }});app=setup.app;await settle();
+  app.expose('changingBatch',[{id:'a'.repeat(32),name:'One',text:'Первый текст.'},{id:'b'.repeat(32),name:'Two',text:'Второй текст.'}]);
+  app.evaluate('state.batch=changingBatch;renderBatch()');app.element('batch-mode').value='internet';
+  await checkSearchConsent(app,'batch-consent');await assert.rejects(app.evaluate("startBatchChecks('internet',true)"));
+  assert.equal(requests.length,1);assert.equal(app.evaluate('state.batch[1].request_id'),undefined);
+  assert.deepEqual(requests[0],{request_id:requests[0].request_id,...automaticBody('Первый текст.')});
+});
+
+for(const oldBody of [{...automaticBody('Старый текст.'),source_url:'https://example.test/original'},{text:'Старый текст.',internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'}]){
+  test(`automatic upgrade retains pending and explicit retry exact ${oldBody.search_provider} request`,async()=>{
+    const id='e'.repeat(32);const posts=[];
+    const original=automaticFixture();await settle();
+    original.app.expose('oldPoolRequest',{request_id:id,path:'/api/web-check',body:oldBody,status:'rejected',context:{surface:'check'}});
+    original.app.evaluate('state.modelJobs[oldPoolRequest.request_id]=oldPoolRequest;saveModelJobs()');
+    const {app}=automaticFixture({view:'check',stored:Object.fromEntries(original.app.storage),getPool:()=>({...AUTOMATIC_POOL,consent_version:'search-pool-v2'}),fetch(url,body){
+      if(url==='/api/web-check-jobs'){posts.push(body);return json({job:{id:body.request_id,status:'failed',error:'Synthetic retained result'}});}
+    }});await settle();
+    assert.equal(posts.length,0);
+    assert.equal(app.evaluate("pendingWebRequest('Старый текст.').request_id"),id);
+    await app.element('model-job-retry-'+id).emit('click');
+    assert.deepEqual(posts,[{request_id:id,...oldBody}]);
+    assert.equal(app.evaluate('JSON.stringify(state.modelJobs['+JSON.stringify(id)+'].body)'),JSON.stringify(oldBody));
+  });
+}
+
+test('old status without automatic capability preserves the existing legacy request contract',async()=>{
+  for(const pool of [undefined,{...AUTOMATIC_POOL,enabled:false}]){
+    const {app,requests}=automaticFixture({getPool:()=>pool});await settle();
+    await assert.rejects(app.evaluate("startWebCheck({text:'Прежняя проверка.',consent:true,surface:'home'})"));
+    assert.deepEqual(requests.map(({request_id,...body})=>body),[{text:'Прежняя проверка.',internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'}]);
+  }
+});
+
+test('automatic capability in session alone cannot authorize the pool',async()=>{
+  const {app,requests}=automaticFixture({getPool:()=>undefined,fetch(url){
+    if(url==='/api/session')return json({mode:'local',beta:{id:'automatic-guest',max_characters:10000},web:{configured:true,provider:'serpapi-yandex',automatic_search:AUTOMATIC_POOL}});
+  }});await settle();
+  assert.equal(app.evaluate('automaticSearchEnabled()'),false);
+  await assert.rejects(app.evaluate("startWebCheck({text:'Статус сервера ещё прежний.',consent:true,surface:'home'})"));
+  assert.deepEqual(requests.map(({request_id,...body})=>body),[{text:'Статус сервера ещё прежний.',internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'}]);
+});

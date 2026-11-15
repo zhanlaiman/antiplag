@@ -13,6 +13,8 @@ const OPERATION_IDS_KEY = 'istok.operation-ids.v1';
 const SOURCE_DRAFT_KEY = 'istok.source-draft.v1';
 const HOME_DRAFT_KEY = 'istok.home-draft.v1';
 const BATCH_KEY = 'istok.batch.v1';
+const SEARCH_POOL_CONSENT_VERSION = 'search-pool-v1';
+const SEARCH_POOL_PROVIDERS = ['serpapi-yandex', 'serper', 'tavily', 'exa'];
 let storageScope = null;
 let turnstileLoader = null;
 let turnstileWidget = null;
@@ -45,23 +47,76 @@ function isBeta() { return Boolean(state.session?.beta); }
 function ownerWithoutTextLimit() { return isBeta() && state.session.beta.owner === true && state.session.beta.max_characters === null; }
 function checkTextLimit() { return ownerWithoutTextLimit() ? Infinity : isBeta() ? state.session.beta.max_characters : 200000; }
 function documentTextLimit() { return ownerWithoutTextLimit() ? Infinity : 200000; }
-function webProviderLabel() { return webStatus().provider === 'serpapi-yandex' ? 'Яндексу через SerpApi' : webStatus().provider === 'serpapi' ? 'Google через SerpApi' : 'Tavily'; }
+function automaticSearchStatus() { return state.status?.web?.automatic_search; }
+function automaticSearchEnabled() { return automaticSearchStatus()?.enabled === true; }
+function automaticSearchSupported(pool = automaticSearchStatus()) {
+  return pool?.enabled === true && pool.consent_version === SEARCH_POOL_CONSENT_VERSION
+    && Array.isArray(pool.providers) && pool.providers.length === SEARCH_POOL_PROVIDERS.length
+    && pool.providers.every((provider, index) => provider === SEARCH_POOL_PROVIDERS[index]);
+}
+function searchConsentScope(provider = webStatus().provider, pool = automaticSearchStatus()) {
+  return pool?.enabled === true ? JSON.stringify(['auto', pool.consent_version, pool.providers]) : `legacy:${provider || 'tavily'}`;
+}
+function searchConsentGranted(consent, surface) {
+  if (!consent || state.sessionTransition) return false;
+  const field = surface === 'home' ? 'homeConsentScope' : surface === 'batch' ? 'batchConsentScope' : 'internetConsentScope';
+  return !automaticSearchEnabled() || (automaticSearchSupported() && state[field] === searchConsentScope());
+}
+function automaticSearchIssue() {
+  return automaticSearchEnabled() && !automaticSearchSupported()
+    ? 'Условия интернет-проверки обновились. Новая отправка пока недоступна: обновите страницу или используйте проверку по библиотеке. Сохранённые задания и отчёты остаются доступны.' : '';
+}
+function webProviderLabel() {
+  if (automaticSearchEnabled()) return 'сервисам SerpApi (Яндекс), Serper (Google), Tavily, Exa';
+  return webStatus().provider === 'serpapi-yandex' ? 'Яндексу через SerpApi' : webStatus().provider === 'serpapi' ? 'Google через SerpApi' : 'Tavily';
+}
+function searchConsentLabel(surface) {
+  return surface === 'batch'
+    ? `Разрешаю отправить поисковые фрагменты всех документов пакета ${webProviderLabel()} и Википедии. Для проверки по библиотеке это согласие не требуется.`
+    : `Разрешаю отправить поисковые фрагменты этого текста ${webProviderLabel()} и Википедии для поиска ${surface === 'home' ? 'источников' : 'страниц-источников'}.`;
+}
+function updateSearchConsentLabels() {
+  for (const [surface, id, field] of [['home', 'home-consent', 'homeConsent'], ['check', 'internet-consent', 'internetConsent'], ['batch', 'batch-consent', 'batchConsent']]) {
+    const input = document.getElementById(id);
+    const label = document.getElementById(`${id}-label`);
+    if (!input || !label) continue;
+    label.textContent = searchConsentLabel(surface);
+    input.dataset.searchConsentScope = searchConsentScope();
+    input.checked = searchConsentGranted(state[field], surface);
+    input.disabled = Boolean(automaticSearchIssue());
+  }
+  const batchError = document.getElementById('batch-error');
+  if (batchError && automaticSearchIssue()) batchError.textContent = automaticSearchIssue();
+  renderBatchResults();
+}
 function webCheckBody(text, extra = {}) {
+  if (automaticSearchEnabled()) {
+    if (!automaticSearchSupported()) throw new Error(automaticSearchIssue());
+    const body = { ...extra, text, internet_consent: true, search_provider: 'auto', provider_consent_version: SEARCH_POOL_CONSENT_VERSION };
+    delete body.provider_consent;
+    return body;
+  }
   return { text, internet_consent: true,
     ...(isBeta() && ['serpapi','serpapi-yandex'].includes(webStatus().provider) ? {search_provider:webStatus().provider,provider_consent:webStatus().provider} : {}), ...extra };
 }
 function pendingWebRequest(text) {
-  return pendingModelRequest('/api/web-check',webCheckBody(text))
-    || pendingModelRequest('/api/web-check',{text,internet_consent:true})
-    || pendingModelRequest('/api/web-check',{text,internet_consent:true,search_provider:'serpapi',provider_consent:'serpapi'})
-    || pendingModelRequest('/api/web-check',{text,internet_consent:true,search_provider:'serpapi-yandex',provider_consent:'serpapi-yandex'});
+  return Object.values(state.modelJobs).find(entry => entry.path === '/api/web-check'
+    && modelJobActive(entry) && entry.body?.text === text);
 }
-function refreshSearchConsent(provider) {
+function refreshSearchConsent(provider, pool) {
   const previous = webStatus().provider;
-  if (!isBeta() || !previous || !provider || previous === provider) return false;
+  const nextPool = arguments.length > 1 ? pool ?? null : automaticSearchStatus();
+  const poolRelevant = automaticSearchEnabled() || nextPool?.enabled === true;
+  if (!poolRelevant && (!isBeta() || !previous || !provider)) return false;
+  if (searchConsentScope() === searchConsentScope(provider, nextPool)) return false;
   if (privateAccess()) saveDraft(state.text);
   state.internetConsent = false;
   state.homeConsent = false;
+  state.batchConsent = false;
+  state.internetConsentScope = state.homeConsentScope = state.batchConsentScope = null;
+  // The first status may advertise a pool absent from /api/session. Render its
+  // new label below rather than reloading into the same initial-state loop.
+  if (state.status === null) return false;
   state.sessionTransition = true;
   location.reload();
   return true;
@@ -233,8 +288,8 @@ const state = {
   session: null, sessionReady: false, sessionExpired: false, sessionTransition: false,
   authChallenge: null, authEmail: '', captchaToken: '', checkRequests: {}, operationIds: {},
   sourceDraft: {}, batch: [], batchBusy: false,
-  checkMode: null, checkModeChosen: false, internetConsent: false,
-  homeText: '', homeConsent: false,
+  checkMode: null, checkModeChosen: false, internetConsent: false, internetConsentScope: null,
+  homeText: '', homeConsent: false, homeConsentScope: null, batchConsent: false, batchConsentScope: null,
   view: 'check', viewRevision: 0, text: restoreDraft(), sources: [], status: null, model: restoreModel(), report: null,
   modelProvider: 'ollama', modelJobs: restoreModelJobs(),
   selectedMatch: null, rewrite: null, judgment: null, examples: [], run: null,
@@ -546,7 +601,7 @@ function quotaRemaining() {
 }
 
 function webStatus() { return state.status?.web || state.session?.web || {}; }
-function webConfigured() { return webStatus().configured === true; }
+function webConfigured() { return webStatus().configured === true && !automaticSearchIssue(); }
 function internetMode() { return state.checkMode === 'internet'; }
 
 function updateCheckModeUI() {
@@ -564,13 +619,19 @@ function updateCheckModeUI() {
       : 'Сравниваем текст только с материалами вашей библиотеки. Этот результат не является уникальностью по интернету.';
   }
   const unavailable = document.querySelector('#web-availability');
-  if (unavailable) unavailable.hidden = webConfigured();
+  if (unavailable) {
+    unavailable.hidden = webConfigured();
+    if (automaticSearchIssue()) unavailable.textContent = automaticSearchIssue();
+  }
   const setup = document.querySelector('#setup-search-link');
   if (setup) setup.hidden = isSaas() || isBeta();
   const options = document.querySelector('#internet-options');
   if (options) options.hidden = !internet;
   const consent = document.querySelector('#internet-consent');
-  if (consent) consent.checked = state.internetConsent;
+  if (consent) {
+    consent.checked = searchConsentGranted(state.internetConsent, 'check');
+    consent.disabled = Boolean(automaticSearchIssue());
+  }
   const tools = document.querySelector('#library-tools');
   if (tools) tools.hidden = internet || isBeta();
   const scope = document.querySelector('#check-scope');
@@ -608,7 +669,7 @@ function updateQuotaUI() {
     || Boolean(isSaas() && entry?.status !== 'complete' && length > quotaRemaining())
     || Boolean(entry && entry.status !== 'complete')
     || documentReading('check-text')
-    || Boolean(internetMode() && (!webConfigured() || !state.internetConsent || pendingWeb));
+    || Boolean(internetMode() && (!webConfigured() || !searchConsentGranted(state.internetConsent, 'check') || pendingWeb));
   updateHomeControls();
 }
 
@@ -994,10 +1055,10 @@ async function modelRequest(path, body, context = {}) {
 
 async function startWebCheck({ text = state.text, consent = state.internetConsent, surface = 'check' } = {}) {
   if (documentReading(surface === 'home' ? 'home-text' : 'check-text')) throw new Error('Дождитесь извлечения текста документа.');
-  if (!webConfigured()) throw new Error('Проверка по интернету ещё не подключена. Подключите поисковый сервис перед запуском.');
+  if (!webConfigured()) throw new Error(automaticSearchIssue() || 'Проверка по интернету ещё не подключена. Подключите поисковый сервис перед запуском.');
   if (!text.trim()) throw new Error('Вставьте текст для проверки.');
   if (textLengthError(text)) throw new Error(textLengthError(text));
-  if (!consent) throw new Error('Подтвердите отправку поисковых фрагментов для проверки по интернету.');
+  if (!searchConsentGranted(consent, surface)) throw new Error('Подтвердите отправку поисковых фрагментов указанным сервисам для проверки по интернету.');
   if (isSaas() && chars(text).length > quotaRemaining()) throw new Error('Текст превышает остаток дневного лимита. Черновик сохранён целиком.');
   const body = webCheckBody(text);
   const pending = pendingWebRequest(text);
@@ -1018,16 +1079,19 @@ function updateHomeControls() {
   if (!button) return;
   const pending = pendingWebRequest(state.homeText);
   const length = chars(state.homeText).length;
-  button.disabled = Boolean(button.dataset.busy) || !webConfigured() || !state.homeConsent || !state.homeText.trim()
+  button.disabled = Boolean(button.dataset.busy) || !webConfigured() || !searchConsentGranted(state.homeConsent, 'home') || !state.homeText.trim()
     || documentReading('home-text') || Boolean(pending) || Boolean(isSaas() && length > quotaRemaining());
   const count = document.querySelector('#home-character-count');
   if (count) count.textContent = `${number(length)} знаков`;
   const status = document.querySelector('#home-search-status');
-  if (status) status.textContent = webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету';
+  if (status) status.textContent = automaticSearchIssue() ? 'Новая проверка пока недоступна' : webConfigured() ? 'Поиск страниц подключён' : 'Подключаем проверку по интернету';
   const setup = document.querySelector('#home-setup-search');
-  if (setup) setup.hidden = webConfigured() || isSaas();
+  if (setup) setup.hidden = webConfigured() || isSaas() || Boolean(automaticSearchIssue());
   const missing = document.querySelector('#home-search-unavailable');
-  if (missing) missing.hidden = webConfigured();
+  if (missing) {
+    missing.hidden = webConfigured();
+    if (automaticSearchIssue()) missing.textContent = automaticSearchIssue();
+  }
   const quota = document.querySelector('#home-quota');
   if (quota) { quota.hidden = !(isSaas() || isBeta()); quota.textContent = isBeta() ? betaQuotaText() : `Осталось ${number(quotaRemaining())} из ${number(state.session.quota?.limit || 6000)} знаков сегодня.`; }
   const progress = document.querySelector('#home-check-progress');
@@ -1493,7 +1557,7 @@ function renderHome() {
             <div class="home-input-meta"><span id="home-character-count">0 знаков</span><span>${ownerWithoutTextLimit() ? 'Без лимита знаков' : `До ${number(checkTextLimit())} знаков`}${isBeta() ? (state.session.beta.owner ? ' · владелец · общая бесплатная квота' : ' · 6 интернет-проверок в сутки') : ''}</span></div>
             ${ownerWithoutTextLimit() ? '<p class="field-help">Один запрос — до 2 МБ. Интернет-поиск выбирает до 6 фраз из всего текста; больший объём не увеличивает число запросов и не гарантирует полный охват.</p>' : ''}
             <label class="landing-dropzone" id="home-drop-zone" for="home-file" tabindex="0" role="button"><span class="dropzone-icon" aria-hidden="true">↑</span><span><strong>Выберите файл</strong> или перетащите его сюда<small>TXT / MD — в браузере; остальные документы до 1 МиБ — на сервере Истока, без запуска поиска</small></span><input id="home-file" tabindex="-1" type="file" accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text,application/rtf,text/html" aria-label="Загрузить текст для интернет-проверки"></label>
-            <label class="home-consent"><input id="home-consent" type="checkbox"><span>Разрешаю отправить поисковые фрагменты этого текста ${webProviderLabel()} и Википедии для поиска источников.</span></label>
+            <label class="home-consent"><input id="home-consent" type="checkbox"><span id="home-consent-label">${escapeHTML(searchConsentLabel('home'))}</span></label>
             <p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             <button class="home-primary" id="home-check-button" type="submit" disabled>Проверить уникальность <span aria-hidden="true">↗</span></button>
             <p class="home-quota" id="home-quota" hidden></p>
@@ -1532,14 +1596,20 @@ function renderHome() {
   const field = document.querySelector('#home-text');
   field.value = state.homeText;
   bindProofreader('home', field);
-  document.querySelector('#home-consent').checked = state.homeConsent;
+  document.querySelector('#home-consent').checked = searchConsentGranted(state.homeConsent, 'home');
+  document.querySelector('#home-consent').disabled = Boolean(automaticSearchIssue());
+  document.querySelector('#home-consent').dataset.searchConsentScope = searchConsentScope();
   field.addEventListener('input', () => {
     state.homeText = field.value;
     try { storageSet(HOME_DRAFT_KEY, field.value); } catch { /* The current field remains available. */ }
     document.querySelector('#home-check-error').textContent = '';
     updateHomeControls();
   });
-  document.querySelector('#home-consent').addEventListener('change', event => { state.homeConsent = event.target.checked; updateHomeControls(); });
+  document.querySelector('#home-consent').addEventListener('change', event => {
+    state.homeConsent = event.target.checked;
+    state.homeConsentScope = event.target.checked ? event.currentTarget.dataset.searchConsentScope : null;
+    updateHomeControls();
+  });
   document.querySelector('#home-file').addEventListener('change', async event => {
     try { await readTextFile(event.target, field); } catch (error) { document.querySelector('#home-check-error').textContent = error.message; }
   });
@@ -1729,7 +1799,9 @@ function renderBatchResults() {
     else area.textContent = `${entry.context?.batchMode === 'library' ? 'Библиотека' : 'Интернет'} · ${job?.error || entry.watchMessage || job?.stage || (entry.status === 'rejected' ? 'Сервер не принял проверку.' : 'Восстанавливаем состояние…')} ID: ${doc.request_id}`;
   }
   const button = document.getElementById('batch-start');
-  if (button) { button.disabled = state.batchBusy || !state.batch.some(doc => !doc.request_id); button.textContent = state.batchBusy ? 'Обрабатываем пакет…' : 'Проверить неотправленные документы'; }
+  const batchInternet = document.getElementById('batch-mode')?.value === 'internet';
+  const consentMissing = batchInternet && automaticSearchEnabled() && !searchConsentGranted(state.batchConsent, 'batch');
+  if (button) { button.disabled = state.batchBusy || !state.batch.some(doc => !doc.request_id) || consentMissing; button.textContent = state.batchBusy ? 'Обрабатываем пакет…' : 'Проверить неотправленные документы'; }
   for (const id of ['batch-files','batch-mode','batch-clear','batch-site-start','batch-site-url','batch-site-consent']) { const el = document.getElementById(id); if (el) el.disabled = state.batchBusy; }
   document.querySelectorAll('[data-batch-remove]').forEach(button => {button.disabled = state.batchBusy;});
 }
@@ -1743,8 +1815,9 @@ async function startBatchChecks(mode, consent) {
     if (chars(doc.text).length > checkTextLimit()) throw new Error(`${doc.name}: больше ${checkTextLimit()} знаков. Сократите текст перед проверкой.`);
   }
   if (mode === 'internet') {
-    if (!webConfigured()) throw new Error('Интернет-поиск недоступен.');
-    if (!consent) throw new Error('Подтвердите отправку поисковых фрагментов всех документов пакета.');
+    if (!webConfigured()) throw new Error(automaticSearchIssue() || 'Интернет-поиск недоступен.');
+    if (!searchConsentGranted(consent, 'batch')) throw new Error('Подтвердите отправку поисковых фрагментов всех документов пакета указанным сервисам.');
+    if (pending.some(doc => pendingWebRequest(doc.text))) throw new Error('Для текста из пакета уже есть задание. Его состояние и повторная отправка доступны в уведомлении.');
     const beta = state.session.beta;
     if (!beta.owner && pending.length > beta.daily_remaining) throw new Error('В пакете больше документов, чем осталось дневных проверок.');
     if (pending.length*6 > beta.monthly_remaining) throw new Error('Для всего пакета недостаточно общего поискового остатка. Уменьшите пакет.');
@@ -1754,6 +1827,7 @@ async function startBatchChecks(mode, consent) {
   renderBatchResults();
   try {
     for (const doc of pending) {
+      if (mode === 'internet' && !searchConsentGranted(consent, 'batch')) throw new Error('Условия поиска изменились. Подтвердите согласие заново перед отправкой оставшихся документов.');
       const id = crypto.randomUUID().replaceAll('-','');
       const entry = {request_id:id,path:mode === 'internet' ? '/api/web-check' : '/api/library-check',
         body:mode === 'internet' ? webCheckBody(doc.text,doc.source_url ? {source_url:doc.source_url} : {}) : {text:doc.text},
@@ -1770,17 +1844,29 @@ async function startBatchChecks(mode, consent) {
 }
 
 function renderBatch() {
+  state.batchConsent = false;
+  state.batchConsentScope = null;
   main.innerHTML = heading('Пакет документов','Загрузите до пяти файлов. У каждого текста будет свой отчёт.','','Проверка нескольких текстов') + `
     <section class="card batch-controls"><label class="file-button">↑ Добавить документы<input id="batch-files" type="file" multiple accept=".txt,.md,.doc,.docx,.pdf,.odt,.rtf,.html,.htm" aria-label="Добавить документы в пакет"></label>
     <p>TXT/MD/DOC/DOCX/PDF/ODT/RTF/HTML. До 1 МиБ на файл, до 3 МиБ за загрузку. Сначала извлекаем текст без поиска. Проверьте порядок и полноту текста, особенно в PDF и таблицах.</p>
     <p class="field-help">Пакет и тексты хранятся в этом браузере. Сервер сохраняет каждый отправленный документ и отчёт. Извлечение DOCX/PDF/ODT/RTF/HTML/DOC выполняется на сервере Истока. Предел одной проверки — 10 000 знаков. <a href="/privacy.html">Подробнее о данных</a></p>
     <label class="field-label" for="batch-mode">Область проверки</label><select class="field" id="batch-mode"><option value="internet">Интернет</option><option value="library">Моя библиотека</option></select>
-    <label class="consent-row"><input type="checkbox" id="batch-consent">Разрешаю отправить поисковые фрагменты всех документов пакета ${webProviderLabel()} и Википедии. Для проверки по библиотеке это согласие не требуется.</label>
+    <label class="consent-row"><input type="checkbox" id="batch-consent"><span id="batch-consent-label">${escapeHTML(searchConsentLabel('batch'))}</span></label>
     <p>Проверки идут последовательно. Интернет-пакет использует обычные дневные и общие лимиты, до 6 поисковых запросов на документ. При ошибке пакет останавливается; ID уже отправленного документа сохраняется. После reload автоматически восстанавливаем только статусы, оставшиеся документы запускаете сами.</p>
     <div class="batch-actions"><button class="button" id="batch-start" type="button">Проверить неотправленные документы</button><button class="text-button" id="batch-clear" type="button">Новый пакет</button></div><p id="batch-error" role="alert"></p></section>
     <section class="card batch-controls"><h2>Страницы сайта</h2><p>Загрузим выбранную публичную страницу и до двух ссылок на том же сайте. Соблюдаем robots.txt; закрытые страницы, формы входа и адреса с параметрами не поддерживаются. Это ограниченная проверка страниц, полный обход сайта не выполняется.</p><label class="field-label" for="batch-site-url">Адрес публичной страницы</label><input class="field" id="batch-site-url" type="url" placeholder="https://example.org/article"><label class="consent-row"><input id="batch-site-consent" type="checkbox">Подтверждаю, что это публичные страницы без секретных ссылок, и разрешаю Истоку загрузить их текст.</label><p class="field-help">До 2 загрузок в день на пространство, 6 на весь сайт и 30 в месяц. Ошибка также занимает попытку. Загрузка может занять до минуты, поиска она не запускает. Текст страниц остаётся в пакете этого браузера до отправки на проверку. При интернет-проверке исходный сайт исключается из сравнения; это видно в ограничениях отчёта.</p><button class="button secondary" id="batch-site-start" type="button">Добавить страницы в пакет</button><p id="batch-site-error" role="alert"></p></section>
     <section id="batch-list" aria-label="Документы пакета">${state.batch.map(doc => `<article class="card batch-document"><h2>${escapeHTML(doc.name)}</h2><p class="field-help">${escapeHTML(doc.note || '')}</p><label class="field-label" for="batch-text-${doc.id}">Извлечённый текст</label><textarea class="editor-text" id="batch-text-${doc.id}" ${doc.request_id ? 'readonly' : ''}>${escapeHTML(doc.text)}</textarea><p class="field-help" id="batch-edit-note-${doc.id}">${doc.request_id ? 'Текст отправленной проверки зафиксирован. Для изменённой версии добавьте файл заново.' : 'Можно исправить текст до отправки.'}</p><div id="batch-status-${doc.id}" role="status"></div><button class="text-button" type="button" data-batch-remove="${doc.id}">Убрать из пакета</button></article>`).join('')}</section>`;
   const showError = error => { const area=document.getElementById('batch-error'); if (area) area.textContent=error.message; else toast(error.message,true); };
+  const batchConsent = document.getElementById('batch-consent');
+  batchConsent.dataset.searchConsentScope = searchConsentScope();
+  batchConsent.disabled = Boolean(automaticSearchIssue());
+  if (automaticSearchIssue()) document.getElementById('batch-error').textContent = automaticSearchIssue();
+  batchConsent.addEventListener('change', event => {
+    state.batchConsent = event.target.checked;
+    state.batchConsentScope = event.target.checked ? event.currentTarget.dataset.searchConsentScope : null;
+    renderBatchResults();
+  });
+  document.getElementById('batch-mode').addEventListener('change', renderBatchResults);
   document.getElementById('batch-files').addEventListener('change', async event => {
     const files = Array.from(event.target.files);event.target.value='';
     try { await importBatchFiles(files); } catch(error) { showError(error); }
@@ -1846,7 +1932,7 @@ function renderCheck() {
           <details class="card text-statistics"><summary>SEO-анализ: статистика и повторы</summary><div id="text-statistics-content"></div></details>
           ${proofreaderHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
-            <label><input id="internet-consent" type="checkbox"> Разрешаю отправить поисковые фрагменты этого текста ${webProviderLabel()} и Википедии для поиска страниц-источников.</label>
+            <label><input id="internet-consent" type="checkbox"> <span id="internet-consent-label">${escapeHTML(searchConsentLabel('check'))}</span></label>
           </div>
           <div class="editor-footer">
             <p id="draft-status">Черновик сохраняется на этом Mac</p>
@@ -1901,8 +1987,10 @@ function renderCheck() {
       updateCheckModeUI();
     });
   }
+  document.querySelector('#internet-consent').dataset.searchConsentScope = searchConsentScope();
   document.querySelector('#internet-consent').addEventListener('change', event => {
     state.internetConsent = event.target.checked;
+    state.internetConsentScope = event.target.checked ? event.currentTarget.dataset.searchConsentScope : null;
     updateQuotaUI();
   });
   document.querySelector('#text-file').addEventListener('change', async event => {
@@ -3479,7 +3567,8 @@ async function refreshSources() {
 }
 async function refreshStatus() {
   const status = await api('/api/status');
-  if (refreshSearchConsent(status.web?.provider)) return;
+  const previousSearchScope = searchConsentScope();
+  if (refreshSearchConsent(status.web?.provider, status.web?.automatic_search)) return;
   state.status = status;
   const provider = modelProvider();
   if (state.modelProvider !== provider) {
@@ -3491,6 +3580,7 @@ async function refreshStatus() {
     state.model = models.includes(state.status.model.model) ? state.status.model.model : models[0] || '';
   }
   updateModelControls();
+  if (previousSearchScope !== searchConsentScope()) updateSearchConsentLabels();
 }
 
 function updateModelControls() {
