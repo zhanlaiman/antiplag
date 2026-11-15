@@ -141,6 +141,7 @@ class DataManagement:
                             item = dict(row)
                             if name in {'reports','corrections'}:
                                 item = json.loads(item['data'])
+                                if name == 'reports': item.pop('_report_reuse', None)
                             elif name == 'sources':
                                 item['provenance'] = json.loads(item['provenance'])
                             elif name == 'source_snapshots':

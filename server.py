@@ -41,7 +41,7 @@ def field(body, key, maximum=MAX_TEXT_CHARS, required=True):
 
 
 def public_report(report, reviews=None):
-    result = {key: value for key, value in report.items() if key != "sources"} | {"reviews": reviews or {}}
+    result = {key: value for key, value in report.items() if key not in {"sources", "_report_reuse"}} | {"reviews": reviews or {}}
     if report.get("scope") == "web_search":
         result["source_snapshots_count"] = sum(
             1 for source in report.get("sources", [])
