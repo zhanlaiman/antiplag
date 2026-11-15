@@ -546,8 +546,18 @@ class BetaHandler(server.Handler):
         return self.server.beta.trusted(self.headers,self.command)
 
     def _dispatch(self,method,leases):
-        path=urlsplit(self.path).path
+        self._reuse_readonly_response=False
+        self._reuse_readonly_path=None
+        self._reuse_readonly_binding=None
+        self.logout_persist_handled=False
+        try:path=urlsplit(self.path).path
+        except ValueError:
+            self.close_connection=True
+            self.response_headers.append(('Connection','close'))
+            self.send_json({'error':'Некорректный адрес запроса.','code':'invalid_request'},400);return
+        self._reuse_readonly_path=path
         self._reuse_readonly_response=path=='/api/reports/reuse'
+        if self._reuse_readonly_response:self._reuse_readonly_binding=(method,self.path)
         if self._reuse_readonly_response and method!='POST':
             self.send_json({'error':'Метод недоступен.','code':'method_not_allowed'},405);return
         if getattr(self.server,'dashboard',None):
@@ -558,7 +568,6 @@ class BetaHandler(server.Handler):
             if user_auth.dispatch(self,method):return
         self.user=None
         self.api_token=None
-        self.logout_persist_handled=False
         logout=method=='POST' and path=='/api/owner/logout'
         if path.startswith('/api/') or path.startswith('/reports/'):
             try:
@@ -840,7 +849,9 @@ class BetaHandler(server.Handler):
         return super().route(method,path,body)
 
     def send_json(self,result,status=200):
-        readonly=getattr(self,'_reuse_readonly_response',False) and urlsplit(self.path).path=='/api/reports/reuse'
+        readonly=(getattr(self,'_reuse_readonly_response',False)
+            and getattr(self,'_reuse_readonly_path',None)=='/api/reports/reuse'
+            and getattr(self,'_reuse_readonly_binding',None)==(self.command,self.path))
         if self.command not in {'GET','HEAD'} and not getattr(self,'logout_persist_handled',False) and not readonly:self.server.beta.persist()
         return super().send_json(result,status)
 

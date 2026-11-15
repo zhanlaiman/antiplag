@@ -2,7 +2,7 @@
 from contextlib import closing, ExitStack
 from concurrent.futures import Future
 from hashlib import sha256, pbkdf2_hmac
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPResponse, RemoteDisconnected
 from http.cookies import SimpleCookie
 import json
 import os
@@ -460,6 +460,69 @@ class NativeReuseTests(unittest.TestCase):
             response = connection.getresponse(); response.read(); self.assertEqual(response.status, 200)
             self.assertIs(connection.sock, sock); self.assertGreater(len(self.scenario.persist_calls), before)
             connection.close()
+
+    def test_native_malformed_keepalive_closes_unread_body_without_pipeline_execution(self):
+        errors=[]
+        def observe_error(*args):errors.append('Unexpected native handler exception')
+        with patch.object(BetaHandler,'protocol_version','HTTP/1.1'),patch.object(self.scenario.service,'handle_error',observe_error):
+            connection=HTTPConnection('127.0.0.1',self.scenario.port,timeout=3)
+            self.addCleanup(connection.close)
+            cookie='; '.join(k+'='+v for k,v in self.client.cookies.items())
+            headers={'Origin':self.scenario.origin,'Cookie':cookie,'Content-Type':'application/json'}
+            before=len(self.scenario.persist_calls)
+            connection.request('POST','/api/reports/reuse',json.dumps({'text':TEXT}),headers)
+            first=connection.getresponse();self.assertEqual(first.status,200);first.read()
+            self.assertEqual(len(self.scenario.persist_calls),before)
+            sock=connection.sock;self.assertIsNotNone(sock)
+            body=json.dumps({'word':'синтетический','action':'add'}).encode('ascii')
+            malformed=(f'POST http://[broken/ HTTP/1.1\r\nHost: 127.0.0.1:{self.scenario.port}\r\n'
+                f'Origin: {self.scenario.origin}\r\nCookie: {cookie}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}').encode('ascii')
+            pipeline=(f'POST /api/dictionary HTTP/1.1\r\nHost: 127.0.0.1:{self.scenario.port}\r\n'
+                f'Origin: {self.scenario.origin}\r\nCookie: {cookie}\r\nContent-Type: application/json\r\n'
+                f'Content-Length: {len(body)}\r\n\r\n').encode('ascii')+body
+            # Raw bytes bypass only HTTPConnection's client-side URL validation.
+            sock.sendall(malformed+pipeline)
+            response=HTTPResponse(sock,method='POST');response.begin()
+            self.assertEqual(response.status,400)
+            self.assertEqual(response.getheader('Connection'),'close')
+            self.assertEqual(json.loads(response.read()),{'error':'Некорректный адрес запроса.','code':'invalid_request'})
+            with self.assertRaises(RemoteDisconnected):HTTPResponse(sock,method='POST').begin()
+            self.assertEqual(errors,[])
+            self.assertEqual(len(self.scenario.persist_calls),before+1)
+            self.assertFalse((self.scenario.root/'tenants'/self.tenant).exists())
+            connection.close()
+        # The pipelined request was otherwise valid and can mutate on a new connection.
+        self.assertEqual(self.client.request('/api/dictionary',{'word':'синтетический','action':'add'})[0],200)
+        self.assertTrue((self.scenario.root/'tenants'/self.tenant).exists())
+
+    def test_request_reset_and_serializer_bind_to_current_target_without_reparse(self):
+        handler=object.__new__(BetaHandler);handler.server=self.scenario.service
+        handler.command='POST';handler.path='http://[broken/'
+        handler.response_headers=[];handler._reuse_readonly_response=True
+        handler._reuse_readonly_path='/api/reports/reuse'
+        handler._reuse_readonly_binding=('POST','/api/reports/reuse');handler.logout_persist_handled=True
+        before=len(self.scenario.persist_calls)
+        with patch('server.Handler.send_json') as send,ExitStack() as leases:
+            handler._dispatch('POST',leases)
+            self.assertFalse(handler._reuse_readonly_response)
+            self.assertIsNone(handler._reuse_readonly_path);self.assertIsNone(handler._reuse_readonly_binding)
+            self.assertFalse(handler.logout_persist_handled);self.assertTrue(handler.close_connection)
+            self.assertEqual(send.call_args.args[1],400)
+        self.assertEqual(len(self.scenario.persist_calls),before+1)
+        handler.path='/api/reports/reuse';handler._reuse_readonly_response=True
+        handler._reuse_readonly_path='/api/reports/reuse'
+        handler._reuse_readonly_binding=('POST',handler.path)
+        with patch('cloud.web_beta.urlsplit',side_effect=AssertionError('Serializer reparsed target')),patch('server.Handler.send_json') as send:
+            before=len(self.scenario.persist_calls)
+            handler.send_json({});self.assertEqual(len(self.scenario.persist_calls),before)
+            for path,method,binding,cached in [
+                ('http://[broken/','POST',('POST','/api/reports/reuse'),'/api/reports/reuse'),
+                ('/api/reports/reuse','POST',('DELETE','/api/reports/reuse'),'/api/reports/reuse'),
+                ('/api/reports/reuse','POST',('POST','/api/reports/reuse'),'/api/other')]:
+                handler.path=path;handler.command=method;handler._reuse_readonly_binding=binding;handler._reuse_readonly_path=cached
+                previous=len(self.scenario.persist_calls);handler.send_json({})
+                self.assertEqual(len(self.scenario.persist_calls),previous+1)
+            self.assertEqual(send.call_count,4)
 
     def test_native_library_result_is_readable_and_replayable_without_reuse_manifest(self):
         body = {'text': TEXT, 'request_id': JOB}

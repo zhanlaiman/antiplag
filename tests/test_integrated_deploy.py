@@ -1,4 +1,8 @@
 import json
+import os
+import shutil
+import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -112,5 +116,79 @@ class IntegratedDeployTests(unittest.TestCase):
     def test_manifest_includes_all_integrated_modules_and_no_private_state(self):
         names={r['path'] for r in modal_web.source_manifest()}
         self.assertTrue({'cloud/pool_runtime.py','cloud/dashboard.py','cloud/user_auth.py',
+                         'cloud/report_reuse_runtime.py','plagiarism/report_reuse.py',
                          'web/dashboard.html','web/pool.js','web/account.html'}<=names)
         self.assertFalse(any('.runtime' in p or '.sqlite' in p or 'credentials' in p and not p.endswith('search_credentials.py') for p in names))
+
+    def test_staged_only_integrated_runtime_constructs_without_repo_fallback_or_sdk(self):
+        root=Path(__file__).resolve().parents[1]
+        manifest=modal_web.source_manifest(root)
+        canaries=('cloud/not_uploaded.py','.runtime/private.json','web/not_uploaded.html')
+        with TemporaryDirectory() as directory:
+            source=Path(directory)/'source';source.mkdir()
+            for item in manifest:
+                target=source/item['path'];target.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copyfile(root/item['path'],target)
+            for name in canaries:
+                target=source/name;target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_text('SYNTHETIC_NOT_FOR_UPLOAD')
+            stage,actual=modal_web.stage_source(source)
+            self.assertEqual(actual,manifest)
+            self.assertEqual({str(p.relative_to(stage)) for p in stage.rglob('*') if p.is_file()},
+                             {item['path'] for item in manifest})
+            for name in canaries:self.assertFalse((stage/name).exists())
+            child=r'''
+import importlib.abc, importlib.machinery, json, pathlib, socket, sys, tempfile
+stage=pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0,str(stage))
+attempts=[]
+class StagedOnly(importlib.abc.MetaPathFinder):
+    def find_spec(self,fullname,path=None,target=None):
+        root=fullname.split('.')[0]
+        if root=='modal':raise AssertionError('SDK import forbidden')
+        if root not in {'cloud','plagiarism','server'}:return None
+        search=[str(stage)] if path is None else list(path)
+        assert all(pathlib.Path(p).resolve().is_relative_to(stage) for p in search)
+        spec=importlib.machinery.PathFinder.find_spec(fullname,search)
+        if spec is None:raise ModuleNotFoundError('No staged module named '+fullname,name=fullname)
+        if spec.origin:assert pathlib.Path(spec.origin).resolve().is_relative_to(stage)
+        assert all(pathlib.Path(p).resolve().is_relative_to(stage) for p in spec.submodule_search_locations or [])
+        return spec
+sys.meta_path.insert(0,StagedOnly())
+def forbidden(*args,**kwargs):
+    attempts.append(True);raise AssertionError('Outbound I/O forbidden')
+socket.socket.connect=socket.socket.connect_ex=socket.getaddrinfo=forbidden
+# Only the owned loopback bind's display name is deterministic; binding is real.
+def loopback_name(host):
+    if host!='127.0.0.1':return forbidden()
+    return 'localhost'
+socket.getfqdn=loopback_name
+from cloud.web_beta import create_server
+roles=[]
+with tempfile.TemporaryDirectory() as temporary:
+    for writer in (False,True):
+        service=create_server(pathlib.Path(temporary)/str(writer),'http://127.0.0.1:18541',
+            host='127.0.0.1',port=0,allow_http=True,integrated=True,
+            registration_enabled=writer,business_writes_enabled=writer)
+        try:
+            import cloud.report_reuse_runtime as runtime
+            import plagiarism.report_reuse as helper
+            assert isinstance(service.beta.tenants.report_reuse,runtime.ReportReuseRuntime)
+            assert pathlib.Path(runtime.__file__).resolve().is_relative_to(stage)
+            assert pathlib.Path(helper.__file__).resolve().is_relative_to(stage)
+            publisher=service.beta.tenants.report_reuse.worker
+            assert publisher.is_alive() and service.socket.fileno()>=0
+            roles.append({'writer':writer,'runtime_origin':runtime.__file__,'helper_origin':helper.__file__})
+        finally:
+            service.server_close();service.beta.tenants.close()
+        assert not publisher.is_alive() and service.socket.fileno()==-1
+assert not attempts and 'modal' not in sys.modules
+print(json.dumps({'roles':roles,'external_attempts':len(attempts),'SDK_imported':False,'teardown':True}))
+'''
+            result=subprocess.run([sys.executable,'-I','-B','-c',child,str(stage)],cwd=stage,
+                env={'PATH':os.defpath,'PYTHONDONTWRITEBYTECODE':'1'},capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stderr)
+            proof=json.loads(result.stdout)
+            self.assertEqual([row['writer'] for row in proof['roles']],[False,True])
+            self.assertEqual(proof['external_attempts'],0)
+            self.assertFalse(proof['SDK_imported']);self.assertTrue(proof['teardown'])

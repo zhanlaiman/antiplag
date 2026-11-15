@@ -17,7 +17,7 @@ WEB_FILES=('favicon.ico','favicon.png','favicon.svg','apple-touch-icon.png','saf
 
 def source_manifest(root=ROOT):
     root=Path(root).resolve()
-    files=['server.py','cloud/web_beta.py','cloud/modal_web.py','cloud/dashboard.py','cloud/user_auth.py','cloud/pool_runtime.py',
+    files=['server.py','cloud/web_beta.py','cloud/modal_web.py','cloud/dashboard.py','cloud/user_auth.py','cloud/pool_runtime.py','cloud/report_reuse_runtime.py',
         *('web/'+name for name in WEB_FILES),
         'data/source-packs/biology-ru-v1.json','data/source-packs/economics-ru-v1.json',
         *('data/dictionaries/ru_RU/'+name for name in ('ru_RU.aff','ru_RU.dic','README_ru_RU.txt','manifest.json')),
