@@ -103,8 +103,25 @@ search key authenticates each request. Check cooldown3seconds; admin activation
 requires a successful observation no older than300seconds and not future-dated.
 
 SerpApi must be Active, Free Plan,250/month, price0, extra0 and consistent integer
-counters. Tavily must be Researcher1000, paygo usage+limit0; guard900 and any tighter
-key cap apply. A paid plan or unconfirmed response cannot activate.
+counters. Tavily must be Researcher with exact integer plan limit1000, plan
+usage0..1000 and paid usage0. `account.paygo_limit` must be present and be either
+the exact integer0 or explicit JSON `null`; positive, boolean, float, malformed or
+missing values reject. `key.usage` must be an exact integer0..1000 no greater than
+account usage. `key.limit` must be present and be either an integer1..1000 or
+explicit `null`. A null key limit means no additional confirmed key cap, so the
+effective key cap is1000; usage exceeding that effective cap still rejects.
+
+Explicit-null compatibility follows the owner's approved contract for a reported
+free-account usage shape. It is not a claim that the official endpoint guarantees
+null disables PAYG: a null paid limit remains **unknown paid configuration**, with
+no cash-spend authority. Paid usage greater than0 always rejects. Protective
+headroom remains `max(0, min(900 - plan_usage, effective_key_limit - key_usage))`;
+provider allowance remains separately `1000 - plan_usage`. Thus usage809 with both
+limits explicitly null reports191provider credits and91guard credits; usage900
+has100provider credits but zero guard credits and cannot activate. Any tighter
+confirmed key cap remains effective. Main still freshly validates admission before
+search; the observation/snapshot never authorizes paid overage. A paid plan or
+unconfirmed response cannot activate.
 
 Serper and Exa do **not** have a live balance in this interface. `validate` reports
 `balance_unconfirmed` without any provider call. An Exa search key is not a team

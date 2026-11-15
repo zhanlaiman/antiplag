@@ -159,6 +159,47 @@ class PoolServiceTests(unittest.TestCase):
         self.probe.side_effect=lambda *args:payload
         self.assertEqual(self.service.validate(identifier)["pool"]["credentials"][0]["guard_remaining"],0)
 
+    def test_tavily_explicit_nullable_limits_preserve_provider_and_guard_remaining(self):
+        identifier=self.stage("tavily",TAVILY_KEY)
+        cases=((809,None,None,191,91),(809,None,0,191,91),(809,1000,None,191,91),
+               (809,850,None,191,41),(899,None,None,101,1),(900,None,None,100,0),
+               (1000,None,None,0,0))
+        for used,key_limit,paygo_limit,remaining,guard_remaining in cases:
+            with self.subTest(used=used,key_limit=key_limit,paygo_limit=paygo_limit):
+                payload=tavily_usage(used);payload["key"]["limit"]=key_limit;payload["account"]["paygo_limit"]=paygo_limit
+                self.clock.return_value+=4;self.probe.side_effect=lambda *args,payload=payload:payload
+                row=self.service.validate(identifier)["pool"]["credentials"][0]
+                self.assertEqual((row["provider_remaining"],row["guard_remaining"]),(remaining,guard_remaining))
+                self.assertEqual(row["code"],"free_verified" if guard_remaining else "quota_exhausted")
+                if guard_remaining:self.service.activate(identifier)
+                else:self.assert_code("pool_check_required",lambda:self.service.activate(identifier))
+
+    def test_tavily_nullable_limits_require_presence_and_reject_malformed_or_paid_counters(self):
+        identifier=self.stage("tavily",TAVILY_KEY)
+        base=tavily_usage(809);base["key"]["limit"]=None;base["account"]["paygo_limit"]=None
+        bad=[]
+        for section,field,values in (("account","paygo_limit",(False,True,0.0,1,-1,float("nan"),float("inf"),"0",[],{})),
+                                     ("key","limit",(False,True,0,1001,1000.0,-1,float("nan"),float("inf"),"1000",[],{}))):
+            missing=deepcopy(base);missing[section].pop(field);bad.append(missing)
+            for value in values:
+                payload=deepcopy(base);payload[section][field]=value;bad.append(payload)
+        for section,field in (("account","current_plan"),("account","plan_limit"),("account","plan_usage"),
+                              ("account","paygo_usage"),("key","usage")):
+            payload=deepcopy(base);payload[section].pop(field);bad.append(payload)
+        for section,field,value in (("account","paygo_usage",1),("account","paygo_usage",True),
+                                    ("account","plan_limit",999),("account","plan_usage",1001),
+                                    ("account","plan_usage",True),("account","current_plan","Bootstrap"),
+                                    ("key","usage",True),("key","usage",-1),("key","usage",810)):
+            payload=deepcopy(base);payload[section][field]=value;bad.append(payload)
+        for index,payload in enumerate(bad):
+            with self.subTest(case=index):
+                self.clock.return_value+=4;self.probe.side_effect=lambda *args,payload=payload:payload
+                row=self.service.validate(identifier)["pool"]["credentials"][0]
+                self.assertEqual(row["code"],"quota_unconfirmed")
+                self.assertIsNone(row["provider_remaining"])
+                self.assertFalse(row["free_verified"])
+                self.assert_code("pool_check_required",lambda:self.service.activate(identifier))
+
     def test_exception_reflection_and_metrics_never_escape(self):
         identifier = self.stage()
         self.probe.side_effect = URLError("https://example.test/?api_key="+SERP_KEY)
@@ -470,6 +511,17 @@ class PoolHTTPTests(unittest.TestCase):
         self.assertNotIn(SERP_KEY,json.dumps(result))
         self.assertNotIn("never-return@example.test",json.dumps(result))
         self.assertEqual(self.request("POST","/api/dashboard/pool/disable",{"provider":"serpapi"})[0],200)
+
+    def test_tavily_nullable_usage_over_http_returns_safe191provider91guard(self):
+        payload=tavily_usage(809);payload["account"]["paygo_limit"]=None;payload["key"]["limit"]=None
+        status,_,result=self.request("POST","/api/dashboard/pool/stage",{"provider":"tavily","api_key":TAVILY_KEY})
+        self.assertEqual(status,200);identifier=result["credential_id"]
+        with patch.object(self.pool,"usage_probe",return_value=payload):
+            status,_,result=self.request("POST","/api/dashboard/pool/validate",{"credential_id":identifier})
+        self.assertEqual(status,200)
+        row=next(row for row in result["pool"]["credentials"] if row["credential_id"]==identifier)
+        self.assertEqual((row["provider_remaining"],row["guard_remaining"]),(191,91))
+        self.assertNotIn(TAVILY_KEY,json.dumps(result))
 
     def test_persistfailure_over_http_is_safe_and_restart_sees_prior_state(self):
         prior=self.pool.status()

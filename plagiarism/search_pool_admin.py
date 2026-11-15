@@ -143,16 +143,23 @@ def _parse_usage(provider, value, checked_at, state):
     account, key = value.get("account"), value.get("key")
     if (not isinstance(account, dict) or not isinstance(key, dict)
             or account.get("current_plan") != "Researcher"
-            or any(not _integer(account.get(name)) for name in ("plan_usage", "plan_limit", "paygo_usage", "paygo_limit"))
-            or account["plan_limit"] != 1000 or account["paygo_usage"] != 0 or account["paygo_limit"] != 0
+            or any(not _integer(account.get(name)) for name in ("plan_usage", "plan_limit", "paygo_usage"))
+            or account["plan_limit"] != 1000 or account["paygo_usage"] != 0
+            or "paygo_limit" not in account
+            or account["paygo_limit"] is not None and (not _integer(account["paygo_limit"]) or account["paygo_limit"] != 0)
             or account["plan_usage"] > 1000
             or not _integer(key.get("usage")) or key["usage"] > 1000
             or key["usage"] > account["plan_usage"]
-            or not _integer(key.get("limit")) or not 1 <= key["limit"] <= 1000
-            or key["usage"] > key["limit"]):
+            or "limit" not in key
+            or key["limit"] is not None and (not _integer(key["limit"]) or not 1 <= key["limit"] <= 1000)):
+        return rejected, None
+    # Explicit null is unknown configuration, never proof that PAYG is off.
+    # Account headroom900 still bounds every admitted basic-search observation.
+    effective_key_limit = 1000 if key["limit"] is None else key["limit"]
+    if key["usage"] > effective_key_limit:
         return rejected, None
     remaining = 1000 - account["plan_usage"]
-    guard_remaining = max(0, min(900 - account["plan_usage"], key["limit"] - key["usage"]))
+    guard_remaining = max(0, min(900 - account["plan_usage"], effective_key_limit - key["usage"]))
     return _verification("free_verified" if guard_remaining else "quota_exhausted", checked_at,
                          free_verified=True, balance_source="provider_live", provider_remaining=remaining,
                          plan_limit=1000, plan_used=account["plan_usage"], guard_remaining=guard_remaining), None
