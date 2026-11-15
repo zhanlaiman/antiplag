@@ -139,6 +139,17 @@ def main():
                     assert metric["documentWidth"]<=width,metric
                     assert SYNTHETIC_KEY not in metric["text"]
                     measurements.append(metric)
+                page.set_viewport_size({"width":390,"height":1000})
+                table=page.locator(".table-scroll")
+                table.focus();page.keyboard.press("ArrowRight")
+                expect(table).not_to_have_js_property("scrollLeft",0)
+                table_scroll=table.evaluate("e => e.scrollLeft")
+                page.get_by_label("Ключ API",exact=True).focus();page.keyboard.press("Tab")
+                expect(page.get_by_role("button",name="Сохранить ключ",exact=True)).to_be_focused()
+                focus=page.get_by_role("button",name="Сохранить ключ",exact=True).evaluate("e => ({outline:getComputedStyle(e).outlineWidth,color:getComputedStyle(e).outlineColor,focused:document.activeElement===e})")
+                assert focus["outline"]=="3px" and focus["focused"],focus
+                page.screenshot(path=str(output/"pool-keyboard-focus-390.png"),full_page=True)
+                steps.append("Real Tab focus outline3px and keyboard horizontal-table scroll verified at390px")
                 assert page.evaluate("() => localStorage.length+sessionStorage.length")==0
                 context.close();browser.close()
         finally:
@@ -148,7 +159,8 @@ def main():
         assert closed
     assert not errors,errors
     assert not outbound,outbound
-    result={"steps":steps,"console_errors":errors,"external_requests":outbound,"provider_calls":calls,
+    result={"steps":steps,"keyboard_focus":focus,"keyboard_table_scroll":table_scroll,
+            "console_errors":errors,"external_requests":outbound,"provider_calls":calls,
             "measurements":measurements,"teardown":{"server_closed":closed,"thread_alive":thread.is_alive(),"temp_removed":not Path(directory).exists()}}
     (output/"browser-result.json").write_text(json.dumps(result,ensure_ascii=False,indent=2))
     print(json.dumps({"steps":len(steps),"viewports":[row["width"] for row in measurements],"console_errors":errors,"teardown":result["teardown"]},ensure_ascii=False))
