@@ -1,3 +1,17 @@
+# Текущий Исток — v36, 15 ноября 2026
+
+**Опубликован source f60282b400dcf319ea851c7d191b0ac6e363cafc, image `im-JBmrCaneOkN0ngRTCO1G95`.** Яндекс по умолчанию v11; v13 только для явного программного выбора, не включён всем. После logout владельца отзывается текущий токен; другие сессии/API-ключи и данные сохраняются. Фронт не менялся. [Дневной отчёт](docs/DAY_REPORT_2026-11-15.md), [действующая эксплуатация](docs/RELEASE_OPERATIONS_2026-11-15.md).
+
+1165 Python (1 skip), 98 Node, CI 43698916676 на 3.11/3.14, source C4 `61aac3a8`, writer-role binding `7ae55801`; независимых дополнительных проверок 68. Actual day final-r2 prepare/preflight/backup001/HTTP-restore/deploy/image 76/HTTP194GET+55assets завершились exit0. Сохранены 36 отчётов, 36 экспортов, 1 Qwen, 79 пространств / 82 SQLite / 88 файлов; pending 0, поиск 171/180, AI 2, import 1, новые поиски/модели 0, cash 0/spend limit0. Артефакты ROOT/.runtime/day-release-20261115/final-r2/.
+
+**Единственная квалифицированная цель отката — reader v35/source 55e/image im-I0**, ROOT/.runtime/day-release-20261115/security-r1/fallback.json. Откат не выполнялся. Сохранять текущие Volume/denylist/ledger; v33/v34 и старые night rollback запрещены после writer. На reader fallback новые logout снова cookie-only, но уже записанные отзывы читаются. Для CLI final-r2 требуется точный checkout f602 в SAMEBOUND SOURCE; поздний документационный commit не является новым runtime, config и intents не переписывать.
+
+Поиск: известный L9 в native archive replay0→9/9, семь старых успехов сохранены; новые A9 strict9, B9 mirror9/Gold0, N0pages/null. Новая ветка 0/3, fresh baseline не запускался; defaultpromotion отклонён. Conditional8/8/94 words отдельно от discovery. Новых primary21=3+18, Wiki6 отдельно; API239/250/11left, сайт 171/180/9left. First3, corpus/allocation/auth и исходные результаты неизменяемы; никаких повторных bind/run или новых поисков ради документации. Финальные pilot scripts/test взяты из b6c6, его doc tail явно исторический.
+
+Точные подтверждения и поздний QA находятся в приватных receipts текущей цели. Google-настройки сохранены; новая проверка индекса не выполнялась. Ниже — датированная история; старые SHA/команды не применять вместо текущего runbook.
+
+---
+
 # Совместимая reader-версия опубликована — 15.11.2026
 
 **Production v35, source 55e7c1e9267594afb3616f33fbd76220dc117026**, image `im-I0iQIXwgJrM4T7jhedTiAK`. Поиск по умолчанию остаётся v11; v13 только в коде для явного программного выбора, новая ветка не прошла условие массового включения. Фронт и SEO-байты сохранены. Reader теперь учитывает записи отзыва токенов, но сам logout пока остаётся прежним — writer ещё не опубликован.
