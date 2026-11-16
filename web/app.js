@@ -1771,11 +1771,19 @@ function openOwnRewrite(surface, match = null, report = null) {
   get('apply').addEventListener('click', async () => {
     const entry = panel.entry, preview = panel.verified;
     if (!rewritePanelCurrent(panel) || !preview || !get('review').checked || panel.applying || entry.applied || entry.restored || !rewriteCapability()) return;
+    const formRevision = panel.revision;
+    const fragmentField = get('fragment'), protectedField = get('protected'), reviewField = get('review');
+    const requestId = entry.request_id, requestBody = entry.body, requestIdentity = JSON.stringify(requestBody), job = entry.job;
     panel.applying = true; updateRewritePanel();
     try {
       const binding = entry.binding;
       const [hash, verified] = await Promise.all([rewriteDigest(binding?.field.value || ''), validateRewriteResult(entry)]);
-      if (!rewritePanelCurrent(panel) || !rewriteBindingCurrent(binding) || hash !== binding.draftHash
+      if (!rewritePanelCurrent(panel) || panel.revision !== formRevision || panel.verified !== preview
+          || panel.entry !== entry || entry.binding !== binding || entry.request_id !== requestId
+          || entry.body !== requestBody || JSON.stringify(entry.body) !== requestIdentity || entry.job !== job
+          || get('fragment') !== fragmentField || get('protected') !== protectedField || get('review') !== reviewField
+          || !fragmentField.isConnected || !protectedField.isConnected || !reviewField.isConnected
+          || entry.applied || entry.restored || !rewriteBindingCurrent(binding) || hash !== binding.draftHash
           || !get('review').checked || verified.output !== preview.output || !rewriteCapability()
           || get('fragment').value !== entry.body.text
           || JSON.stringify(rewriteLiterals(get('protected').value)) !== JSON.stringify(entry.body.protected_literals)

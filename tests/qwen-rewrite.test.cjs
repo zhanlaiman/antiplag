@@ -224,6 +224,35 @@ run('fragment/protected ABA while GET is pending cannot resurrect a preview', as
   assert.equal(await app.page.locator('#qwen-apply-home').isDisabled(), true);
 });
 
+run('fragment/protected form ABA during pending Apply hashes cannot write a hidden preview', async t => {
+  for (const name of ['fragment', 'protected']) {
+    const app = await fixture(t); await app.open(); await app.submit(); await app.preview();
+    await app.page.locator('#qwen-review-home').check();
+    await app.page.evaluate(() => {
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      window.applyDigestWaiters = [];
+      crypto.subtle.digest = (...args) => new Promise((resolve, reject) => {
+        window.applyDigestWaiters.push(() => digest(...args).then(resolve, reject));
+      });
+    });
+    await app.page.locator('#qwen-apply-home').click();
+    await app.page.waitForFunction(() => activeRewritePanel.applying && window.applyDigestWaiters.length === 3);
+    await app.page.evaluate(name => {
+      const field = document.getElementById(`qwen-${name}-home`), original = field.value;
+      field.value = 'Другой фрагмент'; field.value = original;
+    }, name);
+    assert.equal(await app.page.locator('#qwen-preview-home').textContent(), '');
+    assert.equal(await app.page.locator('#qwen-review-home').isChecked(), false);
+    await app.page.locator('#qwen-review-home').check();
+    await app.page.evaluate(() => window.applyDigestWaiters.splice(0).forEach(release => release()));
+    await app.page.waitForFunction(() => !activeRewritePanel.applying);
+    assert.equal(await app.page.locator('#home-text').inputValue(), fragment, name);
+    assert.equal(await app.page.locator('#qwen-apply-home').isDisabled(), true);
+    assert.equal(await app.page.evaluate(() => activeRewritePanel.verified === null && !activeRewritePanel.entry.applied), true);
+    assert.equal(app.posts().length, 1);
+  }
+});
+
 run('route, replacement field and tenant transitions reject delayed jobs', async t => {
   for (const kind of ['route', 'field', 'tenant']) {
     let release; const gate = new Promise(resolve => { release = resolve; });
