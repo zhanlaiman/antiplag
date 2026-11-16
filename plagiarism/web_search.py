@@ -907,6 +907,7 @@ def run(text, request_id=None, progress=None, searcher=None, fetcher=None, query
         "urls_outside_limit": outside_limit, "urls_rejected": rejected_urls, "errors": errors,
         "elapsed_seconds": round(time.monotonic() - started, 3), "score_basis": "exact_word_coverage",
         "default_fetch_limits": {"max_response_bytes": web_fetch.MAX_RESPONSE_BYTES,
+            "pdf_max_response_bytes": web_fetch.MAX_PDF_RESPONSE_BYTES,
             "max_text_characters": web_fetch.MAX_TEXT_CHARACTERS, "max_redirects": web_fetch.MAX_REDIRECTS,
             "max_robots_redirects": web_fetch.MAX_ROBOTS_REDIRECTS,
             "total_timeout_seconds": web_fetch.TOTAL_TIMEOUT, "pdf_max_pages": pdf_source.MAX_PAGES,

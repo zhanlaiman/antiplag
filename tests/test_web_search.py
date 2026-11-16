@@ -246,6 +246,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(report['web']['query_strategy'], web_search.DEFAULT_QUERY_STRATEGY)
         self.assertEqual(report['web']['matcher_version'], web_search.MATCHER_VERSION)
         self.assertEqual(report['web']['default_fetch_limits']['max_response_bytes'], 1024 * 1024)
+        self.assertEqual(report['web']['default_fetch_limits']['pdf_max_response_bytes'], 8 * 1024 * 1024)
         self.assertTrue(any(error['code'] == 'url_limit_reached' for error in report['web']['errors']))
 
     def test_unsupported_discovered_urls_are_counted_and_prevent_final_uniqueness(self):
