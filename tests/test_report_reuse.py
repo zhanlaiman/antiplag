@@ -48,6 +48,66 @@ def report(text=TEXT):
     return result
 
 
+class NativePublicationBarrier:
+    """Order this fixture's operation/Future/callback, without replacing native ACKs."""
+    def __init__(self, tenants):
+        self.records = {}; self.trace = []
+        original_schedule = Jobs._schedule
+        runtime = tenants.report_reuse
+        original_after_ack = runtime.after_ack
+
+        def schedule(jobs, job, operation, permit):
+            if jobs.coordinator is not tenants.coordinator:
+                return original_schedule(jobs, job, operation, permit)
+            assigned, done = Event(), Event()
+            record = {'assigned': assigned, 'done': done, 'tail': None}
+            self.records[job['id']] = record
+            def after_assignment(progress):
+                assert assigned.wait(5), 'Owned native Future was not assigned'
+                self.trace.append((job['id'], 'operation-after-future-assignment'))
+                return operation(progress)
+            try:
+                result = original_schedule(jobs, job, after_assignment, permit)
+                future = job['_future']; record['future'] = future
+                future.add_done_callback(lambda completed: done.set())
+                self.trace.append((job['id'], 'future-assigned'))
+                return result
+            finally:
+                assigned.set()
+
+        def after_ack(capture, jobs, raw_save):
+            record = self.records.get(capture[1]) if capture is not None else None
+            if record is None:
+                return original_after_ack(capture, jobs, raw_save)
+            future = jobs.items[capture[1]]['_future']
+            assert future is record['future'] and not future.done()
+            tail = Event(); record['tail'] = tail
+            result = original_after_ack(capture, jobs, raw_save)
+            self.trace.append((capture[1], 'original-after-ack-returned'))
+            def settled_tail(completed):
+                self.trace.append((capture[1], 'original-settled-callback-returned'))
+                tail.set()
+            future.add_done_callback(settled_tail)
+            return result
+
+        self.schedule_patch = patch.object(Jobs, '_schedule', schedule)
+        self.ack_patch = patch.object(runtime, 'after_ack', after_ack)
+        self.schedule_patch.start(); self.ack_patch.start()
+
+    def wait(self, job_id, timeout=5):
+        record = self.records.get(job_id)
+        if record is None: return  # Native recovery/replay has no newly scheduled Future.
+        record['future'].result(timeout=timeout)
+        assert record['done'].wait(timeout), 'Original native completion callback did not return'
+        if record['tail'] is not None:
+            assert record['tail'].wait(timeout), 'Original receipt callback did not return'
+        self.trace.append((job_id, 'safe-to-read-job'))
+
+    def close(self):
+        for record in self.records.values(): record['assigned'].set()
+        self.ack_patch.stop(); self.schedule_patch.stop()
+
+
 class NativeReuseScenario:
     """Shared local HTTP/browser fixture; real handlers and persistence, synthetic runner."""
     def __init__(self, snapshot=None):
@@ -111,28 +171,24 @@ class NativeReuseScenario:
         self.service = create_server(self.root, self.origin, host='127.0.0.1', port=self.port,
             allow_http=True, integrated=True, registration_enabled=True, business_writes_enabled=True,
             persist=persist, runner=runner, pool_bootstrap=packet, pool_keys=keys, pool_grants=grants)
+        self.publication = NativePublicationBarrier(self.service.beta.tenants)
         self.thread = Thread(target=self.service.serve_forever, daemon=True); self.thread.start()
 
     def client(self): return NativeClient(self)
 
     def wait(self, client, job_id):
-        for _ in range(300):
-            status, data = client.request('/api/jobs/' + job_id)
-            if status == 200 and data['job']['status'] in {'complete', 'failed', 'cancelled'}:
-                return data['job']
-            time.sleep(.01)
-        raise AssertionError('Native job did not settle')
+        self.publication.wait(job_id)
+        status, data = client.request('/api/jobs/' + job_id)
+        assert status == 200 and data['job']['status'] in {'complete', 'failed', 'cancelled'}, 'Native job did not settle'
+        return data['job']
 
     def published(self, tenant, job_id):
+        self.publication.wait(job_id)
+        assert self.service.beta.tenants.report_reuse.wait_idle(3)
         path = self.root / 'tenants' / tenant / 'istok.sqlite3'
-        for _ in range(300):
-            with closing(sqlite3.connect(path)) as db:
-                if db.execute('SELECT 1 FROM records WHERE kind=? AND id=?',
-                              (reuse.RECEIPT_KIND, 'report-reuse-ack:' + job_id)).fetchone():
-                    assert self.service.beta.tenants.report_reuse.wait_idle(3)
-                    return
-            time.sleep(.01)
-        raise AssertionError('Receipt was not published')
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute('SELECT 1 FROM records WHERE kind=? AND id=?',
+                              (reuse.RECEIPT_KIND, 'report-reuse-ack:' + job_id)).fetchone(), 'Receipt was not published'
 
     def close(self):
         if self.closed: return
@@ -147,6 +203,7 @@ class NativeReuseScenario:
                 probe.settimeout(1); assert probe.connect_ex(('127.0.0.1', self.port)) != 0
             assert not self.network
         finally:
+            self.publication.close()
             self.dns_patch.stop(); self.socket_ex_patch.stop(); self.socket_patch.stop(); self.save_patch.stop(); self.environment.stop()
             self.temporary.cleanup()
 
@@ -191,6 +248,27 @@ class NativeReuseTests(unittest.TestCase):
     def setUp(self):
         self.scenario = NativeReuseScenario(); self.addCleanup(self.scenario.close)
         self.client = self.scenario.client(); self.tenant = self.client.bootstrap()
+
+    def test_native_fixture_observes_original_future_and_callback_before_job_GET(self):
+        observed = []
+        original_get = Jobs.get
+        def get(jobs, job_id, *args, **kwargs):
+            if jobs.coordinator is self.scenario.service.beta.tenants.coordinator:
+                observed.append(list(self.scenario.publication.trace))
+            return original_get(jobs, job_id, *args, **kwargs)
+        with patch.object(Jobs, 'get', get):
+            self.assertEqual(self.client.check()[0], 200)
+            self.assertEqual(self.scenario.wait(self.client, JOB)['status'], 'complete')
+        self.assertEqual(len(observed), 1)
+        stages = [stage for job_id, stage in observed[0] if job_id == JOB]
+        self.assertEqual(stages, ['future-assigned', 'operation-after-future-assignment',
+                                 'original-after-ack-returned', 'original-settled-callback-returned', 'safe-to-read-job'])
+        with self.scenario.service.beta.tenants.context(self.tenant) as tenant:
+            self.assertIs(self.scenario.publication.records[JOB]['future'], tenant.jobs.items[JOB]['_future'])
+        self.scenario.published(self.tenant, JOB)
+        print('NATIVE_PUBLICATION_ORDER ' + json.dumps({'stages_before_first_actual_job_GET': stages,
+              'actual_job_GET_calls': len(observed), 'engine_executions': len(self.scenario.calls),
+              'original_callback_registrations': stages.count('original-after-ack-returned'), 'publisher_idle': True}))
 
     def test_native_hit_open_new_check_exact_retry_and_complete_serializer(self):
         self.assertEqual(self.client.check()[0], 200)

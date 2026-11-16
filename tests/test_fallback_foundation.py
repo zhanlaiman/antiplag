@@ -26,8 +26,8 @@ from tests import test_integrated_pool_jobs as pool_native
 
 TEXT = ('Синтетическая лаборатория наблюдала за учебными образцами. '
         'Исследователи сверяли условные измерения и описывали придуманные результаты опыта.')
-JOB, OLD = '1' * 32, '2' * 32
-RECEIPT_KIND, RECEIPT_ID = 'report-reuse-receipt', 'report-reuse-ack:' + JOB
+JOB, OLD, PRIVACY_JOB = '1' * 32, '2' * 32, '9' * 32
+RECEIPT_KIND, RECEIPT_ID = 'report-reuse-receipt', 'report-reuse-ack:' + PRIVACY_JOB
 LIMIT = 256 * 1024
 
 
@@ -120,6 +120,12 @@ class FallbackFoundationTests(unittest.TestCase):
         try:
             with patch.object(native, 'HTTPConnection', side_effect=bounded_connection), patch.object(HTTPResponse, 'read', bounded_read):
                 case.setUp()
+                publisher = getattr(case.service.beta.tenants, 'report_reuse', None)
+                publication = None
+                if publisher is not None:
+                    from tests.test_report_reuse import NativePublicationBarrier
+                    publication = NativePublicationBarrier(case.service.beta.tenants)
+                    case.addCleanup(publication.close)
                 case.calls = []
                 self.assertTrue(all(key.startswith(('offline-', 'tvly-offline-')) for key in case.keys.values()))
                 for provider, key in case.keys.items(): private['synthetic-key-' + provider] = key
@@ -142,7 +148,9 @@ class FallbackFoundationTests(unittest.TestCase):
                     result['stats'].update(uniqueness_percent=None, uniqueness_upper_bound_percent=0)
                     return result
 
-                legacy = store.save('report', {**payload(TEXT), 'id': OLD, 'created_at': '2024-02-01T12:00:00+00:00'})
+                legacy = store.save('report', {**payload(TEXT), 'id': OLD, 'created_at': '2024-02-01T12:00:00+00:00',
+                    '_report_reuse': {'version': 1, 'text_hmac': report_marker,
+                                     'job_id': PRIVACY_JOB, 'request_fingerprint': '3' * 64}})
                 self.assertTrue(legacy['matches'])
                 store.review_match(OLD, legacy['matches'][0]['id'], 'confirmed', 'Синтетическая пометка')
                 old_public, _ = request(browser, '/api/reports/' + OLD, surface='legacy-before')
@@ -150,12 +158,12 @@ class FallbackFoundationTests(unittest.TestCase):
 
                 def runner(text, identifier, progress, **kwargs):
                     case.calls.append((identifier, 'synthetic'))
-                    return {**payload(text), '_report_reuse': {'version': 1, 'text_hmac': report_marker,
-                        'job_id': JOB, 'request_fingerprint': '3' * 64}}
+                    return payload(text)
                 case.service.beta.runner = runner
                 submitted, _ = request(browser, '/api/web-check-jobs',
                     {'request_id': JOB, 'text': TEXT, 'internet_consent': True}, surface='POST-web-job')
                 self.assertEqual(submitted['job']['id'], JOB)
+                if publication is not None: publication.wait(JOB, timeout=remaining())
                 while True:
                     status, value, _ = browser.request('/api/jobs/' + JOB)
                     self.assertEqual(status, 200); observe('poll-web-job', value)
@@ -169,12 +177,22 @@ class FallbackFoundationTests(unittest.TestCase):
                 with case.service.beta.tenants.context(tenant) as context:
                     context.jobs.items[JOB]['_future'].result(timeout=remaining())
                     saved = context.store.get('model-job', JOB)
+                    self.assertEqual(saved['status'], 'complete')
+                    if publisher is not None:
+                        self.assertTrue(publisher.wait_idle(remaining()))
+                        actual_report = context.store.get('report', new_id)
+                        actual_receipt = context.store.get(RECEIPT_KIND, 'report-reuse-ack:' + JOB)
+                        self.assertIsNotNone(actual_receipt)
+                        self.assertNotEqual(actual_report['_report_reuse']['text_hmac'], report_marker)
+                        private['producer-report-marker'] = actual_report['_report_reuse']['text_hmac']
+                        private['producer-receipt-marker'] = actual_receipt['signature']
+                        private['producer-receipt-id'] = actual_receipt['id']
                     context.store.save(RECEIPT_KIND, {'id': RECEIPT_ID, 'version': 1,
                         'namespace': 'istok-web-report-terminal-ack-v1', 'tenant': tenant,
-                        'job_id': JOB, 'request_fingerprint': saved['request_fingerprint'],
-                        'report_id': new_id, 'text_hmac': report_marker,
+                        'job_id': PRIVACY_JOB, 'request_fingerprint': '3' * 64,
+                        'report_id': OLD, 'text_hmac': report_marker,
                         'terminal_digest': '4' * 64, 'signature': receipt_marker})
-                    self.assertEqual(context.store.get('report', new_id)['_report_reuse']['text_hmac'], report_marker)
+                    self.assertEqual(context.store.get('report', OLD)['_report_reuse']['text_hmac'], report_marker)
                     self.assertIsNone(context.store.get('report', RECEIPT_ID))
                     self.assertIsNone(context.store.get('model-job', RECEIPT_ID))
                 revoked_token = case.service.accounts.access.ledger.create_session(user['id'])
@@ -222,8 +240,11 @@ class FallbackFoundationTests(unittest.TestCase):
                         read_all('restarted')
                         after = rowsets(clone); self.assertEqual(after, baseline)
                         with case.service.beta.tenants.context(tenant) as context:
-                            self.assertEqual(context.store.get('report', new_id)['_report_reuse']['text_hmac'], report_marker)
+                            self.assertEqual(context.store.get('report', OLD)['_report_reuse']['text_hmac'], report_marker)
                             self.assertEqual(context.store.get(RECEIPT_KIND, RECEIPT_ID)['signature'], receipt_marker)
+                            if publisher is not None:
+                                self.assertEqual(context.store.get('report', new_id), actual_report)
+                                self.assertEqual(context.store.get(RECEIPT_KIND, 'report-reuse-ack:' + JOB), actual_receipt)
                         for name, detail in sidecars.items():
                             if detail['kind'] == 'sidecar':
                                 self.assertEqual(sha256((clone / name).read_bytes()).hexdigest(), detail['sha256'])
