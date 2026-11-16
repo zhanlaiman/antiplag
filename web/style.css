@@ -3626,6 +3626,43 @@ body:not(.home-view) .button.secondary { background:#fff; border-color:#d8e3cf; 
 .data-api{padding:24px;margin-top:24px}.data-api summary{cursor:pointer;font-weight:500}.api-key-scopes{display:grid;gap:10px;border:1px solid #e2e6dc;border-radius:8px;margin:18px 0;padding:14px}.api-key-scopes label{display:flex;align-items:start;gap:10px;font-size:13px;line-height:1.6}.api-key-scopes input{width:auto;margin-top:4px}.api-secret-label{display:grid;gap:8px;margin:14px 0}.api-secret-label input{width:100%;min-width:0;box-sizing:border-box;padding:12px}.data-api p{line-height:1.7;overflow-wrap:anywhere}@media(max-width:650px){.data-api{padding:16px}.data-api .data-toolbar input{width:100%;box-sizing:border-box}}
 .ai-proofreader{margin-top:20px;padding-top:14px;border-top:1px solid #e2e6dc}.ai-proofreader .consent-row{display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:1.7;margin:14px 0}.ai-proofreader .consent-row input{width:auto;flex-shrink:0;margin-top:5px}.ai-proofreader .proofread-issue button{white-space:normal}
 
+.qwen-rewrite { margin:20px 0; padding:24px; border:1px solid #d7e1d1; border-radius:14px; background:#f0f5eb; color:var(--ink); }
+.qwen-rewrite-home { margin:64px auto; padding:38px; }
+.qwen-rewrite-intro { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(190px,1fr); gap:38px; align-items:center; }
+.qwen-eyebrow { margin:0 0 12px; color:var(--green); font-size:10px; letter-spacing:.13em; font-weight:650; }
+.qwen-rewrite h2 { margin:0 0 14px; max-width:600px; font-size:clamp(23px,2.6vw,34px); line-height:1.2; letter-spacing:-.8px; font-weight:550; }
+.qwen-rewrite-intro > div > p:not(.qwen-eyebrow) { max-width:610px; margin-bottom:0; font-size:13px; line-height:1.8; }
+.qwen-rewrite-invitation { border-left:1px solid #cfddc7; padding-left:28px; }
+.qwen-rewrite-invitation p { margin:0 0 16px; font-size:15px; line-height:1.6; }
+.qwen-rewrite-invitation strong { font-weight:600; }
+.qwen-capability { margin:20px 0 0; font-size:12px; line-height:1.7; color:#45603e; }
+.qwen-rewrite-editor { margin-top:24px; border-top:1px solid #cfddc7; padding-top:24px; }
+.qwen-rewrite [hidden] { display:none; }
+.qwen-editor-heading { display:flex; justify-content:space-between; gap:16px; align-items:baseline; margin-bottom:18px; }
+.qwen-rewrite h3 { margin:0; font-size:14px; font-weight:600; }
+.qwen-rewrite-form > label:not(.consent-row) { display:block; font-size:12px; font-weight:550; margin:16px 0 8px; }
+.qwen-rewrite textarea { display:block; width:100%; min-width:0; border:1px solid #768c6b; border-radius:8px; padding:14px; background:#fffefb; color:var(--ink); font:inherit; font-size:14px; line-height:1.7; resize:vertical; scroll-margin-top:180px; }
+.qwen-rewrite .subtle { color:#52644e; }
+.qwen-rewrite .consent-row { display:flex; gap:10px; align-items:flex-start; margin:18px 0; font-size:12px; line-height:1.7; }
+.qwen-rewrite .consent-row input { width:18px; height:18px; flex-shrink:0; margin-top:2px; accent-color:var(--green); }
+.qwen-rewrite .field-help { color:#52644e; font-size:12px; line-height:1.7; }
+.qwen-rewrite-status { min-height:1.7em; margin:18px 0; font-size:12px; line-height:1.7; color:var(--green-dark); }
+.qwen-rewrite-columns { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; margin:18px 0; }
+.qwen-rewrite-columns > div { min-width:0; padding:18px; border:1px solid #d7e1d1; border-radius:10px; background:#fffefb; }
+.qwen-rewrite-columns > div:last-child { border-color:#a8bda0; }
+.qwen-rewrite-copy { margin:14px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.85; }
+.qwen-rewrite :is(button,textarea,input):focus-visible { outline:2px solid var(--green); outline-offset:3px; }
+.qwen-rewrite .button:disabled { opacity:.55; cursor:not-allowed; }
+@media (max-width:720px) {
+  .qwen-rewrite { padding:20px; }
+  .qwen-rewrite-home { margin:40px auto; }
+  .qwen-rewrite-intro,.qwen-rewrite-columns { grid-template-columns:1fr; gap:20px; }
+  .qwen-rewrite-invitation { border-left:0; border-top:1px solid #cfddc7; padding:18px 0 0; }
+  .qwen-rewrite h2 { font-size:27px; }
+  .qwen-rewrite .action-row { flex-direction:column; align-items:stretch; }
+  .qwen-rewrite .button { width:100%; min-height:44px; white-space:normal; }
+}
+
 .batch-controls { display:grid; gap:16px; margin-bottom:24px; }
 .batch-controls p { margin:0; line-height:1.6; }
 .batch-actions { display:flex; flex-wrap:wrap; gap:16px; align-items:center; }

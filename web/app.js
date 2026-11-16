@@ -4,6 +4,12 @@ const DRAFT_KEY = 'istok.draft.v1';
 const MODEL_KEY = 'istok.model.v1';
 const MODAL_MODEL_KEY = 'istok.model.modal.v1';
 const MODEL_JOBS_KEY = 'istok.model-jobs.v1';
+const QWEN_REWRITE_JOBS_KEY = 'istok.qwen-rewrite-jobs.v1';
+const QWEN_REWRITE_VERSION = 'qwen-rewrite-own-v1';
+const rewriteDrafts = new WeakMap();
+const rewriteObservers = new Map();
+let rewriteSessionEpoch = 0;
+let activeRewritePanel = null;
 const MODEL_JOB_PATHS = ['/api/compare', '/api/candidate-judge', '/api/candidate-rewrite', '/api/judge', '/api/rewrite', '/api/evaluate', '/api/web-check', '/api/correction', '/api/library-check'];
 const RETRIEVAL_JOBS_KEY = 'istok.retrieval-jobs.v1';
 const CANDIDATE_JOBS_KEY = 'istok.candidate-jobs.v1';
@@ -270,6 +276,8 @@ function authError(error) {
 }
 
 function hydrateSessionStorage() {
+  rewriteSessionEpoch += 1;
+  activeRewritePanel = null;
   resetReportReuse();
   savedReportOpens.clear();
   storageScope = isBeta() ? `beta.${state.session.beta.id}` : isSaas() ? state.session.user ? `user.${encodeURIComponent(state.session.user.id)}` : 'guest' : 'local';
@@ -277,6 +285,7 @@ function hydrateSessionStorage() {
   try { state.homeText = storageGet(HOME_DRAFT_KEY) || ''; } catch { state.homeText = ''; }
   state.model = restoreModel();
   state.modelJobs = restoreModelJobs();
+  state.rewriteJobs = restoreRewriteJobs();
   state.batch = restoreBatch();
   state.retrievalJobs = restoreActiveJobs(RETRIEVAL_JOBS_KEY);
   state.candidateCheckJobs = restoreActiveJobs(CANDIDATE_JOBS_KEY);
@@ -301,6 +310,7 @@ function restoreDraft() {
 }
 
 function saveDraft(text) {
+  touchRewriteDraft(document.getElementById('check-text'));
   if (state.text !== text) document.querySelector('#direct-judgment')?.replaceChildren();
   state.text = text;
   try {
@@ -345,6 +355,29 @@ function saveModelJobs() {
   } catch {
     return false;
   }
+}
+
+function restoreRewriteJobs() {
+  try {
+    const saved = JSON.parse(storageGet(QWEN_REWRITE_JOBS_KEY) || '{}');
+    return Object.fromEntries(Object.entries(saved).filter(([id, entry]) =>
+      /^[a-f0-9]{32}$/.test(id) && entry?.request_id === id && entry.body?.request_id === id
+      && entry.body.mode === 'rewrite_own' && entry.body.version === QWEN_REWRITE_VERSION
+      && typeof entry.body.text === 'string' && Array.isArray(entry.body.protected_literals)
+    ).map(([id, entry]) => [id, { ...entry, restored: true, binding: null }]));
+  } catch { return {}; }
+}
+
+function saveRewriteJobs(scope) {
+  if (!rewriteScopeCurrent(scope)) return false;
+  try {
+    storageSet(QWEN_REWRITE_JOBS_KEY, JSON.stringify(Object.fromEntries(
+      Object.entries(state.rewriteJobs).map(([id, entry]) => [id, {
+        request_id: id, body: entry.body, surface: entry.surface,
+        status: entry.status, created_at: entry.created_at,
+      }]))));
+    return true;
+  } catch { return false; }
 }
 
 function restoreActiveJobs(storageKey) {
@@ -432,7 +465,7 @@ const state = {
   checkMode: null, checkModeChosen: false, internetConsent: false, internetConsentScope: null,
   homeText: '', homeConsent: false, homeConsentScope: null, batchConsent: false, batchConsentScope: null,
   view: 'check', viewRevision: 0, text: restoreDraft(), sources: [], status: null, model: restoreModel(), report: null,
-  modelProvider: 'ollama', modelJobs: restoreModelJobs(),
+  modelProvider: 'ollama', modelJobs: restoreModelJobs(), rewriteJobs: {},
   selectedMatch: null, rewrite: null, judgment: null, examples: [], run: null,
   retrievals: {}, retrievalJobs: restoreActiveJobs(RETRIEVAL_JOBS_KEY), candidateJudgments: {}, candidateRewrites: {},
   candidateErrors: {}, candidateLoaded: new Set(), candidateGenerations: {}, candidateLoadRequests: {},
@@ -689,6 +722,7 @@ async function refreshSession() {
   const session = await api('/api/session');
   if (!['local', 'saas'].includes(session.mode)) throw new Error('Сервер вернул неизвестный режим рабочего пространства.');
   if (previous && (previous.mode !== session.mode || previous.beta?.id !== session.beta?.id || (session.user && previous.user?.id !== session.user.id))) {
+    rewriteSessionEpoch += 1;
     if (privateAccess()) saveDraft(state.text);
     state.sessionTransition = true;
     location.reload();
@@ -696,12 +730,15 @@ async function refreshSession() {
   }
   const lostUser = Boolean(previous?.user && !session.user);
   if (lostUser) {
+    rewriteSessionEpoch += 1;
     saveDraft(state.text);
     state.sessionExpired = true;
   }
   if (refreshSearchConsent(session.web?.provider)) return;
+  if (state.session && state.session.csrf_token !== session.csrf_token) rewriteSessionEpoch += 1;
   state.session = session;
   updateAccountUI();
+  updateRewritePanel();
   if (lostUser) { renderView(); renderModelJobs(); }
 }
 
@@ -1288,6 +1325,7 @@ function renderHomeResult() {
         <div><h3>Ваш фрагмент</h3><blockquote>${escapeHTML(selected.excerpt)}</blockquote></div>
         <div><h3>${escapeHTML(selected.source_title)}</h3><blockquote>${escapeHTML(selected.source_excerpt)}</blockquote>${safeLink(selected.source_url, 'Открыть источник')}</div>
       </div>` : `<p>${hasWebSources(report) ? 'На прочитанных страницах дословных совпадений не обнаружено.' : 'Поиск не дал страниц, по которым можно проверить текст.'}</p>`}
+    ${qwenResultCTA('home')}
     ${webCoverageHTML(report)}
   </section>`;
   bindMatchSelection(area, id => {
@@ -1295,6 +1333,7 @@ function renderHomeResult() {
     renderHomeResult();
     showComparison('#home-fragments');
   });
+  bindOwnRewriteResult('home', selected, report);
   document.querySelector('#home-open-full-report').addEventListener('click', () => {
     if (!state.text && !savedReportOpens.has(report.id)) saveDraft(report.text);
     state.report = report;
@@ -1431,6 +1470,336 @@ function renderTextStatistics() {
       field.scrollIntoView?.({block:'center',behavior:'smooth'});
     });
   });
+}
+
+function rewriteCapability() {
+  const cap = state.session?.beta?.ai_correction?.rewrite;
+  return privateAccess() && cap?.enabled === true && cap.version === QWEN_REWRITE_VERSION
+    && cap.max_characters === 1000 && cap.max_output_characters === 1500;
+}
+
+function rewriteScope() {
+  return { storage: storageScope, tenant: state.session?.beta?.id, user: state.session?.user?.id,
+    csrf: state.session?.csrf_token, owner: state.session?.beta?.owner, epoch: rewriteSessionEpoch };
+}
+
+function rewriteScopeCurrent(scope) {
+  const current = rewriteScope();
+  return privateAccess() && scope && Object.keys(current).every(key => current[key] === scope[key]);
+}
+
+function touchRewriteDraft(field) {
+  const tracked = rewriteDrafts.get(field);
+  if (tracked) tracked.revision += 1;
+  const panel = activeRewritePanel;
+  if (panel?.formFields?.includes(field)) {
+    panel.revision += 1; panel.verified = null; panel.message = '';
+    const review = document.getElementById(`qwen-review-${panel.surface}`);
+    if (review) review.checked = false;
+    const preview = document.getElementById(`qwen-preview-${panel.surface}`);
+    if (preview) preview.innerHTML = '';
+  }
+  if (panel?.field === field || panel?.formFields?.includes(field)) updateRewritePanel();
+}
+
+function trackRewriteDraft(field) {
+  if (rewriteDrafts.has(field)) return;
+  const tracked = { revision: 0, reliable: false };
+  rewriteDrafts.set(field, tracked);
+  let owner = field, descriptor;
+  while (owner && !descriptor) {
+    descriptor = Object.getOwnPropertyDescriptor(owner, 'value');
+    owner = Object.getPrototypeOf(owner);
+  }
+  let value = field.value;
+  try {
+    Object.defineProperty(field, 'value', { configurable: true,
+      get() { return descriptor?.get ? descriptor.get.call(this) : value; },
+      set(next) {
+        if (descriptor?.set) descriptor.set.call(this, next); else value = String(next);
+        touchRewriteDraft(this);
+      } });
+    if (field.setRangeText) {
+      const setRangeText = field.setRangeText;
+      field.setRangeText = function (...args) { const result = setRangeText.apply(this, args); touchRewriteDraft(this); return result; };
+    }
+    tracked.reliable = true;
+  } catch { /* A field that cannot be observed supports preview only. */ }
+  field.addEventListener('input', () => touchRewriteDraft(field));
+}
+
+function rewriteUnicode(value) {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const low = value.charCodeAt(++i);
+      if (!(low >= 0xdc00 && low <= 0xdfff)) return false;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return false;
+  }
+  return true;
+}
+
+async function rewriteDigest(value) {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))),
+    byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function qwenRewriteHTML(surface) {
+  return `<section class="qwen-rewrite ${surface === 'home' ? 'landing-section qwen-rewrite-home' : ''}" aria-labelledby="qwen-title-${surface}">
+    <div class="qwen-rewrite-intro"><div><p class="qwen-eyebrow">РЕДАКТИРОВАНИЕ С QWEN</p>
+    <h2 id="qwen-title-${surface}">Переработайте свой фрагмент с Qwen</h2>
+    <p>Новая формулировка — под вашим контролем. Выберите собственный фрагмент, защитите важные имена и цитаты, сравните варианты.</p></div>
+    <div class="qwen-rewrite-invitation"><p>Сначала предложение.<br><strong>Потом ваше решение.</strong></p><button class="button secondary" id="qwen-open-${surface}" type="button" aria-expanded="false" aria-controls="qwen-editor-${surface}">Открыть редактор</button></div></div>
+    <p class="qwen-capability" id="qwen-capability-${surface}" role="status">${rewriteCapability() ? 'До 1000 знаков. Новый процент — только после отдельной проверки.' : 'Переработка сейчас недоступна. Сохранённые предложения можно открыть для чтения.'}</p>
+    <div class="qwen-rewrite-editor" id="qwen-editor-${surface}" hidden></div></section>`;
+}
+
+function qwenResultCTA(surface) {
+  return `<div class="action-row"><button class="button secondary small" id="qwen-result-${surface}" type="button">Улучшить уникальность</button><span class="field-help">Переработка собственного фрагмента · без обещания нового процента</span></div>`;
+}
+
+function bindOwnRewriteResult(surface, match, report) {
+  document.getElementById(`qwen-result-${surface}`)?.addEventListener('click', () => {
+    openOwnRewrite(surface, match, report);
+  });
+}
+
+function rewritePanelCurrent(panel) {
+  return panel && panel === activeRewritePanel && panel.view === state.viewRevision
+    && panel.field.isConnected && rewriteScopeCurrent(panel.scope);
+}
+
+function rewriteBinding(panel, text) {
+  const field = panel.field, draft = field.value, tracked = rewriteDrafts.get(field);
+  if (!tracked?.reliable || (panel.surface === 'home' ? state.homeText : state.text) !== draft) return null;
+  let start = -1;
+  if (panel.preferred?.revision === tracked.revision
+      && draft.slice(panel.preferred.start, panel.preferred.end) === text) start = panel.preferred.start;
+  else if (text && draft.indexOf(text) === draft.lastIndexOf(text)) start = draft.indexOf(text);
+  if (start < 0) return null;
+  return { field, draft, revision: tracked.revision, start, end: start + text.length,
+    view: panel.view, scope: panel.scope, surface: panel.surface };
+}
+
+function rewriteBindingCurrent(binding) {
+  return binding && binding.field.isConnected && binding.view === state.viewRevision
+    && !documentReading(binding.field.id)
+    && rewriteScopeCurrent(binding.scope) && rewriteDrafts.get(binding.field)?.revision === binding.revision
+    && binding.field.value === binding.draft
+    && (binding.surface === 'home' ? state.homeText : state.text) === binding.draft;
+}
+
+function pendingRewrite() {
+  return Object.values(state.rewriteJobs).find(entry =>
+    ['submitting', 'delivery_unknown', 'missing', ...ACTIVE_JOB_STATUSES].includes(entry.status));
+}
+
+function rewriteLiterals(value) { return value.split(/\r?\n/).filter(literal => literal.length); }
+
+function updateRewritePanel() {
+  const panel = activeRewritePanel;
+  if (!rewritePanelCurrent(panel)) return;
+  const get = name => document.getElementById(`qwen-${name}-${panel.surface}`);
+  const entry = panel.entry;
+  const formMatches = entry && get('fragment').value === entry.body.text
+    && JSON.stringify(rewriteLiterals(get('protected').value)) === JSON.stringify(entry.body.protected_literals);
+  get('count').textContent = `${chars(get('fragment').value).length} / 1000 знаков`;
+  get('submit').disabled = !rewriteCapability() || panel.busy || Boolean(pendingRewrite());
+  get('apply').disabled = !rewriteCapability() || panel.applying || !panel.verified || !get('review').checked
+    || entry?.applied || entry?.restored || !rewriteBindingCurrent(entry?.binding)
+    || !formMatches;
+  get('recover').hidden = !pendingRewrite() && !entry;
+  get('recover').disabled = panel.busy;
+  get('status').textContent = panel.message || (panel.busy ? 'Ожидаем сохранённое предложение Qwen. Автоматической повторной отправки нет.'
+    : entry?.applied ? 'Фрагмент применён к черновику. Сохранённый отчёт не изменён. Для нового процента запустите проверку отдельно.'
+    : panel.verified ? (rewriteBindingCurrent(entry?.binding) && !entry.restored && formMatches ? 'Сравните варианты, проверьте смысл, факты и ссылки.'
+      : 'Предложение доступно для чтения. Черновик изменён, фрагмент неоднозначен или запись восстановлена; применение отключено.')
+    : rewriteCapability() ? 'Общие лимиты с грамматикой: 2 запуска на пространство в день, 3 на сайт в день, 10 в месяц. Неудачный запуск тоже расходует попытку.'
+      : 'Новые запуски сейчас недоступны. Открытие и чтение сохранённого задания не запускают модель.');
+}
+
+async function validateRewriteResult(entry) {
+  const record = entry.job?.result?.correction, result = record?.result;
+  const [textHash, protectedHash] = await Promise.all([
+    rewriteDigest(entry.body.text), rewriteDigest(JSON.stringify(entry.body.protected_literals))]);
+  if (!record || entry.job.result.correction_removed || record.text !== entry.body.text
+      || result?.mode !== 'rewrite_own' || result.version !== QWEN_REWRITE_VERSION
+      || result.text_sha256 !== textHash || result.protected_literals_sha256 !== protectedHash
+      || result.offset_encoding !== 'utf-16' || result.requires_review !== true
+      || typeof result.rewritten_text !== 'string' || !result.rewritten_text.trim()
+      || !rewriteUnicode(result.rewritten_text) || result.rewritten_text.includes('\0')
+      || chars(result.rewritten_text).length > 1500) throw new Error('Метаданные предложения не подтверждены. Применение отключено.');
+  for (const literal of entry.body.protected_literals) {
+    if (entry.body.text.split(literal).length !== result.rewritten_text.split(literal).length)
+      throw new Error('Защищённый фрагмент изменён. Применение отключено.');
+  }
+  return { original: record.text, output: result.rewritten_text };
+}
+
+async function showRewriteEntry(panel, entry) {
+  if (!rewritePanelCurrent(panel) || panel.entry !== entry || entry.status !== 'complete'
+      || panel.entryRevision !== panel.revision) return;
+  const revision = panel.revision;
+  try {
+    const verified = await validateRewriteResult(entry);
+    if (!rewritePanelCurrent(panel) || panel.entry !== entry || panel.revision !== revision) return;
+    panel.verified = verified;
+    document.getElementById(`qwen-preview-${panel.surface}`).innerHTML = `<div class="qwen-rewrite-columns"><div><h3>Ваш фрагмент</h3><p class="qwen-rewrite-copy">${escapeHTML(verified.original)}</p></div><div><h3>Предложение Qwen</h3><p class="qwen-rewrite-copy">${escapeHTML(verified.output)}</p></div></div>`;
+  } catch (error) {
+    if (rewritePanelCurrent(panel) && panel.revision === revision) { panel.verified = null; panel.message = error.message; }
+  }
+  updateRewritePanel();
+}
+
+async function observeRewriteEntry(entry, scope) {
+  if (rewriteObservers.has(entry.request_id)) return rewriteObservers.get(entry.request_id);
+  const observing = (async () => {
+    for (let attempt = 0; attempt < 240 && rewriteScopeCurrent(scope); attempt += 1) {
+      try {
+        const { job } = await api(`/api/correction-jobs/${entry.request_id}`);
+        if (!rewriteScopeCurrent(scope)) return;
+        if (job?.id !== entry.request_id || ![...ACTIVE_JOB_STATUSES, 'complete', 'failed', 'cancelled'].includes(job.status))
+          throw new Error('Идентификатор или состояние задания не подтверждены.');
+        entry.job = job; entry.status = job.status;
+        saveRewriteJobs(scope);
+        updateRewritePanel();
+        if (!ACTIVE_JOB_STATUSES.includes(job.status)) return;
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      } catch (error) {
+        if (!rewriteScopeCurrent(scope)) return;
+        entry.status = 'missing';
+        saveRewriteJobs(scope);
+        throw new Error('Исход доставки пока неизвестен. Восстановите это задание по прежнему ID; новая отправка отключена.');
+      }
+    }
+  })();
+  rewriteObservers.set(entry.request_id, observing);
+  try { await observing; } finally { rewriteObservers.delete(entry.request_id); }
+}
+
+async function startOwnRewrite(panel) {
+  if (!rewritePanelCurrent(panel) || panel.busy) return;
+  panel.message = ''; panel.verified = null;
+  const get = name => document.getElementById(`qwen-${name}-${panel.surface}`);
+  try {
+    if (!rewriteCapability()) throw new Error('Переработка сейчас недоступна.');
+    if (pendingRewrite()) throw new Error('Сначала восстановите исход уже отправленного задания. Новая отправка отключена.');
+    const text = get('fragment').value;
+    const literals = rewriteLiterals(get('protected').value);
+    if (!text.trim() || text.includes('\0') || chars(text).length > 1000 || !rewriteUnicode(text)) throw new Error('Выберите собственный фрагмент от 1 до 1000 знаков.');
+    if (literals.length > 20 || new Set(literals).size !== literals.length || literals.some(value =>
+      !value.trim() || chars(value).length > 100 || !rewriteUnicode(value) || !text.includes(value))) throw new Error('До 20 разных защищённых фраз, каждая до 100 знаков и точно из вашего фрагмента.');
+    if (!get('consent').checked) throw new Error('Подтвердите обработку собственного фрагмента Qwen в Modal.');
+    if (documentReading(panel.field.id)) throw new Error('Дождитесь извлечения текста документа.');
+    panel.busy = true; updateRewritePanel();
+    const revision = panel.revision, binding = rewriteBinding(panel, text);
+    const draftHash = binding ? await rewriteDigest(binding.draft) : null;
+    if (!rewritePanelCurrent(panel) || panel.revision !== revision || !rewriteCapability()
+        || !get('consent').checked || (binding && !rewriteBindingCurrent(binding))) return;
+    const request_id = crypto.randomUUID().replaceAll('-', '');
+    const entry = { request_id, surface: panel.surface, status: 'submitting', binding,
+      created_at: new Date().toISOString(), body: { request_id, mode: 'rewrite_own', version: QWEN_REWRITE_VERSION,
+        text, protected_literals: literals, ai_consent: true } };
+    if (binding) binding.draftHash = draftHash;
+    state.rewriteJobs[request_id] = entry; panel.entry = entry; panel.entryRevision = revision;
+    if (!saveRewriteJobs(panel.scope)) { delete state.rewriteJobs[request_id]; throw new Error('Задание не сохранено в браузере. Запрос не отправлен.'); }
+    try {
+      const { job } = await api('/api/correction-jobs', entry.body);
+      if (!rewriteScopeCurrent(panel.scope)) return;
+      if (job?.id !== request_id) throw new Error('Сервер не подтвердил идентификатор задания.');
+      entry.job = job; entry.status = job.status;
+    } catch (error) {
+      if (!rewriteScopeCurrent(panel.scope)) return;
+      entry.status = error.status >= 400 && error.status < 500 ? 'rejected' : 'delivery_unknown';
+      saveRewriteJobs(panel.scope);
+      if (entry.status === 'rejected') throw error;
+      // An uncertain POST is recovered only by GET of this same durable ID.
+    }
+    saveRewriteJobs(panel.scope);
+    await observeRewriteEntry(entry, panel.scope);
+    if (rewritePanelCurrent(panel)) {
+      if (entry.status !== 'complete') panel.message = entry.job?.error || 'Задание ещё не завершено. Новая отправка отключена до выяснения исхода.';
+      await showRewriteEntry(panel, entry);
+    }
+  } catch (error) { if (rewritePanelCurrent(panel)) panel.message = error.message; }
+  finally { panel.busy = false; updateRewritePanel(); }
+}
+
+function openOwnRewrite(surface, match = null, report = null) {
+  const field = document.getElementById(surface === 'home' ? 'home-text' : 'check-text');
+  const area = document.getElementById(`qwen-editor-${surface}`);
+  if (!field || !area || !privateAccess()) return;
+  trackRewriteDraft(field);
+  const tracked = rewriteDrafts.get(field);
+  let start = field.selectionStart || 0, end = field.selectionEnd || 0;
+  if (match && report?.text === field.value && Number.isInteger(match.start) && Number.isInteger(match.end)
+      && match.start >= 0 && match.end <= field.value.length && field.value.slice(match.start, match.end) === match.excerpt) {
+    start = match.start; end = match.end;
+  }
+  if (end <= start && chars(field.value).length <= 1000) { start = 0; end = field.value.length; }
+  const fragment = end > start ? field.value.slice(start, end) : '';
+  const panel = { surface, field, scope: rewriteScope(), view: state.viewRevision, revision: 0,
+    preferred: { start, end, revision: tracked.revision }, verified: null, message: '', busy: false };
+  activeRewritePanel = panel;
+  area.hidden = false;
+  document.getElementById(`qwen-open-${surface}`).setAttribute('aria-expanded', 'true');
+  area.innerHTML = `<div class="qwen-rewrite-form"><div class="qwen-editor-heading"><h3>Ваш собственный фрагмент</h3><button class="text-button" type="button" id="qwen-close-${surface}">Закрыть</button></div>
+    <label for="qwen-fragment-${surface}">Фрагмент для переработки</label><textarea id="qwen-fragment-${surface}" rows="5" aria-describedby="qwen-count-${surface}"></textarea><p class="field-help" id="qwen-count-${surface}"></p>
+    <label for="qwen-protected-${surface}">Сохранить дословно <span class="subtle">· необязательно</span></label><textarea id="qwen-protected-${surface}" rows="2" placeholder="Имена и цитаты — по одной фразе на строку"></textarea>
+    <p class="field-help">Числа, адреса, цитаты и ссылки должны сохраняться. Проверьте смысл и факты самостоятельно. Если фрагмент повторяется в черновике, выделите нужное место перед открытием редактора.</p>
+    <label class="consent-row"><input type="checkbox" id="qwen-consent-${surface}">Разрешаю обработать мой собственный фрагмент моделью Qwen в Modal и сохранить предложение. Не отправляю конфиденциальный текст.</label>
+    <div class="action-row"><button class="button" id="qwen-submit-${surface}" type="button">Переработать с Qwen</button><button class="text-button" id="qwen-recover-${surface}" type="button" hidden>Открыть прежнее задание</button></div>
+    <p class="qwen-rewrite-status" id="qwen-status-${surface}" role="status"></p><div id="qwen-preview-${surface}"></div>
+    <label class="consent-row"><input type="checkbox" id="qwen-review-${surface}">Проверил смысл, факты и ссылки.</label><button class="button secondary" id="qwen-apply-${surface}" type="button" disabled>Применить к черновику</button><p class="field-help">Сохранённый отчёт не меняется. Новый процент — только после отдельной проверки.</p></div>`;
+  const get = name => document.getElementById(`qwen-${name}-${surface}`);
+  get('fragment').value = fragment;
+  panel.formFields = [get('fragment'), get('protected')];
+  panel.formFields.forEach(trackRewriteDraft);
+  get('review').addEventListener('change', updateRewritePanel);
+  get('submit').addEventListener('click', () => startOwnRewrite(panel));
+  get('close').addEventListener('click', () => { area.hidden = true; activeRewritePanel = null; document.getElementById(`qwen-open-${surface}`).setAttribute('aria-expanded', 'false'); document.getElementById(`qwen-open-${surface}`).focus(); });
+  get('recover').addEventListener('click', async () => {
+    if (!rewritePanelCurrent(panel) || panel.busy) return;
+    const entry = pendingRewrite() || panel.entry;
+    if (!entry) return;
+    panel.entry = entry; panel.entryRevision = panel.revision; panel.busy = true; panel.message = '';
+    get('review').checked = false; updateRewritePanel();
+    try { await observeRewriteEntry(entry, panel.scope); await showRewriteEntry(panel, entry); }
+    catch (error) { if (rewritePanelCurrent(panel)) panel.message = error.message; }
+    finally { panel.busy = false; updateRewritePanel(); }
+  });
+  get('apply').addEventListener('click', async () => {
+    const entry = panel.entry, preview = panel.verified;
+    if (!rewritePanelCurrent(panel) || !preview || !get('review').checked || panel.applying || entry.applied || entry.restored || !rewriteCapability()) return;
+    panel.applying = true; updateRewritePanel();
+    try {
+      const binding = entry.binding;
+      const [hash, verified] = await Promise.all([rewriteDigest(binding?.field.value || ''), validateRewriteResult(entry)]);
+      if (!rewritePanelCurrent(panel) || !rewriteBindingCurrent(binding) || hash !== binding.draftHash
+          || !get('review').checked || verified.output !== preview.output || !rewriteCapability()
+          || get('fragment').value !== entry.body.text
+          || JSON.stringify(rewriteLiterals(get('protected').value)) !== JSON.stringify(entry.body.protected_literals)
+          || binding.field.value.slice(binding.start, binding.end) !== entry.body.text) throw new Error('Черновик или предложение изменились. Применение отключено.');
+      entry.applied = true;
+      binding.field.value = binding.draft.slice(0, binding.start) + verified.output + binding.draft.slice(binding.end);
+      binding.field.dispatchEvent(new Event('input', { bubbles: true }));
+      binding.field.focus(); binding.field.setSelectionRange?.(binding.start, binding.start + verified.output.length);
+    } catch (error) { if (rewritePanelCurrent(panel)) panel.message = error.message; }
+    finally { panel.applying = false; updateRewritePanel(); }
+  });
+  const previous = Object.values(state.rewriteJobs).filter(entry => entry.surface === surface).at(-1);
+  if (previous) {
+    panel.entry = previous; panel.entryRevision = panel.revision;
+    if (previous.job) showRewriteEntry(panel, previous);
+    else get('recover').click(); // GET only; restored entries never receive an Apply binding.
+  }
+  updateRewritePanel(); get('fragment').focus({ preventScroll: true });
+  get('fragment').scrollIntoView({ block: 'center' });
+}
+
+function bindOwnRewrite(surface, field) {
+  trackRewriteDraft(field);
+  document.getElementById(`qwen-open-${surface}`)?.addEventListener('click', () => openOwnRewrite(surface));
 }
 
 function proofreaderHTML(surface) {
@@ -1740,6 +2109,8 @@ function renderHome() {
       </section>
       <div id="home-report-result" class="home-report-result" hidden></div>
 
+      ${qwenRewriteHTML('home')}
+
       <section class="landing-features landing-section" id="home-features">
         <div class="landing-section-heading"><div><p class="landing-label">БОЛЬШЕ, ЧЕМ ПРОЦЕНТ</p><h2>Всё, чтобы разобраться<br>в каждом совпадении.</h2></div><p>Проверка с понятным результатом<br>и возможностью вернуться к нему.</p></div>
         <div class="landing-feature-grid">
@@ -1767,6 +2138,7 @@ function renderHome() {
   field.value = state.homeText;
   bindProofreader('home', field);
   bindReportReuse('home', field);
+  bindOwnRewrite('home', field);
   document.querySelector('#home-consent').checked = searchConsentGranted(state.homeConsent, 'home');
   document.querySelector('#home-consent').disabled = Boolean(automaticSearchIssue());
   document.querySelector('#home-consent').dataset.searchConsentScope = searchConsentScope();
@@ -2103,6 +2475,7 @@ function renderCheck() {
           ${ownerWithoutTextLimit() ? '<p class="field-help">Один запрос — до 2 МБ. Интернет-поиск выбирает до 6 фраз из всего текста; больший объём не увеличивает число запросов и не гарантирует полный охват.</p>' : ''}
           <details class="card text-statistics"><summary>SEO-анализ: статистика и повторы</summary><div id="text-statistics-content"></div></details>
           ${proofreaderHTML('check')}
+          ${qwenRewriteHTML('check')}
           <div class="internet-options" id="internet-options" hidden><p class="field-help"><a href="/privacy.html">Хранение текстов и доступ к отчётам</a></p>
             ${reportReuseHTML('check')}
             <label><input id="internet-consent" type="checkbox"> <span id="internet-consent-label">${escapeHTML(searchConsentLabel('check'))}</span></label>
@@ -2137,6 +2510,7 @@ function renderCheck() {
   textarea.value = state.text;
   bindProofreader('check', textarea);
   bindReportReuse('check', textarea);
+  bindOwnRewrite('check', textarea);
   textarea.addEventListener('input', () => {
     saveDraft(textarea.value);
     invalidateReportReuse('check');
@@ -2455,7 +2829,7 @@ function renderReport() {
         webReport ? 'Это результат ограниченного поиска. Недоступные страницы, пересказы и переводы могут остаться незамеченными.' : isBeta() ? 'Результат учитывает только вашу библиотеку. Пересказы могут остаться незамеченными; для поиска страниц выберите режим «Интернет».' : 'Глубокие пересказы могут остаться незамеченными. Для сравнения с конкретным источником используйте Qwen.',
         '⌕'
       )}
-    <div id="comparison-area" tabindex="-1">${selected ? comparisonHTML(selected) : ''}</div>
+    <div id="comparison-area" tabindex="-1">${selected ? comparisonHTML(selected) : qwenResultCTA('check')}</div>
     <section class="retrieval-section" id="retrieval-area"></section>`;
   const selectMatch = id => {
     state.selectedMatch = id;
@@ -3126,6 +3500,7 @@ function comparisonHTML(match) {
         </div>
       </div>
       <div class="action-row">
+        <button class="button small secondary" id="qwen-result-check" type="button">Улучшить уникальность</button>
         <button class="button small secondary" id="quote-button" type="button">Оформить цитату</button>
         <button class="button small secondary" id="paraphrase-button" type="button" ${isBeta() ? 'hidden' : ''} ${available ? '' : 'disabled'}>Предложить пересказ</button>
         <button class="text-button" id="judge-button" type="button" ${isBeta() ? 'hidden' : ''} ${available ? '' : 'disabled'}>Оценить с Qwen ↗</button>
@@ -3144,6 +3519,7 @@ function rewriteHTML() {
   return `<div class="rewrite-box"><strong>Предложение правки</strong><p class="field-help">Проверьте смысл, числа и ссылку перед применением.</p><textarea id="rewrite-text" aria-label="Предложенная правка"></textarea><div class="action-row"><button class="button small" id="apply-rewrite" type="button">Применить в редакторе</button><button class="text-button" id="discard-rewrite" type="button">Отменить</button></div></div>`;
 }
 function bindComparison(match) {
+  bindOwnRewriteResult('check', match, state.report);
   if (!match) return;
   const reportId = state.report.id;
   const draftKey = `${reportId}:${match.id}`;
@@ -3876,6 +4252,7 @@ async function restoreLinkedReport(surface, id, revision) {
 }
 
 function renderView() {
+  activeRewritePanel = null;
   window.IstokMotion?.teardown();
   state.viewRevision += 1;
   if (!state.sessionReady) {
@@ -3936,6 +4313,7 @@ document.querySelector('#refresh-model').addEventListener('click', event => busy
 }));
 window.addEventListener('hashchange', renderView);
 document.querySelector('#logout-button').addEventListener('click', event => busy(event.currentTarget, 'Выходим', async () => {
+  rewriteSessionEpoch += 1;
   saveDraft(state.text);
   saveReviewDrafts();
   await api(isBeta() ? '/api/owner/logout' : '/api/auth/logout', {});
