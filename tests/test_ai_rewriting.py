@@ -72,6 +72,18 @@ class AIRewritingTests(unittest.TestCase):
         self.assertEqual(len(tokens(value)), 1)
         self.assertEqual(rewrite.parse_response(text, response(value), ['Иванов'])['rewritten_text'], text)
 
+    def test_multiline_citations_and_typographic_single_quotes_freeze_complete_content(self):
+        for literal in ('[REF\n2020]', '(REF\r\n2020)', '‘REF TEXT’'):
+            with self.subTest(literal=literal):
+                text = 'Источник ' + literal + '. Обычный текст.'
+                value = masked(text)
+                self.assertNotIn('REF', value)
+                self.assertEqual(len(tokens(value)), 1)
+                changed = value.replace('Обычный текст.', 'Новая формулировка.')
+                self.assertEqual(rewrite.parse_response(text, response(changed))['rewritten_text'],
+                                 text.replace('Обычный текст.', 'Новая формулировка.'))
+                self.refuse('new_literal', text, response(changed + ' ' + literal.replace('REF', 'OTHER')))
+
     def test_invalid_absent_duplicate_and_overlapping_explicit_phrases(self):
         cases = [('abc', None), ('abc', 'a'), ('abc', ['missing']), ('abc', ['']),
                  ('abc', ['a', 'a']), ('abc', ['\ud800']), ('a' * 101, ['a' * 101]),
