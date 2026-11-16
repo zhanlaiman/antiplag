@@ -904,8 +904,10 @@ class ReusePhysicalAccountingTests(unittest.TestCase):
     def test_native_real_pipeline_lookup_open_replay_zero_and_explicit_new_id_six_more(self):
         from tests.test_integrated_pool_jobs import IntegratedPoolJobTests, TEXT as pipeline_text
         case = IntegratedPoolJobTests(); case.setUpClass(); case.setUp()
+        publication = NativePublicationBarrier(case.service.beta.tenants)
         try:
-            client, tenant = case.client(); case.submit(client, JOB); job = case.finish(client, JOB)
+            client, tenant = case.client(); case.submit(client, JOB)
+            publication.wait(JOB); job = case.finish(client, JOB)
             self.assertEqual(job['status'], 'complete')
             runtime = case.service.beta.tenants.report_reuse
             for _ in range(300):
@@ -918,7 +920,8 @@ class ReusePhysicalAccountingTests(unittest.TestCase):
             self.assertEqual(client.request('/api/reports/reuse', {'text': pipeline_text})[0], 200)
             self.assertEqual(client.request('/api/reports/' + match['report_id'])[0], 200)
             case.submit(client, JOB); self.assertEqual(len(case.events), before)
-            case.submit(client, 'e' * 32); self.assertEqual(case.finish(client, 'e' * 32)['status'], 'complete')
+            case.submit(client, 'e' * 32); publication.wait('e' * 32)
+            self.assertEqual(case.finish(client, 'e' * 32)['status'], 'complete')
             self.assertEqual(sum(path == 'search.json' for path, _ in case.events), 12)
             with closing(sqlite3.connect(case.root / 'search-budget.sqlite3')) as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM calls').fetchone()[0], 12)
@@ -936,7 +939,8 @@ class ReusePhysicalAccountingTests(unittest.TestCase):
             self.assertEqual(client.request('/api/reports/' + match['report_id'])[0], 403)
             self.assertEqual(len(case.events), before)
         finally:
-            case.tearDown(); case.doCleanups()
+            try: case.tearDown()
+            finally: publication.close(); case.doCleanups()
 
 
 if __name__ == '__main__': unittest.main()
