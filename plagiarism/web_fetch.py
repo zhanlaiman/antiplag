@@ -19,6 +19,7 @@ import zlib
 
 USER_AGENT = "IstokSourceChecker/0.1"
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_PDF_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_TEXT_CHARACTERS = 200_000
 MAX_REDIRECTS = 3
 MAX_ROBOTS_REDIRECTS = 5
@@ -297,9 +298,9 @@ class Fetcher:
             transport.settimeout(remaining)
         return remaining
 
-    def _read_body(self, connection, response, deadline):
+    def _read_body(self, connection, response, deadline, max_bytes=MAX_RESPONSE_BYTES):
         length = response.getheader("Content-Length")
-        if length and (not length.isdigit() or int(length) > MAX_RESPONSE_BYTES):
+        if length and (not length.isdigit() or int(length) > max_bytes):
             raise FetchError("Страница превышает допустимый размер.", "response_too_large")
         encoding = (response.getheader("Content-Encoding") or "identity").strip().lower()
         # Some servers call an uncompressed response "none"; byte limits still apply.
@@ -311,18 +312,18 @@ class Fetcher:
         read = getattr(response, "read1", response.read)
         while True:
             self._timeout(connection, response, deadline)
-            block = read(min(65536, MAX_RESPONSE_BYTES - wire + 1))
+            block = read(min(65536, max_bytes - wire + 1))
             if not block:
                 break
             wire += len(block)
-            if wire > MAX_RESPONSE_BYTES:
+            if wire > max_bytes:
                 raise FetchError("Страница превышает допустимый размер.", "response_too_large")
             try:
-                piece = inflater.decompress(block, MAX_RESPONSE_BYTES - len(output) + 1) if inflater else block
+                piece = inflater.decompress(block, max_bytes - len(output) + 1) if inflater else block
             except zlib.error as error:
                 raise FetchError("Некорректно сжатая страница.", "invalid_encoding") from error
             output.extend(piece)
-            if len(output) > MAX_RESPONSE_BYTES:
+            if len(output) > max_bytes:
                 raise FetchError("Распакованная страница превышает допустимый размер.", "response_too_large")
         if inflater and (not inflater.eof or inflater.unused_data):
             raise FetchError("Некорректно сжатая страница.", "invalid_encoding")
@@ -367,7 +368,9 @@ class Fetcher:
             content_type = (headers["Content-Type"] or "").split(";", 1)[0].strip().lower()
             if content_type not in ({"text/html", "text/plain", "application/pdf"} if allow_pdf else {"text/html", "text/plain"}):
                 raise FetchError("Поддерживаются HTML, обычный текст и текстовые PDF.", "unsupported_content_type")
-            body, wire = self._read_body(connection, response, deadline)
+            # Only an allowed PDF response gets the larger byte allowance.
+            max_bytes = MAX_PDF_RESPONSE_BYTES if allow_pdf and content_type == "application/pdf" else MAX_RESPONSE_BYTES
+            body, wire = self._read_body(connection, response, deadline, max_bytes=max_bytes)
             return response.status, headers, body, wire
         except FetchError:
             raise
