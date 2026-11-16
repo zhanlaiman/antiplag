@@ -28,8 +28,9 @@ from plagiarism.search_tavily import TavilySearch
 from plagiarism.search_provider_policy import request_fields as automatic_request_fields, contract as automatic_contract, CONSENT_VERSION
 from plagiarism.tenants import TenantRegistry
 from plagiarism.client_api import APIKeys,require_scope
-from plagiarism.correction_jobs import CorrectionQuota,ModalCorrector,internal_id,correction_id
-from plagiarism.ai_proofreading import request_payload
+from plagiarism.correction_jobs import (CorrectionQuota,ModalCorrector,internal_id,correction_id,
+    correction_request,validate_rewrite_capability,rewrite_capability_json)
+from plagiarism import ai_rewriting
 from plagiarism.jobs import Jobs
 from plagiarism.site_import import fetch_site,public_page_url,ExcludingFetcher
 from plagiarism.text_policy import owner_target_text
@@ -116,7 +117,9 @@ class BetaRuntime:
         self.correction_jobs=Jobs()
         self.tenants.auxiliary_jobs.append(self.correction_jobs)
         deployment=os.environ.get('ISTOK_CORRECTOR_DEPLOYMENT','')
-        self.corrector=corrector or (ModalCorrector(deployment,os.environ.get('ISTOK_CORRECTOR_MODEL_DIGEST','')) if deployment else None)
+        model_digest=os.environ.get('ISTOK_CORRECTOR_MODEL_DIGEST','')
+        capability=rewrite_capability_json(os.environ.get('ISTOK_CORRECTOR_REWRITE_CAPABILITY',''),model_digest)
+        self.corrector=corrector or (ModalCorrector(deployment,model_digest,capability) if deployment else None)
         self.runner=runner or self.run_web
         self.persist()
 
@@ -143,25 +146,51 @@ class BetaRuntime:
         self.persist()
         return fetch_site(url,limit)
 
+    def correction_status(self,guest):
+        capability=validate_rewrite_capability(getattr(self.corrector,'rewrite_capability',None),getattr(self.corrector,'model_digest',None))
+        rewrite={'enabled':bool(capability and callable(getattr(self.corrector,'rewrite_fragment',None))),
+                 'version':ai_rewriting.VERSION,'max_characters':1000,'max_output_characters':1500}
+        return {'enabled':bool(self.corrector),**self.correction_quota.remaining(guest),'rewrite':rewrite}
+
     def submit_correction(self,guest,body,store):
-        if not self.corrector:raise access.AccessError('Qwen пока недоступна. Словарь и правила работают отдельно.','correction_unavailable',503)
         if body.get('ai_consent') is not True:
             raise access.AccessError('Нужно согласие на обработку фрагмента нейросетью в Modal.','correction_consent_required',400)
-        text=body.get('text');request_payload(text)
+        text=body.get('text');mode=body.get('mode','grammar')
+        fields,fingerprint=correction_request(text,mode=mode,version=body.get('version'),protected_literals=body.get('protected_literals',[]))
+        if mode==ai_rewriting.MODE and set(body)-{'request_id','mode','version','text','protected_literals','ai_consent'}:
+            raise ValueError('Неизвестные поля запроса переработки.')
         identifier=body.get('request_id');remote_id=internal_id(guest,identifier)
         saas.ensure_job_identifier(store,remote_id)
         jobs=self.correction_jobs
+        job_body={**fields,'request_id':identifier,'ai_consent':True}
+        def available():
+            if not self.corrector:raise access.AccessError('Qwen пока недоступна.','correction_unavailable',503)
+            if mode==ai_rewriting.MODE and not self.correction_status(guest)['rewrite']['enabled']:
+                raise access.AccessError('Переработка Qwen пока недоступна.','correction_rewrite_unavailable',503)
         def operation(progress):
             if getattr(self,'dashboard',None):
                 from cloud.dashboard import guard_account
                 guard_account(self,guest)
-            result=self.corrector(text,store,remote_id,progress)
+            available()
+            result=(self.corrector.rewrite_fragment(text,fields['protected_literals'],store,remote_id,progress)
+                    if mode==ai_rewriting.MODE else self.corrector(text,store,remote_id,progress))
             record=store.save('correction',{'id':correction_id(remote_id),'request_id':identifier,'text':text,'result':result})
             return {'correction':record}
         with jobs.lock:
-            self.correction_quota.admit(guest,identifier,text)
+            self.correction_quota.check_existing(guest,identifier,fingerprint)
+            identity=jobs.items.get(remote_id) or store.get('model-job',remote_id) or store.get('model-request','model-request:'+remote_id)
+            if identity:
+                expected=sha256(json.dumps({'path':'/api/correction','body':job_body},ensure_ascii=False,
+                    sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+                if identity.get('request_fingerprint')!=expected:
+                    raise access.AccessError('ID уже использован для другого запроса.','request_conflict',409)
+                # Native Jobs returns/recoveries precede reservation/scheduling.
+                # No operation is supplied for a replay, even when disabled.
+                return self.public_correction_job(jobs.submit_model(remote_id,'/api/correction',job_body,None,store),identifier,store)
+            available()
+            self.correction_quota.admit(guest,identifier,text,mode=mode,version=body.get('version'),protected_literals=body.get('protected_literals',[]))
             try:
-                job=jobs.submit_model(remote_id,'/api/correction',{'text':text,'request_id':identifier,'ai_consent':True},operation,store)
+                job=jobs.submit_model(remote_id,'/api/correction',job_body,operation,store)
             except Exception:
                 if not store.get('model-request','model-request:'+remote_id) and remote_id not in jobs.items:
                     self.correction_quota.release_unqueued(guest,identifier)
@@ -711,9 +740,9 @@ class BetaHandler(server.Handler):
                 'max_characters':None if self.owner else MAX_CHARACTERS,'max_request_bytes':server.MAX_BODY,
                 **beta.remaining(self.guest,owner=bool(self.owner)),'owner':bool(self.owner),'persistent':True,'daily_checks':None if self.owner else DAILY_CHECKS,'monthly_search_queries':MONTHLY_SEARCHES,
                 **({'report_reuse':{'enabled':True,'version':1}} if beta.tenants.report_reuse else {}),
-                'ai_correction':{'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}}}
+                'ai_correction':beta.correction_status(self.guest)}}
         if method=='GET' and path=='/api/correction-quota':
-            return {'enabled':bool(beta.corrector),**beta.correction_quota.remaining(self.guest)}
+            return beta.correction_status(self.guest)
         if method=='POST' and path=='/api/correction-jobs':
             return beta.submit_correction(self.guest,body,self.tenant.store)
         if method=='POST' and path=='/api/import-site':

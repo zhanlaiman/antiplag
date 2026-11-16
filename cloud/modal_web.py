@@ -1,8 +1,10 @@
 """Explicit CPU-only permanent deployment. Imports never deploy or call models."""
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 
 ROOT=Path(__file__).resolve().parents[1]
 REMOTE_ROOT='/opt/istok'
@@ -13,6 +15,42 @@ WEB_FILES=('favicon.ico','favicon.png','favicon.svg','apple-touch-icon.png','saf
            'robots.txt','sitemap.xml','privacy.html','api-guide.html','dictionary-license.txt','rtf-license.txt','owner.html','owner.js','index.html','style.css','app.js','motion.css','motion.js','fonts/InterVariable.woff2',
            'fonts/Inter-LICENSE.txt','fonts/PTSerif-Regular.ttf','fonts/PTSerif-OFL.txt',
            'dashboard.html','dashboard.js','dashboard.css','pool.html','pool.js','pool.css','account.html','account.js','account.css')
+
+
+def _private_json(path):
+    path=Path(path)
+    if not path.is_absolute() or any(p.is_symlink() for p in (path,*path.parents)):
+        raise ValueError('Ordinary private metadata required')
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_mode&0o077 or info.st_uid!=os.geteuid()
+                or not 0<info.st_size<=65536):
+            raise ValueError('Private metadata size or ownership differs')
+        raw=stream.read(65537)
+    if not 0<len(raw)<=65536:raise ValueError('Private metadata size differs')
+    def pairs(items):
+        result={}
+        for key,value in items:
+            if key in result:raise ValueError('Duplicate metadata key')
+            result[key]=value
+        return result
+    def constant(value):raise ValueError('Non-finite metadata')
+    return raw,json.loads(raw,object_pairs_hook=pairs,parse_constant=constant)
+
+
+def load_rewrite_capability(root,model_digest):
+    """CPU-only validation of a saved qualification; invalid means disabled."""
+    from plagiarism.correction_jobs import qualified_rewrite_capability
+    try:
+        _,descriptor=_private_json(Path(root)/'.runtime/corrector-rewrite-deployment.json')
+        ref=descriptor.get('qualification_ref') if isinstance(descriptor,dict) else None
+        if not isinstance(ref,dict) or set(ref)!={'path','sha256'}:return None
+        raw,qualification=_private_json(ref['path'])
+        if sha256(raw).hexdigest()!=ref['sha256']:return None
+        return qualified_rewrite_capability(descriptor,qualification,model_digest)
+    except (OSError,ValueError,TypeError,UnicodeError,RecursionError):
+        return None
 
 
 def source_manifest(root=ROOT):
@@ -140,6 +178,9 @@ def build_app(directory,key,*,google_key=None,default_search_provider='tavily',
                 raise ValueError('Corrector must match the reviewed private deployment')
             secret_values.update(ISTOK_CORRECTOR_DEPLOYMENT=corrector['deployment_id'],
                                  ISTOK_CORRECTOR_MODEL_DIGEST=corrector['model_digest'])
+            rewrite=load_rewrite_capability(ROOT,corrector['model_digest'])
+            if rewrite is not None:
+                secret_values['ISTOK_CORRECTOR_REWRITE_CAPABILITY']=json.dumps(rewrite,sort_keys=True,allow_nan=False)
     owner_path=ROOT/'.runtime/owner-credentials.json'
     if owner_path.exists():
         owner=json.loads(owner_path.read_text())
