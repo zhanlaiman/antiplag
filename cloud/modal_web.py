@@ -93,20 +93,10 @@ def build_app(directory,key,*,google_key=None,default_search_provider='tavily',
             raise ValueError('Bounded bootstrap packet required')
         from cloud.pool_runtime import validate_bootstrap
         validate_bootstrap(pool_bootstrap,{'serpapi':google_key,'tavily':key,'serper':serper_key,'exa':exa_key})
-    import modal
     if default_search_provider not in ('tavily','serpapi','serpapi-yandex') or default_search_provider in ('serpapi','serpapi-yandex') and not google_key:
         raise ValueError('A reviewed search provider and its credential are required')
-    volume=modal.Volume.from_name(VOLUME_NAME,create_if_missing=True,version=2)
-    image=(modal.Image.debian_slim(python_version='3.14')
-        .apt_install('hunspell','antiword')
-        .pip_install('pypdf==7.0.1','pypdfium2==5.14.0')
-        .add_local_dir(directory,REMOTE_ROOT,copy=True)
-        .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':default_search_provider,'ISTOK_MODEL_PROVIDER':'local'}))
-    secret_values={'ISTOK_TAVILY_API_KEY':key}
-    if type(automatic_search) is not bool:
-        raise ValueError('Automatic search must be explicitly reviewed')
     if automatic_search:
-        from plagiarism.search_pool import checked_grant
+        from plagiarism.search_pool import validate_grant_policy
         credentials={'serpapi':google_key,'serper':serper_key,'exa':exa_key,'tavily':key}
         for provider,value in credentials.items():
             if not isinstance(value,str) or not value or len(value)>1024 or any(not 33<=ord(c)<=126 for c in value):
@@ -114,10 +104,20 @@ def build_app(directory,key,*,google_key=None,default_search_provider='tavily',
         if not isinstance(pool_grants,dict) or set(pool_grants)!={'serper','exa'}:
             raise ValueError('Both bounded free grants are required')
         for provider in ('serper','exa'):
-            checked_grant(pool_grants[provider],provider,credentials[provider])
+            validate_grant_policy(pool_grants[provider],provider,credentials[provider])
+        encoded_grants=json.dumps(pool_grants,sort_keys=True,allow_nan=False)
+    import modal
+    volume=modal.Volume.from_name(VOLUME_NAME,create_if_missing=True,version=2)
+    image=(modal.Image.debian_slim(python_version='3.14')
+        .apt_install('hunspell','antiword')
+        .pip_install('pypdf==7.0.1','pypdfium2==5.14.0')
+        .add_local_dir(directory,REMOTE_ROOT,copy=True)
+        .env({'PYTHONPATH':REMOTE_ROOT,'ISTOK_SEARCH_PROVIDER':default_search_provider,'ISTOK_MODEL_PROVIDER':'local'}))
+    secret_values={'ISTOK_TAVILY_API_KEY':key}
+    if automatic_search:
         secret_values.update(ISTOK_AUTOMATIC_SEARCH='1',ISTOK_SERPER_API_KEY=serper_key,
                              ISTOK_EXA_API_KEY=exa_key,
-                             ISTOK_SEARCH_POOL_GRANTS=json.dumps(pool_grants,sort_keys=True,allow_nan=False))
+                              ISTOK_SEARCH_POOL_GRANTS=encoded_grants)
     if integrated:
         secret_values.update(ISTOK_INTEGRATED_RELEASE='1',
             ISTOK_REGISTRATION_ENABLED='1' if registration_enabled else '0',

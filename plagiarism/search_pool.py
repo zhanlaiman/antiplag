@@ -18,9 +18,9 @@ def fingerprint(key):
     return sha256(key.encode('utf-8')).hexdigest()
 
 
-def checked_grant(value, provider, key, now=None):
-    now = time.time() if now is None else now
-    if not isinstance(value, dict):
+def validate_grant_policy(value, provider, key):
+    """Validate historical policy shape and binding without authorizing a search."""
+    if not isinstance(value, dict) or provider not in ('serper', 'exa') or not isinstance(key, str):
         raise WebSearchError('Бесплатный лимит сервиса не подтверждён.', 'free_quota_unconfirmed')
     expiry = value.get('expires_at')
     maximum = 0.004 if provider == 'exa' else 0
@@ -30,13 +30,25 @@ def checked_grant(value, provider, key, now=None):
             or type(value.get('max_unit_cost_usd')) not in (int, float)
             or value.get('max_unit_cost_usd') != maximum
             or type(value.get('cap')) is not int or not 1 <= value['cap'] <= 2500
-            or type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry <= now
+            or type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry <= 0
             or any(not isinstance(value.get(k), str) or not re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', value[k])
                    for k in ('grant_id', 'account_ref'))
             or not isinstance(value.get('proof_sha256'), str)
             or not re.fullmatch(r'[a-f0-9]{64}', value['proof_sha256'])):
         raise WebSearchError('Бесплатный лимит сервиса не подтверждён.', 'free_quota_unconfirmed')
+    try:
+        json.dumps(value, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        raise WebSearchError('Бесплатный лимит сервиса не подтверждён.', 'free_quota_unconfirmed') from None
     return dict(value)
+
+
+def checked_grant(value, provider, key, now=None):
+    policy = validate_grant_policy(value, provider, key)
+    now = time.time() if now is None else now
+    if policy['expires_at'] <= now:
+        raise WebSearchError('Бесплатный лимит сервиса не подтверждён.', 'free_quota_unconfirmed')
+    return policy
 
 
 class PoolBudget(SearchBudget):
