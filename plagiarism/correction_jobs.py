@@ -207,6 +207,7 @@ class ModalCorrector:
         if (not isinstance(result, dict) or result.get('mode') != ai_rewriting.MODE or result.get('version') != ai_rewriting.VERSION
                 or result.get('text_sha256') != sha256(text.encode()).hexdigest()
                 or result.get('protected_literals_sha256') != protected_hash or result.get('requires_review') is not True
+                or result.get('offset_encoding') != 'utf-16'
                 or not _rewrite_text(result.get('rewritten_text'))):
             raise ValueError('Ответ Qwen не соответствует исходному фрагменту и версии переработки.')
         progress('Сохраняем переработку для проверки автором', 1, 1)

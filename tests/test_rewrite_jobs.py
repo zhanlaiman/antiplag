@@ -188,6 +188,7 @@ class RewriteClientTests(unittest.TestCase):
         variants = [{**original, 'deployment_id': LEGACY}, {**original, 'model_digest': '0' * 64}]
         for key, value in [('mode', 'grammar'), ('version', 'old'), ('text_sha256', '0' * 64),
                            ('protected_literals_sha256', '0' * 64), ('requires_review', 1),
+                           ('offset_encoding', 'utf-8'), ('offset_encoding', None),
                            ('rewritten_text', 'x' * 1501), ('rewritten_text', '\ud800'),
                            ('rewritten_text', ''), ('rewritten_text', '\x00')]:
             variants.append({**original, 'result': {**original['result'], key: value}})
@@ -347,6 +348,18 @@ class RewriteHTTPTests(unittest.TestCase):
         self.fx.stop(); self.fx.start()
         self.assertEqual(self.browser.request('/api/correction-jobs', self.body())[1]['job']['status'], 'failed')
         self.assertEqual(self.service.rewrite_fragment.spawn.call_count, 1)
+        self.assertEqual(self.browser.request('/api/correction-quota')[1]['personal_daily_remaining'], 1)
+
+    def test_wrong_encoding_fails_before_correction_save_and_replay_never_retries(self):
+        self.call.get.return_value['result']['offset_encoding'] = 'utf-8'
+        self.assertEqual(self.browser.request('/api/correction-jobs', self.body())[0], 200)
+        self.assertEqual(self.wait_job()['status'], 'failed')
+        guest = self.fx.guest(self.browser)
+        with self.fx.service.beta.tenants.context(guest) as tenant, tenant.store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM records WHERE kind='correction'").fetchone()[0], 0)
+        self.assertEqual(self.browser.request('/api/correction-jobs', self.body())[1]['job']['status'], 'failed')
+        self.assertEqual(self.service.rewrite_fragment.spawn.call_count, 1)
+        self.service.suggest.spawn.assert_not_called()
         self.assertEqual(self.browser.request('/api/correction-quota')[1]['personal_daily_remaining'], 1)
 
     def test_failure_saving_result_preserves_reservation_and_never_repeats_model(self):
