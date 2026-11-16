@@ -8,14 +8,16 @@ import time
 from urllib.request import Request, urlopen
 
 from plagiarism.ai_proofreading import request_payload, parse_response
+from plagiarism import ai_rewriting
 
 ROOT = Path(__file__).resolve().parents[1]
 REMOTE_ROOT = Path('/opt/istok')
 APP = 'istok-corrector'
+REWRITE_APP = 'istok-corrector-rewrite-v1'
 IMAGE = 'ollama/ollama:0.34.2@sha256:c715bebf769913db6c82d96f8a8dfee989c4bdfe19fa7d700e3d41ee0ceb5461'
 MODEL = 'qwen3.5:9b'
 DIGEST = '56671c2ab9385f9cfcb404638e32cd62d88e3501d44822208363c010179a3c90'
-FILES = ('cloud/modal_corrector.py', 'plagiarism/ai_proofreading.py')
+FILES = ('cloud/modal_corrector.py', 'plagiarism/ai_proofreading.py', 'plagiarism/ai_rewriting.py')
 app = None
 QwenCorrector = None
 
@@ -92,6 +94,14 @@ class _Core:
         return {'deployment_id': self._identity, 'model_digest': DIGEST,
                 'result': parse_response(text, response)}
 
+    def rewrite_fragment(self, text, protected_literals, expected_deployment_id):
+        if expected_deployment_id != self._identity:
+            raise RuntimeError('Corrector deployment mismatch')
+        payload = ai_rewriting.request_payload(text, protected_literals, MODEL)
+        response = loopback('/api/chat', payload, timeout=170)
+        return {'deployment_id': self._identity, 'model_digest': DIGEST,
+                'result': ai_rewriting.parse_response(text, response, protected_literals)}
+
     def _stop(self):
         process = getattr(self, '_server', None)
         if process is not None and process.poll() is None:
@@ -103,19 +113,23 @@ class _Core:
                 process.wait(timeout=5)
 
 
-def build_service(manifest):
+def build_service(manifest, app_name=APP):
+    if app_name not in (APP, REWRITE_APP):
+        raise ValueError('Unknown private corrector app')
     import modal
     global app, QwenCorrector
     image = modal.Image.from_registry(IMAGE, add_python='3.11').entrypoint([]).env({
         'PYTHONPATH': str(REMOTE_ROOT), 'ISTOK_CORRECTOR_UPLOADS': json.dumps(manifest),
         'ISTOK_CORRECTOR_BOOTSTRAP': '1',
+        'ISTOK_CORRECTOR_APP': app_name,
     })
     for entry in manifest:
         image = image.add_local_file(ROOT / entry['path'], str(REMOTE_ROOT / entry['path']), copy=True)
-    app = modal.App(APP, include_source=False)
+    app = modal.App(app_name, include_source=False)
     implementation = type('QwenCorrector', (_Core,), {
         '__module__': 'cloud.modal_corrector',
         '_start': modal.enter()(_Core._start), 'suggest': modal.method()(_Core.suggest),
+        'rewrite_fragment': modal.method()(_Core.rewrite_fragment),
         '_stop': modal.exit()(_Core._stop),
     })
     QwenCorrector = app.cls(image=image, gpu='L40S', cpu=4, memory=32768,
@@ -128,26 +142,28 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--deploy', action='store_true')
+    parser.add_argument('--app', choices=(APP, REWRITE_APP), default=APP)
     args = parser.parse_args()
     manifest = source_manifest()
-    config = {'app': APP, 'class_name': 'QwenCorrector', 'deployment_id': deployment_id(manifest),
+    config = {'app': args.app, 'class_name': 'QwenCorrector', 'deployment_id': deployment_id(manifest),
               'model_digest': DIGEST, 'files': manifest, 'gpu': 'L40S', 'persistent_weights': False,
               'max_containers': 1, 'startup_timeout': 360, 'timeout': 180, 'idle_seconds': 30,
               'public_endpoint': False}
     if args.deploy:
         import modal
-        application, service = build_service(manifest)
+        application, service = build_service(manifest, args.app)
         with modal.enable_output():
             application.deploy(environment_name='main')
         config['class_id'] = service.object_id
-        path = ROOT / '.runtime/corrector-deployment.json'
+        name = 'corrector-rewrite-deployment.json' if args.app == REWRITE_APP else 'corrector-deployment.json'
+        path = ROOT / '.runtime' / name
         path.write_text(json.dumps(config, indent=2) + '\n')
         path.chmod(0o600)
     print(json.dumps(config, indent=2))
 
 
 if os.environ.get('ISTOK_CORRECTOR_BOOTSTRAP') == '1':
-    build_service(json.loads(os.environ['ISTOK_CORRECTOR_UPLOADS']))
+    build_service(json.loads(os.environ['ISTOK_CORRECTOR_UPLOADS']), os.environ.get('ISTOK_CORRECTOR_APP', APP))
 
 if __name__ == '__main__':
     from cloud.modal_corrector import main as canonical_main
