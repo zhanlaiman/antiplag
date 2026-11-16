@@ -15,7 +15,7 @@
   <script src="/dashboard.js" defer></script>
 </head>
 <body>
-  <header><a class="brand" href="/">Исток<span>Администрирование</span></a><button id="logout" type="button" hidden>Выйти</button></header>
+  <header><a class="brand" href="/">Исток<span>Администрирование</span></a><nav class="quick-nav" aria-label="Разделы администрирования"><a href="/dashboard" aria-current="page">Пользователи</a><a href="/dashboard/pool">Пул поиска</a><a href="/">Открыть сайт</a></nav><button id="logout" type="button" hidden>Выйти</button></header>
   <main>
     <p id="notice" class="notice" role="status" aria-live="polite">Проверяем сессию…</p>
     <section id="login-panel" class="login-panel" hidden aria-labelledby="login-title">
@@ -28,12 +28,14 @@
       </form>
     </section>
     <section id="dashboard-panel" hidden aria-labelledby="accounts-title">
-      <div class="heading"><div><h1 id="accounts-title">Аккаунты и использование</h1><p id="updated" class="muted"></p></div><div class="actions"><a href="/dashboard/pool">Поисковые ключи</a><button id="refresh" type="button">Обновить</button></div></div>
-      <dl class="summary"><div><dt>Гостевые ID и аккаунты · всего</dt><dd id="total">—</dd></div><div><dt>Задания в общей очереди</dt><dd id="queue">—</dd></div><div><dt>Знаки сегодня · на странице</dt><dd id="characters">—</dd></div><div><dt>Ошибки сегодня · на странице</dt><dd id="errors">—</dd></div></dl>
+      <div class="heading"><div><h1 id="accounts-title">Пользователи и проверки</h1><p id="updated" class="muted"></p></div><button id="refresh" type="button">Обновить данные</button></div>
+      <dl class="summary"><div><dt>Зарегистрированные аккаунты</dt><dd id="registered-total">—</dd></div><div><dt>Гостевые пространства</dt><dd id="guest-total">—</dd></div><div><dt>Веб-проверки сегодня</dt><dd id="checks-today">—</dd></div><div><dt>ID с проверками сегодня</dt><dd id="checking-today">—</dd></div><div><dt>Очередь · занято / мест</dt><dd id="queue">—</dd></div><div><dt>ID в учёте · всего</dt><dd id="total">—</dd></div></dl>
       <p id="usage-summary" class="source-note"></p>
       <p id="sources" class="source-note"></p>
+      <p class="page-metrics">Только показанная страница: <strong id="characters">—</strong> знаков в отчётах сегодня · <strong id="errors">—</strong> ошибок сегодня.</p>
+      <p class="mobile-hint">Таблицу можно прокручивать вправо к статистике и действиям.</p>
       <div class="table-wrap" tabindex="0" aria-label="Таблица аккаунтов, прокрутка по горизонтали">
-        <table><caption>Веб-проверки — принятые поисковые задания. Отчёты — сохранённые результаты всех режимов. День считается по UTC.</caption><thead><tr><th scope="col">Аккаунт</th><th scope="col">Доступ</th><th scope="col">Веб-проверки<br>сегодня / всего</th><th scope="col">Отчёты<br>активные / всего</th><th scope="col">Знаки в отчётах<br>сегодня / всего</th><th scope="col">Последнее использование</th><th scope="col">Действие</th></tr></thead><tbody id="accounts"></tbody></table>
+        <table><caption>ID аккаунта — учётная запись после регистрации. ID пространства — история и доступ, именно к нему применяется блокировка. Веб-проверки — принятые задания, включая ещё не завершённые. Отчёты — сохранённые результаты всех режимов. День считается по UTC.</caption><thead><tr><th scope="col">Аккаунт и пространство</th><th scope="col">Доступ</th><th scope="col">Веб-проверки<br>сегодня / всего</th><th scope="col">Отчёты<br>активные / всего</th><th scope="col">Знаки в отчётах<br>сегодня / всего</th><th scope="col">Последнее использование</th><th scope="col">Действие</th></tr></thead><tbody id="accounts"></tbody></table>
       </div>
       <p id="empty" hidden>Аккаунтов пока нет. Гостевой аккаунт появится после первого действия на сайте.</p>
       <nav class="pagination" aria-label="Страницы аккаунтов"><button id="previous" type="button">Назад</button><span id="page-label"></span><button id="next" type="button">Далее</button></nav>

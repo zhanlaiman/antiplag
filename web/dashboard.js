@@ -29,7 +29,17 @@
       ['ID аккаунта', account.registered_account_id, 'registered-account-id'],
       ['ID пространства', account.id, 'canonical-guest-id']
     ]) {
-      if (value) parent.append(element('span', label, 'account-id-label'), element('p', value, `account-id ${className}`));
+      if (value) {
+        const line = element('div', undefined, 'id-value');
+        const copy = element('button', 'Копировать', 'copy-id');
+        copy.type = 'button'; copy.setAttribute('aria-label', `Скопировать ${label}`);
+        copy.addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(value); copy.textContent = 'Скопировано'; }
+          catch { notice('Не удалось скопировать ID. Выделите его и скопируйте вручную.', true); }
+        });
+        line.append(element('p', value, `account-id ${className}`), copy);
+        parent.append(element('span', label, 'account-id-label'), line);
+      }
     }
   }
   function renderAccounts(data) {
@@ -40,11 +50,8 @@
     const unavailable = data.accounts.length - available.length;
     if (unavailable) { $('characters').textContent += ' + нет данных'; $('errors').textContent += ' + нет данных'; }
     const summary = data.summary || {}, summaryNumber = value => Number.isInteger(value) && value >= 0 ? number(value) : 'Нет данных';
-    $('usage-summary').textContent = [
-      `Зарегистрированные: ${summaryNumber(summary.registered_total)}`, `Гостевые ID: ${summaryNumber(summary.guest_total)}`,
-      `Владельцы: ${summaryNumber(summary.owner_total)}`, `Проверки сегодня: ${summaryNumber(summary.checks_today)}`,
-      `Аккаунты с проверками сегодня: ${summaryNumber(summary.checking_accounts_today)}`
-    ].join(' · ');
+    for (const [id, field] of [['registered-total', 'registered_total'], ['guest-total', 'guest_total'], ['checks-today', 'checks_today'], ['checking-today', 'checking_accounts_today']]) $(id).textContent = summaryNumber(summary[field]);
+    $('usage-summary').textContent = `Весь сайт, независимо от страницы таблицы. Владельцы: ${summaryNumber(summary.owner_total)}. Веб-проверки — принятые задания; это не число найденных совпадений или запросов к поисковым провайдерам.`;
     const registration = data.registration.beta_connected || data.registration.ledger === 'connected' ? 'подключён' : 'не подключён';
     $('sources').textContent = `Учёт зарегистрированных пользователей: ${registration}. Оплата не подключена. Гостевой ID может относиться к браузеру; история включает тестовые ID. Это учёт ID и аккаунтов, а не уникальных людей или посещений.`;
     $('updated').textContent = `Обновлено ${new Date(data.as_of).toLocaleString('ru-RU')} · день UTC ${data.day_utc}`;
